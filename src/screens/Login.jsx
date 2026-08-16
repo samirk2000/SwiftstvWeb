@@ -65,7 +65,14 @@ export default function Login() {
     } else if (result.reason === 'account') {
       setStatus({ text: serverInfoLabel(result.status), kind: 'err' });
     } else {
-      setStatus({ text: t('login.failed'), kind: 'err' });
+      // Network / blocked (proxy WAF) — show an honest, diagnosable message.
+      // eslint-disable-next-line no-console
+      console.warn('[login] all servers failed', result.results);
+      const blocked = (result.results || []).filter((r) => r.httpStatus === 403).length;
+      const text = blocked && blocked === (result.results || []).length
+        ? t('login.blocked')
+        : t('login.failed');
+      setStatus({ text, kind: 'err' });
     }
   };
 

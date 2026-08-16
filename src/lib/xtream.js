@@ -134,7 +134,9 @@ export async function login(server) {
   let via = '';
   let resUrl = '';
   try {
-    const res = await corsFetch(url, { userAgent: 'IPTVSmartersPlayer' });
+    // server.via === 'proxy' forces the /proxy route (used by the failover
+    // ranking); otherwise corsFetch applies direct-first HTTPS strategy.
+    const res = await corsFetch(url, { userAgent: 'IPTVSmartersPlayer', forceProxy: server.via === 'proxy' });
     text = res.text;
     status = res.status;
     via = res.via;

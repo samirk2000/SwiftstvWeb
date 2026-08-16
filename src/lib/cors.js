@@ -101,9 +101,20 @@ async function tryDirect(urls, opts, fetchImpl) {
  * Fetch a URL, returning { ok, status, text, via }.
  *  - `via: 'direct'`  — served straight (HTTPS preferred, HTTP fallback).
  *  - `via: 'proxy'`   — routed through /proxy (edge IP; may be blocked by WAF).
+ *  - `opts.forceProxy` — skip direct entirely and always use /proxy. Useful
+ *    when direct mixed-content/CORS is unreliable (the primary path in the
+ *    deployed TV app); the `loginWithFailover` probe uses this to rank hosts.
  * Logs each attempt so login failures are diagnosable from the console.
  */
 export async function corsFetch(targetUrl, opts = {}, fetchImpl = fetch, signal) {
+  // Proxy-first path: the deployed TV app can't trust mixed-content/CORS from
+  // the browser, and panels block Cloudflare IPs with 403 — so a host is
+  // ranked by whether /proxy reaches it. Direct is only tried on demand.
+  if (opts.forceProxy) {
+    const p = await proxiedGet(targetUrl, opts, fetchImpl, signal);
+    return { ...p, via: 'proxy', forced: true };
+  }
+
   // HTTPS-first to dodge mixed-content; HTTP fallback covers http-only panels.
   const candidates = [];
   try {
