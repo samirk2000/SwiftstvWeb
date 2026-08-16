@@ -1,0 +1,16 @@
+# Learn more about wrangler.toml:
+# https://developers.cloudflare.com/workers/wrangler/configuration/
+# Use `npx wrangler pages deploy dist --project-name <name>` to deploy.
+
+name = "swiftstv-web"
+compatibility_date = "2024-11-01"
+
+# Cloudflare Pages Functions (server-side proxy) is the FUTURE path for
+# CORS-safe calls to the Xtream panels and the Exclusivos proxy, whose APIs do
+# not send CORS headers. The current MVP is fully static (`npm run build` ->
+# `dist/`) and hits those endpoints directly from the browser, so cross-origin
+# blocks may occur on some panels. See README "CORS notes".
+#
+# To enable a proxy function later, add `functions/proxy.js` and uncomment:
+#   [assets]
+#   directory = "dist"
