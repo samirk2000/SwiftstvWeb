@@ -213,7 +213,9 @@ function finalize(entry, attempt, total) {
     info: r.info,
     serverInfo: r.serverInfo,
     session: r.session,
-    workingBaseUrl: entry.baseUrl,
+    // Use the effective (possibly HTTPS) base that actually worked, not the
+    // original http alias — so streams aren't blocked as mixed-content.
+    workingBaseUrl: r.session?.baseUrl || entry.baseUrl,
     attempt,
     total,
   };

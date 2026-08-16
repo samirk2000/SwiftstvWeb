@@ -10,6 +10,19 @@
 import { getSession, saveSession, clearSession } from './session.js';
 import { corsFetch } from './cors.js';
 
+// Derive a clean `http(s)://host[:port]` base from a URL that actually
+// succeeded (so we persist HTTPS when the panel only accepted it over TLS).
+function effectiveBaseUrl(workedUrl) {
+  try {
+    const u = new URL(workedUrl || '');
+    if (u.protocol === 'http:' || u.protocol === 'https:') {
+      const port = u.port ? `:${u.port}` : '';
+      return `${u.protocol}//${u.hostname}${port}`;
+    }
+  } catch {}
+  return '';
+}
+
 export const SERVER_INFO = {
   INVALID: 'invalid',
   EXPIRED: 'expired',
@@ -56,11 +69,20 @@ function cacheSet(key, value) {
 export function detectHtmlLoginHint(text) {
   if (!text || typeof text !== 'string') return '';
   const lower = text.toLowerCase();
-  if (lower.indexOf('<html') < 0 && lower.indexOf('<h2') < 0) return '';
+  if (lower.indexOf('<html') < 0 && lower.indexOf('<h2') < 0 && lower.indexOf('<!doctype') < 0) return '';
   if (/invalid_credentials|username or password is invalid/.test(lower)) return SERVER_INFO.INVALID;
   if (/line has expired|>expired<|expired<\/h/.test(lower)) return SERVER_INFO.EXPIRED;
   if (/banned/.test(lower)) return SERVER_INFO.BANNED;
   if (/disabled/.test(lower)) return SERVER_INFO.DISABLED;
+  // False-positive guard: an infrastructure/WAF page (nginx 403/404/502/lb,
+  // "Forbidden", "Access Denied", captcha, Cloudflare "attention required") is
+  // NOT bad credentials. Report it as HTTP so the UI shows a network message.
+  if (
+    /403|404|502|503|504\b/.test(lower) ||
+    /forbidden|access.?denied|too many requests|attention required|just a moment|not found|gateway|cdn\b|captcha/.test(lower)
+  ) {
+    return SERVER_INFO.HTTP;
+  }
   return SERVER_INFO.INVALID; // Unknown HTML page == bad credentials.
 }
 
@@ -108,32 +130,55 @@ export async function login(server) {
   }
   const url = buildPlayerApiUrl(server.baseUrl, server.username, server.password);
   let text = '';
+  let status = 0;
+  let via = '';
+  let resUrl = '';
   try {
     const res = await corsFetch(url, { userAgent: 'IPTVSmartersPlayer' });
     text = res.text;
+    status = res.status;
+    via = res.via;
+    resUrl = res.url || url;
   } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn('[login] network error', server.baseUrl, String(err?.message || err));
     return { ok: false, status: SERVER_INFO.NETWORK, error: err };
+  }
+
+  // Non-2xx from the panel (403/404/502/…) is a server/WAF/network problem,
+  // NOT bad credentials — report it separately so the UI doesn't say
+  // "invalid username/password" when the panel is blocking us.
+  if (status && (status < 200 || status >= 300)) {
+    // eslint-disable-next-line no-console
+    console.warn('[login] non-2xx', server.baseUrl, status, 'via', via, '->', text.slice(0, 140));
+    return { ok: false, status: SERVER_INFO.HTTP, via, httpStatus: status, text };
   }
 
   const htmlHint = detectHtmlLoginHint(text);
   if (htmlHint) {
-    return { ok: false, status: htmlHint };
+    if (!isCredentialHint(htmlHint)) {
+      // eslint-disable-next-line no-console
+      console.warn('[login] server page (non-credential)', server.baseUrl, status, '=>', htmlHint, '->', text.slice(0, 140));
+    }
+    return { ok: false, status: htmlHint, via, httpStatus: status };
   }
 
   let parsed = null;
   try {
     parsed = JSON.parse(text);
   } catch {
-    return { ok: false, status: SERVER_INFO.PARSE };
+    // eslint-disable-next-line no-console
+    console.warn('[login] unparseable body', server.baseUrl, status, '->', text.slice(0, 140));
+    return { ok: false, status: SERVER_INFO.PARSE, via, httpStatus: status };
   }
 
   if (parsed === null || parsed === undefined || typeof parsed !== 'object') {
-    return { ok: false, status: SERVER_INFO.PARSE };
+    return { ok: false, status: SERVER_INFO.PARSE, via, httpStatus: status };
   }
 
   const info = parsed.user_info;
   if (!info) {
-    return { ok: false, status: SERVER_INFO.PARSE };
+    return { ok: false, status: SERVER_INFO.PARSE, via, httpStatus: status };
   }
 
   const auth = String(info.auth ?? '');
@@ -141,13 +186,30 @@ export async function login(server) {
   if (!isAuthOk) {
     const problem = accountProblem(info);
     if (problem) return { ok: false, ...problem };
-    return { ok: false, status: SERVER_INFO.INVALID, info };
+    return { ok: false, status: SERVER_INFO.INVALID, info, via, httpStatus: status };
   }
 
-  // Persist the working session (baseUrl, user, pass) so a relaunch restores it.
-  const session = { baseUrl: server.baseUrl, username: server.username, password: server.password };
+  // Persist the working session. Use the URL that actually succeeded (may be
+  // HTTPS vs the http alias) so subsequent stream URLs are not mixed-content.
+  const effBase = effectiveBaseUrl(resUrl) || server.baseUrl;
+  const session = { baseUrl: effBase, username: server.username, password: server.password };
   saveSession({ ...session, user_info: info });
-  return { ok: true, status: SERVER_INFO.INVALID, info, serverInfo: parsed.server_info, session };
+  return {
+    ok: true,
+    status: SERVER_INFO.INVALID,
+    info,
+    serverInfo: parsed.server_info,
+    session,
+    effectiveBaseUrl: effBase,
+    via,
+    httpStatus: status,
+  };
+}
+
+// True when an HTML login hint is a genuine credential verdict (vs an infra
+// page like "403 Forbidden" / nginx / captcha that is NOT about credentials).
+function isCredentialHint(hint) {
+  return hint === SERVER_INFO.INVALID || hint === SERVER_INFO.EXPIRED;
 }
 
 // Classify why a non-auth OK response means the account is unusable. Mirrors
@@ -244,6 +306,8 @@ async function apiCall(server, action, params = {}) {
     const res = await corsFetch(url, { userAgent: 'IPTVSmartersPlayer' });
     text = res.text;
   } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn('[api] network error', action, String(err?.message || err));
     return { error: SERVER_INFO.NETWORK };
   }
   const htmlHint = detectHtmlLoginHint(text);
@@ -252,6 +316,8 @@ async function apiCall(server, action, params = {}) {
   try {
     parsed = JSON.parse(text);
   } catch {
+    // eslint-disable-next-line no-console
+    console.warn('[api] unparseable body', action, '->', text.slice(0, 140));
     return { error: SERVER_INFO.PARSE };
   }
   cacheSet(key, parsed);
