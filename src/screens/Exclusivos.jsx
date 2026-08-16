@@ -1,12 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { t } from '../lib/i18n.js';
-import {
-  fetchCatalog,
-  parseM3u,
-  parseJsonList,
-  extractM3u8,
-} from '../lib/exclusivos.js';
+import { fetchCatalog, parseM3u, parseJsonList, extractM3u8 } from '../lib/exclusivos.js';
+import { corsFetch } from '../lib/cors.js';
 import { useFocusable } from '../components/Focusable.jsx';
 
 // Resolve a catalog entry (m3u/json/extract may need a body fetch + parse).
@@ -45,13 +41,9 @@ async function fetchFirst(urls) {
 }
 
 async function fetchText(url) {
-  try {
-    const res = await fetch(url, { headers: { Accept: '*/*' } });
-    if (!res.ok) return '';
-    return await res.text();
-  } catch {
-    return '';
-  }
+  const res = await corsFetch(url, { userAgent: 'SwiftstvExclusive/1.0' });
+  if (!res.ok) return '';
+  return res.text;
 }
 
 function ExclTile({ entry, onActivate }) {

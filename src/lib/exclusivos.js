@@ -7,6 +7,7 @@
 //    json (parse nested list), extract (regex-extract .m3u8 from HTML).
 //  - "Needs origin headers" is detected DYNAMICALLY against the published
 //    proxy_base_url / derived host / proxy_path — never hardcoded hosts.
+import { corsFetch } from './cors.js';
 
 export const REMOTE_CONFIG_URLS = [
   'https://raw.githubusercontent.com/samirk2000/swiftstv-exclusivos/main/exclusive_sources.json',
@@ -77,11 +78,9 @@ export function publishProxyConfig(cfg) {
 }
 
 async function fetchText(url) {
-  const res = await fetch(url, {
-    headers: { 'User-Agent': 'SwiftstvExclusive/1.0', Accept: '*/*', 'Cache-Control': 'no-cache' },
-  });
+  const res = await corsFetch(url, { userAgent: 'SwiftstvExclusive/1.0' });
   if (!res.ok) return '';
-  return res.text();
+  return res.text;
 }
 
 function parseJsonBody(text) {

@@ -4,6 +4,7 @@
 //  - Remote servers.json is merged ahead of the embedded fallback; if the
 //    remote is unreachable / empty / 404 we keep the embedded list.
 import { login } from './xtream.js';
+import { corsFetch, proxiedGet } from './cors.js';
 
 export const EMBEDDED_SERVERS = [
   'http://cvcplayer.us:8080',
@@ -49,10 +50,9 @@ function asHttpList(raw) {
 // Remote servers.json: { servers: [...], cvc_aliases: [...] } or a plain array.
 export async function fetchRemoteServers() {
   try {
-    const res = await fetch(REMOTE_SERVERS_URL, { headers: { Accept: 'application/json' } });
+    const res = await corsFetch(REMOTE_SERVERS_URL, { userAgent: 'IPTVSmartersPlayer' });
     if (!res.ok) return { servers: [], cvcAliases: [] };
-    const text = await res.text();
-    const parsed = JSON.parse(text);
+    const parsed = JSON.parse(res.text);
     if (Array.isArray(parsed)) {
       return { servers: dedupe(asHttpList(parsed)), cvcAliases: [] };
     }
@@ -86,10 +86,14 @@ async function probeFastest(hosts) {
       try {
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), DNS_PROBE_TIMEOUT);
-        await fetch(`${host}/player_api.php`, {
-          signal: controller.signal,
-          headers: { 'User-Agent': 'IPTVSmartersPlayer', 'Cache-Control': 'no-cache' },
-        });
+        await proxiedGet(`${host}/player_api.php`, {
+          userAgent: 'IPTVSmartersPlayer',
+        }, (u) =>
+          fetch(u, {
+            signal: controller.signal,
+            headers: { 'User-Agent': 'IPTVSmartersPlayer', 'Cache-Control': 'no-cache' },
+          })
+        );
         clearTimeout(timer);
       } catch {
         return { host, ms: Number.MAX_SAFE_INTEGER };

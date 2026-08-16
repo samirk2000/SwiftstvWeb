@@ -8,6 +8,7 @@
 // embedded, matching Xtream's {server}/live|movie|series/U/P/ID.ext schema.
 
 import { getSession, saveSession, clearSession } from './session.js';
+import { corsFetch } from './cors.js';
 
 export const SERVER_INFO = {
   INVALID: 'invalid',
@@ -108,10 +109,8 @@ export async function login(server) {
   const url = buildPlayerApiUrl(server.baseUrl, server.username, server.password);
   let text = '';
   try {
-    const res = await fetch(url, {
-      headers: { 'User-Agent': 'IPTVSmartersPlayer', Accept: '*/*' },
-    });
-    text = await res.text();
+    const res = await corsFetch(url, { userAgent: 'IPTVSmartersPlayer' });
+    text = res.text;
   } catch (err) {
     return { ok: false, status: SERVER_INFO.NETWORK, error: err };
   }
@@ -242,8 +241,8 @@ async function apiCall(server, action, params = {}) {
   const url = buildPlayerApiUrl(baseUrl, username, password, action, params);
   let text;
   try {
-    const res = await fetch(url, { headers: { 'User-Agent': 'IPTVSmartersPlayer', Accept: '*/*' } });
-    text = await res.text();
+    const res = await corsFetch(url, { userAgent: 'IPTVSmartersPlayer' });
+    text = res.text;
   } catch (err) {
     return { error: SERVER_INFO.NETWORK };
   }
