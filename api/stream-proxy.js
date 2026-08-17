@@ -74,16 +74,16 @@ export default async function handler(req, res) {
     const ct = upstream.headers.get('content-type') || 'application/octet-stream';
     const isPlaylist = /mpegurl|vnd\.apple/i.test(ct);
 
-    let body;
     const outHeaders = { 'Content-Type': ct, ...ALLOW_CORS };
     if (isPlaylist) {
       const resolved = upstream.url;
-      body = Buffer.from(await rewritePlaylist(await upstream.text(), resolved, selfBase));
+      const body = Buffer.from(await rewritePlaylist(await upstream.text(), resolved, selfBase));
+      res.writeHead(upstream.status, outHeaders);
+      res.end(body);
     } else {
       // Stream the binary (mp4 / TS) straight through instead of buffering it:
       // VOD files are hundreds of MB and would burst a serverless buffer/AWS
       // time limit. Range is relayed above, so <video> seeks map 1:1 to the CDN.
-      body = upstream.body;
       const len = upstream.headers.get('content-length');
       if (len) outHeaders['Content-Length'] = len;
       if (range) {
@@ -92,10 +92,12 @@ export default async function handler(req, res) {
         const ar = upstream.headers.get('accept-ranges');
         if (ar) outHeaders['Accept-Ranges'] = ar;
       }
+      res.writeHead(upstream.status, outHeaders);
+      // res.end() can't take a web ReadableStream, so pipe it via node stream.
+      const { Readable } = await import('node:stream');
+      Readable.fromWeb(upstream.body).pipe(res);
+      return;
     }
-
-    res.writeHead(upstream.status, outHeaders);
-    res.end(body);
   } catch (err) {
     res.writeHead(502, { 'Content-Type': 'application/json', ...ALLOW_CORS });
     res.end(JSON.stringify({ error: 'upstream', detail: String(err?.message || err) }));
