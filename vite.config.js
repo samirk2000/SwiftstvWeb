@@ -4,9 +4,33 @@ import react from '@vitejs/plugin-react';
 // Cloudflare Pages: build command `npm run build`, output dir `dist`.
 // Routing is client-side (react-router BrowserRouter); Pages supports SPA
 // fallback via the included `public/_redirects` + Pages Functions note below.
+// Rewrites every media/sub-playlist URI in an HLS playlist to `/proxy?target=`
+// so the browser stays same-origin (HTTPS in prod / localhost in dev) for the
+// whole stream. Mirrors `rewritePlaylist` in `functions/proxy.js`.
+function rewritePlaylist(text, resolvedUrl, origin) {
+  if (!text) return text;
+  const base = new URL(resolvedUrl);
+  return text
+    .split(/\r?\n/)
+    .map((line) => {
+      const tl = line.trim();
+      if (!tl || tl.startsWith('#') || tl.startsWith('http')) return line;
+      if (/^\/proxy/i.test(tl)) return line;
+      let abs;
+      try {
+        abs = new URL(tl, base).toString();
+      } catch {
+        return line;
+      }
+      return `${origin}/proxy?target=${encodeURIComponent(abs)}`;
+    })
+    .join('\n');
+}
+
 // Dev twin of the Cloudflare Pages Function in `functions/proxy.js`. Same
 // `/proxy?target=` protocol; this middleware performs the server-side fetch
-// (with relaxed CORS) so `npm run dev` behaves identically to production.
+// (with relaxed CORS + HLS playlist rewriting) so `npm run dev` behaves
+// identically to production.
 function devProxy() {
   return {
     name: 'swiftstv-dev-cors-proxy',
@@ -41,9 +65,15 @@ function devProxy() {
           if (origin) hdrs.Origin = origin;
 
           const upstream = await fetch(t.toString(), { headers: hdrs, redirect: 'follow' });
-          const body = Buffer.from(await upstream.arrayBuffer());
+          const ct = upstream.headers.get('content-type') || 'application/octet-stream';
+          let body;
+          if (/mpegurl/.test(ct)) {
+            body = Buffer.from(rewritePlaylist(await upstream.text(), upstream.url, 'http://localhost'));
+          } else {
+            body = Buffer.from(await upstream.arrayBuffer());
+          }
           res.writeHead(upstream.status, {
-            'Content-Type': upstream.headers.get('content-type') || 'application/octet-stream',
+            'Content-Type': ct,
             'Access-Control-Allow-Origin': '*',
             'Access-Control-Allow-Methods': 'GET, OPTIONS',
             'Access-Control-Allow-Headers': '*',

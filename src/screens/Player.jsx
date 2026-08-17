@@ -39,9 +39,11 @@ export default function Player() {
       return undefined;
     }
 
+    const isExclusive = needsOriginHeaders(url);
     const player = attachHls(video, url, {
       startPosition,
-      extraOrigin: needsOriginHeaders(url),
+      extraOrigin: isExclusive,
+      isExclusive,
       onError: () => setError(true),
     });
     playerRef.current = player;

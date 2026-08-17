@@ -17,6 +17,25 @@ export function buildSrcUrl(url, opts = {}) {
   return url;
 }
 
+// Xtream live/VOD/series panels hand back `http://` stream URLs and redirect
+// even their `https://` manifests to an `http://IP:port` CDN. A browser loading
+// them from our HTTPS page blocks those as mixed active content. Route every
+// non-Exclusivos `.m3u8` (and any `http://` media) through our own `/proxy`
+// Pages Function, which follows the redirects and rewrites the playlist server
+// side, so the whole stream stays on HTTPS. Exclusivos streams (which need
+// dynamic Referer/Origin headers and their own proxy) are left untouched.
+export function proxyMediaUrl(url, { skipProxy = false, isExclusive = false } = {}) {
+  if (skipProxy || isExclusive) return url;
+  const lu = String(url || '').toLowerCase();
+  if (!lu) return url;
+  if (lu.startsWith('/proxy')) return url; // already routed
+  const isHls = /\.m3u8(\?|$)/i.test(lu);
+  const isHttp = lu.startsWith('http:');
+  if (!isHls && !isHttp) return url; // https media on our origin or remote CDN
+  const targetUrl = new URL(url, window.location.origin).toString();
+  return `/proxy?target=${encodeURIComponent(targetUrl)}`;
+}
+
 // Determine the HLS.js config (extraOrigin applies dynamic Referer/Origin).
 function hlsConfigFor(url, opts) {
   const cfg = {
@@ -66,6 +85,14 @@ export function attachHls(videoEl, url, opts = {}) {
     },
   };
 
+  // Route http:// / Xtream .m3u8 through our /proxy so an HTTPS page never hits
+  // mixed-content blocks. Exclusivos streams already carry their own proxy +
+  // Referer/Origin headers, so leave them on the native path.
+  const srcUrl = proxyMediaUrl(url, {
+    skipProxy: Boolean(opts.skipProxy),
+    isExclusive: Boolean(opts.isExclusive),
+  });
+
   let attemptedReload = false;
   function doStartPlayback() {
     if (controller.hls) controller.hls.destroy();
@@ -74,9 +101,9 @@ export function attachHls(videoEl, url, opts = {}) {
     const scheme = Hls.isSupported();
 
     if (wantsHls && scheme) {
-      const hls = new Hls(hlsConfigFor(url, opts));
+      const hls = new Hls(hlsConfigFor(srcUrl, opts));
       controller.hls = hls;
-      hls.loadSource(url);
+      hls.loadSource(srcUrl);
       hls.attachMedia(videoEl);
       hls.on(Hls.Events.ERROR, (_evt, data) => {
         if (!data || !data.fatal) return;
@@ -109,9 +136,10 @@ export function attachHls(videoEl, url, opts = {}) {
       });
     } else {
       // Native playback (or a browser without MSE/HLS). For live Xtream .m3u8
-      // some TV browsers handle it natively; VOD uses mp4.
+      // some TV browsers handle it natively; VOD uses mp4. Use the (possibly
+      // proxied) srcUrl so native <video> also avoids mixed-content blocks.
       controller.native = true;
-      videoEl.src = url;
+      videoEl.src = srcUrl;
       if (opts.startPosition) {
         videoEl.addEventListener(
           'loadedmetadata',

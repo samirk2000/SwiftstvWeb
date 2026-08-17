@@ -14,8 +14,11 @@
 //      Access-Control-Allow-Origin header for the site's origin).
 //   2) If the direct call is blocked by real CORS / mixed-content, fall back to
 //      the proxy.
-// Only metadata / JSON requests go through here. Video streams (`.m3u8`/`.mp4`)
-// are served straight to HLS.js / <video> and are NOT routed through the proxy.
+// Only metadata / JSON requests go through this helper. Video streams (`.m3u8`
+// `.ts`/`.mp4`) are (since the "HTTP-only CDN" fix) routed through `/proxy` by
+// `lib/player.js#proxyMediaUrl` — Xtream live unlocks their hosts via an
+// `http://IP` redirect that an HTTPS page would block — while Exclusivos media
+// uses its own dynamic proxy + Referer/Origin headers.
 
 const SDK =
   (globalThis.location && location.origin) ||
