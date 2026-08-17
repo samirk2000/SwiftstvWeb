@@ -5,6 +5,8 @@
 //    remote is unreachable / empty / 404 we keep the embedded list.
 import { login, SERVER_INFO } from './xtream.js';
 import { corsFetch, proxiedGet } from './cors.js';
+import { STREAM_PROXY_URLS } from './proxy.js';
+import { saveSession } from './session.js';
 
 export const EMBEDDED_SERVERS = [
   'http://cvcplayer.us:8080',
@@ -173,9 +175,8 @@ export async function loginWithFailover(username, password) {
     viaProxy.map(async (entry) => ({ ...entry, result: await login(entry) }))
   );
 
-  const authOk = round1.find((x) => x.result.ok);
-  if (authOk) return finalize(authOk, 1, queue.length);
-
+  const playable1 = await pickPlayable(round1);
+  if (playable1) return finalize(playable1, 1, queue.length);
   // ---- Round 2: direct retry only for hosts the proxy could not reach -----
   const needsDirect = round1.filter((x) => isProxyBlocked(x.result));
   const round2 = await Promise.all(
@@ -184,8 +185,8 @@ export async function loginWithFailover(username, password) {
       return { ...entry, via: 'direct', result: await login({ ...entry, via: 'direct' }) };
     })
   );
-  const directOk = round2.find((x) => x.result.ok);
-  if (directOk) return finalize(directOk, 2, queue.length);
+  const playable2 = await pickPlayable(round2);
+  if (playable2) return finalize(playable2, 2, queue.length);
 
   // ---- Decide the honest failure message --------------------------------
   // A real "invalid/expired/…" verdict from a server that responded (2xx with
@@ -211,6 +212,60 @@ export async function loginWithFailover(username, password) {
     total: queue.length,
     results: summarize(all),
   };
+}
+
+// --- Helper: pick a panel whose STREAM mode is actually reproducible ---------
+
+// True when this panel responds 2xx through at least one external stream proxy.
+// Panels that 403 every cloud range (e.g. some block Cloudflare AND AWS) fail
+// login fine but can NEVER stream from the web app, so we skip them.
+async function isStreamModeReachable(server, timeoutMs = 6000) {
+  const base = String(server?.baseUrl || '').trim();
+  if (!base || STREAM_PROXY_URLS.length === 0) {
+    // No external proxy configured → can't verify, assume reachable.
+    return true;
+  }
+  const probeUrl = `${base}/player_api.php?username=${encodeURIComponent(
+    server.username
+  )}&password=${encodeURIComponent(server.password)}`;
+  const enc = encodeURIComponent(probeUrl);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    for (const proxyBase of STREAM_PROXY_URLS) {
+      const base = proxyBase.replace(/\/+$/, '');
+      try {
+        const res = await fetch(`${base}?target=${enc}`, {
+          signal: controller.signal,
+          headers: { 'User-Agent': 'IPTVSmartersPlayer', 'Cache-Control': 'no-cache' },
+        });
+        if (res.ok) return true;
+      } catch {
+        // try next proxy
+      }
+    }
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Among authenticated candidates, return the first whose panel is stream-able
+// through an external proxy. Preserves order (fastest/priority wins).
+async function pickPlayable(list) {
+  const authed = list.filter((x) => x && x.result && x.result.ok);
+  if (authed.length === 0) return null;
+  for (const entry of authed) {
+    const server = entry.result.session || {
+      baseUrl: entry.baseUrl,
+      username: entry.username,
+      password: entry.password,
+    };
+    if (await isStreamModeReachable(server)) return entry;
+    // eslint-disable-next-line no-console
+    console.warn('[dns] login ok but stream unreachable via proxy, skipping', entry.baseUrl);
+  }
+  return null;
 }
 
 // True when a login result means "the proxy/panel rejected this request at the
@@ -249,6 +304,10 @@ function summarize(list) {
 
 function finalize(entry, attempt, total) {
   const r = entry.result;
+  // The parallel logins each called saveSession() internally, so whichever
+  // finished last could have overwritten the session. Re-persist the chosen
+  // (stream-playable) panel's session here as the source of truth.
+  if (r?.session) saveSession(r.session);
   return {
     ok: true,
     status: r.status,
