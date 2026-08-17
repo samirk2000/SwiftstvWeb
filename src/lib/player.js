@@ -28,9 +28,16 @@ export function mediaCandidates(url, { skipProxy = false, isExclusive = false } 
   if (skipProxy || isExclusive) return [url];
   const lu = String(url || '').toLowerCase();
   if (!lu) return [url];
+  // Xtream media that MUST go through the outside stream proxy:
+  //  - `http:` URLs (mixed-content from our HTTPS page).
+  //  - any video extension (.m3u8/.mp4/.mkv/.ts) or Xtream route
+  //    (/live/, /movie/, /series/) — the CDN does not answer a direct browser
+  //    `video` request (0 bytes), so route even https video through the proxy.
   const isHls = /\.m3u8(\?|$)/i.test(lu);
   const isHttp = lu.startsWith('http:');
-  if (!isHls && !isHttp) return [url];
+  const isVideoExt = /\.(mp4|m4v|mkv|ts|tsa|m3u8)(\?|$)/i.test(lu);
+  const isXtreamRoute = /\/\/(?:[^/]+\/)?(live|movie|series)\//.test(lu);
+  if (!isHls && !isHttp && !isVideoExt && !isXtreamRoute) return [url];
   return streamProxyCandidates(url);
 }
 
@@ -75,6 +82,10 @@ export function attachHls(videoEl, url, opts = {}) {
     native: false,
     errorCount: 0,
     destroy() {
+      if (nativeWatchdog) {
+        clearInterval(nativeWatchdog);
+        nativeWatchdog = null;
+      }
       if (controller.hls) {
         controller.hls.destroy();
         controller.hls = null;
@@ -99,9 +110,14 @@ export function attachHls(videoEl, url, opts = {}) {
 
   let attemptedReload = false;
   let manifestLoaded = false;
+  let nativeWatchdog = null;
   function doStartPlayback() {
     if (controller.hls) controller.hls.destroy();
     manifestLoaded = false;
+    if (nativeWatchdog) {
+      clearInterval(nativeWatchdog);
+      nativeWatchdog = null;
+    }
 
     const wantsHls = /\.m3u8(\?|$)/i.test(url);
     const scheme = Hls.isSupported();
@@ -166,9 +182,37 @@ export function attachHls(videoEl, url, opts = {}) {
           { once: true }
         );
       }
-      if (typeof opts.onNativeError === 'function') {
-        videoEl.addEventListener('error', opts.onNativeError, { once: true });
-      }
+      // Try the NEXT candidate when a native request errors out (e.g. a proxy
+      // answers 403 for this panel) — a different proxy/direct route may work.
+      const onNativeError = () => {
+        if (attempt < candidates.length - 1) {
+          attempt += 1;
+          controller.errorCount = 0;
+          doStartPlayback();
+        } else if (typeof opts.onError === 'function') {
+          opts.onError(videoEl.error);
+        }
+      };
+      videoEl.addEventListener('error', onNativeError);
+      // Watchdog: some CDNs hang the first <video> request with zero bytes (no
+      // error event ever fires). If we never get to HAVE_METADATA within a few
+      // seconds, move on to the next candidate.
+      const STALL_MS = 8000;
+      const stallFrom = Date.now();
+      nativeWatchdog = setInterval(() => {
+        if (videoEl.readyState >= 1 || videoEl.error) {
+          clearInterval(nativeWatchdog);
+          nativeWatchdog = null;
+          return;
+        }
+        if (Date.now() - stallFrom > STALL_MS && attempt < candidates.length - 1) {
+          // Loading with no metadata → this route is hanging; try the next one.
+          clearInterval(nativeWatchdog);
+          nativeWatchdog = null;
+          attempt += 1;
+          doStartPlayback();
+        }
+      }, 1000);
     }
     return () => controller.destroy();
   }
