@@ -41,13 +41,15 @@ URIs point back to the proxy), or the upstream bytes, with relaxed CORS headers.
 
 ## Point the web app at it
 
-Pass the deployed URL at build time:
+Pass the deployed URL(s) at build time. **Use several proxies** across different
+clouds because panels/CDNs 403 different IP ranges (e.g. some block Cloudflare
+AND AWS but not GCP). Comma-separated list, tried in order:
 
 ```bash
-VITE_STREAM_PROXY_URL=https://<project>.deno.dev npm run build
-# or
-VITE_STREAM_PROXY_URL=https://<project>.vercel.app/api/stream-proxy npm run build
+VITE_STREAM_PROXY_URLS="https://<project>.deno.dev,https://<project>.vercel.app/api/stream-proxy" npm run build
+# single URL still works:
+# VITE_STREAM_PROXY_URLS=https://<project>.deno.dev npm run build
 ```
 
-Player fallback order: external proxy -> direct -> Cloudflare Pages `/proxy`.
-Exclusivos streams keep their own dynamic proxy and are untouched.
+Player fallback order: each external proxy (in order) -> direct -> Cloudflare
+Pages `/proxy`. Exclusivos streams keep their own dynamic proxy and are untouched.
