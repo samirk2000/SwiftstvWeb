@@ -80,7 +80,10 @@ export default async function handler(req, res) {
       const resolved = upstream.url;
       body = Buffer.from(await rewritePlaylist(await upstream.text(), resolved, selfBase));
     } else {
-      body = Buffer.from(await upstream.arrayBuffer());
+      // Stream the binary (mp4 / TS) straight through instead of buffering it:
+      // VOD files are hundreds of MB and would burst a serverless buffer/AWS
+      // time limit. Range is relayed above, so <video> seeks map 1:1 to the CDN.
+      body = upstream.body;
       const len = upstream.headers.get('content-length');
       if (len) outHeaders['Content-Length'] = len;
       if (range) {

@@ -20,21 +20,24 @@ export default function VodDetail() {
     const srv = { baseUrl: saved.baseUrl, username: saved.username, password: saved.password };
     setServer(srv);
     (async () => {
+      // get_vod_info returns { info, movie_data }; keep the WHOLE object so the
+      // detail reads both the stream (info.info) and its metadata (movie_data).
       const res = await getVodInfo(srv, id);
-      if (res && res.info) setInfo(res.info);
+      if (res && res.info) setInfo(res);
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
-  const streamData = info?.info || info;
-  const meta = info?.movie_data || {};
+  const streamData = info?.info || {}; // the VOD stream (name, cover_big)
+  const meta = info?.movie_data || {}; // movie metadata (plot, year, ext)
   const play = () => {
     const ext = (meta?.container_extension) || 'mp4';
     const url = vodStreamUrl(server, id, ext);
     navigate(`/player?type=vod&id=${id}&url=${encodeURIComponent(url)}&title=${encodeURIComponent(streamData?.name || '')}`);
   };
 
-  const poster = meta?.cover_big || streamData?.stream_icon;
+  const poster =
+    meta?.cover_big || streamData?.cover_big || streamData?.backdrop_path || meta?.cover;
 
   return (
     <div>

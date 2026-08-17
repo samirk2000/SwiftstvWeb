@@ -62,7 +62,9 @@ export async function handler(req) {
       const resolved = upstream.url; // after redirects → http://CDN/...manifest
       body = await rewritePlaylist(await upstream.text(), resolved, selfBase);
     } else {
-      body = await upstream.arrayBuffer();
+      // Stream binary (mp4 / TS) straight through — VOD files are huge and
+      // buffering would blow the memory limit. Range is relayed above.
+      body = upstream.body;
       const len = upstream.headers.get('content-length');
       if (len) outHeaders['Content-Length'] = len;
       if (range) {

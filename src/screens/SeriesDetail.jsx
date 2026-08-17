@@ -25,7 +25,7 @@ function EpisodeRow({ index, ep, onPlay }) {
 export default function SeriesDetail() {
   const { id } = useParams();
   const navigate = useNavigate();
-  const [info, setInfo] = useState(null);
+  const [info, setInfo] = useState(null); // { info, seasons, episodes }
   const [server, setServer] = useState(null);
   const [season, setSeason] = useState(null);
 
@@ -38,8 +38,11 @@ export default function SeriesDetail() {
     const srv = { baseUrl: saved.baseUrl, username: saved.username, password: saved.password };
     setServer(srv);
     (async () => {
+      // get_series_info returns { info, seasons, episodes } where seasons and
+      // episodes are TOP-LEVEL siblings of info. Keep the whole object (not just
+      // .info) so the seasons/episodes below resolve.
       const res = await getSeriesInfo(srv, id);
-      if (res && res.info) setInfo(res.info);
+      if (res && res.info) setInfo(res);
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
@@ -51,7 +54,9 @@ export default function SeriesDetail() {
   const activeSeason = season || (seasonsList.length ? String(seasonsList[0].season_number) : null);
 
   const play = (ep) => {
-    const container = info?.container_extension || 'mp4';
+    // The container extension lives on each episode (e.g. "mp4"); fall back to
+    // the series-level one if present, else 'mp4'.
+    const container = ep?.container_extension || info?.container_extension || 'mp4';
     const url = seriesStreamUrl(server, container, ep, activeSeason, id);
     navigate(
       `/player?type=series&id=${id}&url=${encodeURIComponent(url)}&title=${encodeURIComponent(
@@ -59,6 +64,8 @@ export default function SeriesDetail() {
       )}`
     );
   };
+
+  const meta = info?.info || {};
 
   return (
     <div>
@@ -77,11 +84,11 @@ export default function SeriesDetail() {
       ) : (
         <>
           <div className="detail">
-            <img className="detail-poster" src={info.cover_big || info.cover} alt={info.name} />
+            <img className="detail-poster" src={meta.cover_big || meta.cover} alt={meta.name} />
             <div className="detail-meta">
-              <h1>{info.name}</h1>
-              {info.genre ? <div className="badges"><span className="badge">{info.genre}</span></div> : null}
-              {info.plot && <p>{info.plot}</p>}
+              <h1>{meta.name}</h1>
+              {meta.genre ? <div className="badges"><span className="badge">{meta.genre}</span></div> : null}
+              {meta.plot && <p>{meta.plot}</p>}
             </div>
           </div>
 
