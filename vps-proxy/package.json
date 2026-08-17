@@ -1,0 +1,17 @@
+{
+  "name": "swiftstv-stream-proxy",
+  "version": "1.0.0",
+  "description": "Express stream proxy for SwiftstvWeb (Xtream live/vod/series) — runs on a Hetzner VPS behind PM2 + Nginx.",
+  "main": "proxy.js",
+  "private": true,
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node proxy.js",
+    "dev": "PORT=3000 node proxy.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}
