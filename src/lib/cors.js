@@ -31,15 +31,19 @@ function dbg(label, ...args) {
 }
 
 /**
- * Rewrite an http:// URL to https:// on the same host (drops a trailing :80).
- * Pure http-only panels keep working because direct code falls back to http.
+ * Rewrite an http:// URL to https:// on the same host.
+ *
+ * Panels serve plain text HTTP on a non-standard port (8080) and TLS on the
+ * default HTTPS port (443). So when converting an incoming http://host:8080 to
+ * HTTPS we MUST use 443 — otherwise we get https://host:8080 which browsers
+ * treat as mixed-content / CORS-unreadable. If the URL is already https we keep
+ * its explicit port (a panel could run TLS on a custom port).
  */
 export function preferHttps(url) {
   const u = new URL(url);
   if (u.protocol === 'http:') {
-    if (u.port === '80' || !u.port) u.port = '';
     u.protocol = 'https:';
-    if (!u.port) u.port = '443';
+    u.port = ''; // default https port 443 (drops :8080 / :80)
   }
   return u.toString();
 }
