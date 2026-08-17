@@ -83,13 +83,16 @@ function snippet(text, n = 120) {
 // Try fetch against each candidate URL (https then http) directly. Returns the
 // first 2xx response, or the last response when all fail. Throws only if even
 // the fallback fetch throws (e.g. mixed content).
+//
+// CRITICAL: do NOT set `User-Agent` in the headers here. A `User-Agent` set via
+// fetch() is not CORS-safelisted, so the browser sends a preflight (OPTIONS)
+// that panels/GitHub reject -> "CORS header missing" even though the direct GET
+// itself returns 200. The browser sends its own UA by default.
 async function tryDirect(urls, opts, fetchImpl) {
   let last = null;
   for (const u of urls) {
     try {
-      const res = await fetchImpl(u, {
-        headers: { 'User-Agent': opts.userAgent || 'IPTVSmartersPlayer', Accept: '*/*' },
-      });
+      const res = await fetchImpl(u, { headers: { Accept: '*/*' } });
       dbg('direct', u, '->', res.status);
       if (res.ok) return res;
       last = res; // 3xx/4xx — remember but keep trying https->http
