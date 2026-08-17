@@ -10,6 +10,7 @@
 //    seek when `video.paused`/stall handling returns far from the live edge.
 import Hls from 'hls.js';
 import { needsOriginHeaders, originHeaderLines, defaultOriginHeaders } from './exclusivos.js';
+import { streamProxyCandidates } from './proxy.js';
 
 const RECOVERY_ATTEMPTS = 3;
 
@@ -18,22 +19,24 @@ export function buildSrcUrl(url, opts = {}) {
 }
 
 // Xtream live/VOD/series panels hand back `http://` stream URLs and redirect
-// even their `https://` manifests to an `http://IP:port` CDN. A browser loading
-// them from our HTTPS page blocks those as mixed active content. Route every
-// non-Exclusivos `.m3u8` (and any `http://` media) through our own `/proxy`
-// Pages Function, which follows the redirects and rewrites the playlist server
-// side, so the whole stream stays on HTTPS. Exclusivos streams (which need
-// dynamic Referer/Origin headers and their own proxy) are left untouched.
-export function proxyMediaUrl(url, { skipProxy = false, isExclusive = false } = {}) {
-  if (skipProxy || isExclusive) return url;
+// even their `https://` manifests to an `http://IP:port` CDN. From our HTTPS
+// page a browser blocks those as mixed active content, and the panels+CDN 403
+// Cloudflare's ranges. So media is routed through an OUTSIDE stream proxy
+// (Deno Deploy / Vercel) that resolves the redirects and serves https.
+// Exclusivos (needs dynamic Referer/Origin + its own proxy) is left untouched.
+export function mediaCandidates(url, { skipProxy = false, isExclusive = false } = {}) {
+  if (skipProxy || isExclusive) return [url];
   const lu = String(url || '').toLowerCase();
-  if (!lu) return url;
-  if (lu.startsWith('/proxy')) return url; // already routed
+  if (!lu) return [url];
   const isHls = /\.m3u8(\?|$)/i.test(lu);
   const isHttp = lu.startsWith('http:');
-  if (!isHls && !isHttp) return url; // https media on our origin or remote CDN
-  const targetUrl = new URL(url, window.location.origin).toString();
-  return `/proxy?target=${encodeURIComponent(targetUrl)}`;
+  if (!isHls && !isHttp) return [url];
+  return streamProxyCandidates(url);
+}
+
+// Legacy single-URL helper: returns the preferred (first) candidate.
+export function proxyMediaUrl(url, opts = {}) {
+  return mediaCandidates(url, opts)[0];
 }
 
 // Determine the HLS.js config (extraOrigin applies dynamic Referer/Origin).
@@ -85,20 +88,24 @@ export function attachHls(videoEl, url, opts = {}) {
     },
   };
 
-  // Route http:// / Xtream .m3u8 through our /proxy so an HTTPS page never hits
-  // mixed-content blocks. Exclusivos streams already carry their own proxy +
-  // Referer/Origin headers, so leave them on the native path.
-  const srcUrl = proxyMediaUrl(url, {
+  // Route Xtream http:// / .m3u8 media through the external stream proxy
+  // (Deno/Vercel), falling back to direct then our Pages Function. Exclusivos
+  // streams keep their own proxy + Referer/Origin headers on the native path.
+  const candidates = mediaCandidates(url, {
     skipProxy: Boolean(opts.skipProxy),
     isExclusive: Boolean(opts.isExclusive),
   });
+  let attempt = 0;
 
   let attemptedReload = false;
+  let manifestLoaded = false;
   function doStartPlayback() {
     if (controller.hls) controller.hls.destroy();
+    manifestLoaded = false;
 
     const wantsHls = /\.m3u8(\?|$)/i.test(url);
     const scheme = Hls.isSupported();
+    const srcUrl = candidates[Math.min(attempt, candidates.length - 1)];
 
     if (wantsHls && scheme) {
       const hls = new Hls(hlsConfigFor(srcUrl, opts));
@@ -107,6 +114,15 @@ export function attachHls(videoEl, url, opts = {}) {
       hls.attachMedia(videoEl);
       hls.on(Hls.Events.ERROR, (_evt, data) => {
         if (!data || !data.fatal) return;
+        // If the manifest failed to load from this candidate (NETWORK_ERROR
+        // before any manifest arrived), try the next route: external proxy ->
+        // direct -> CF Pages Function.
+        if (attempt < candidates.length - 1 && data.type === Hls.ErrorTypes.NETWORK_ERROR && !manifestLoaded) {
+          attempt += 1;
+          controller.errorCount = 0;
+          doStartPlayback();
+          return;
+        }
         // DVR / segment stall recovery: reload the manifest up to N times.
         if (controller.errorCount < RECOVERY_ATTEMPTS || attemptedReload) {
           controller.errorCount += 1;
@@ -118,6 +134,7 @@ export function attachHls(videoEl, url, opts = {}) {
         }
       });
       hls.on(Hls.Events.MANIFEST_LOADED, () => {
+        manifestLoaded = true;
         if (opts.startPosition && !controller.seeked) {
           // Catchup: jump into the archive (seconds from the DVR edge).
           controller.seeked = true;
@@ -136,8 +153,8 @@ export function attachHls(videoEl, url, opts = {}) {
       });
     } else {
       // Native playback (or a browser without MSE/HLS). For live Xtream .m3u8
-      // some TV browsers handle it natively; VOD uses mp4. Use the (possibly
-      // proxied) srcUrl so native <video> also avoids mixed-content blocks.
+      // some TV browsers handle it natively; VOD uses mp4. Use the preferred
+      // (possibly proxied) srcUrl so native <video> also avoids mixed-content.
       controller.native = true;
       videoEl.src = srcUrl;
       if (opts.startPosition) {
