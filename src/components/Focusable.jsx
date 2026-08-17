@@ -83,7 +83,13 @@ function nearest(dx, dy, fromRect, candidateEls) {
 // Register an element as a nav target. A single disabled element prevents auto
 // focus while typing but stays out of the movement ring.
 export function useFocusable(key, enabled = true) {
-  const { register, unregister, enabled: ringEnabled } = useFocusContext();
+  // Guard against a missing FocusCtx provider so a bare hook invocation fails
+  // predictably instead of peeling a cryptic "t is not a function" out of the
+  // minified bundle.
+  const focusCtx = useFocusContext();
+  const register = focusCtx ? focusCtx.register : undefined;
+  const unregister = focusCtx ? focusCtx.unregister : undefined;
+  const ringEnabled = focusCtx ? focusCtx.enabled : true;
   const ref = useRef(null);
 
   useEffect(() => {
@@ -92,9 +98,10 @@ export function useFocusable(key, enabled = true) {
     if (!el) return undefined;
     const k = key || el.id || null;
     if (!k) return undefined;
+    if (!register) return undefined; // no FocusRoot provider
     el.dataset.focusKey = k;
     register(k, el);
-    return () => unregister(k);
+    return () => { if (unregister) unregister(k); };
   }, [key, enabled, register, unregister, ringEnabled]);
 
   return {
