@@ -31,8 +31,10 @@ export function streamProxyCandidates(mediaUrl) {
   const enc = encodeURIComponent(target);
   const candidates = [];
   if (hasStreamProxy()) {
+    // Append ?target= directly (no forced "/") so Vercel's exact route
+    // `/api/stream-proxy` matches; Deno Deploy serves query on the root fine.
     const base = STREAM_PROXY_URL.replace(/\/+$/, '');
-    candidates.push(`${base}/?target=${enc}`);
+    candidates.push(`${base}?target=${enc}`);
   }
   candidates.push(mediaUrl, `/proxy?target=${enc}`);
   return candidates;
