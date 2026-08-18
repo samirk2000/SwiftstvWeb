@@ -56,6 +56,7 @@ export const STRINGS = {
     },
     player: {
       error: 'No se pudo reproducir este contenido.',
+      formatError: 'Este archivo (formato o códec) no es compatible con el navegador de este TV.',
       back: 'Atrás',
       buffering: 'Cargando, espera...',
     },
@@ -147,6 +148,7 @@ export const STRINGS = {
     },
     player: {
       error: 'Could not play this content.',
+      formatError: 'This file (format or codec) is not supported by this TV browser.',
       back: 'Back',
       buffering: 'Loading, please wait...',
     },

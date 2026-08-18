@@ -15,6 +15,35 @@ import { streamProxyCandidates } from './proxy.js';
 
 const RECOVERY_ATTEMPTS = 3;
 
+// Containers that TV browsers (webOS/Tizen/Vidaa/Android WebView) cannot demux
+// natively. IPTV apps bundle their own players (ExoPlayer/VLC) so the same file
+// plays there; in-browser we try an .mp4 variant and otherwise surface a clear
+// message instead of an endless spinner.
+const UNSUPPORTED_CONTAINERS = ['mkv', 'avi', 'flv', 'wmv', 'tsa', 'divx', 'webm', 'ogv', 'mov'];
+
+export function containerExt(url) {
+  const m = String(url || '').match(/\.([a-z0-9]{2,5})(?:[?#]|$)/i);
+  return m ? m[1].toLowerCase() : '';
+}
+
+export function isUnsupportedContainer(url) {
+  return UNSUPPORTED_CONTAINERS.includes(containerExt(url));
+}
+
+// Same URL with the video extension swapped to .mp4, or '' when there is no
+// swap candidate (already mp4/hls/ts). Some Xtream panels serve the same file
+// regardless of the extension in the URL, so asking for .mp4 can give a
+// browser-friendly version of an .mkv/.avi entry.
+export function mp4Variant(url) {
+  const u = String(url || '');
+  const m = u.match(/^(.*\.)([a-z0-9]{2,5})([?#].*)?$/i);
+  if (!m) return '';
+  const ext = m[2].toLowerCase();
+  if (['mp4', 'm3u8', 'ts'].includes(ext)) return '';
+  if (!/^(mp4|mkv|avi|flv|wmv|m4v|tsa|divx|webm|ogv|mov)$/.test(ext)) return '';
+  return `${m[1]}mp4${m[3] || ''}`;
+}
+
 export function buildSrcUrl(url, opts = {}) {
   return url;
 }
@@ -135,16 +164,36 @@ export function attachHls(videoEl, url, opts = {}) {
   // Route Xtream http:// / .m3u8 media through the external stream proxy
   // (Deno/Vercel), falling back to direct then our Pages Function. Exclusivos
   // streams keep their own proxy + Referer/Origin headers on the native path.
-  const candidates = mediaCandidates(url, {
+  // Alternate URLs (e.g. an .mp4 variant of a .mkv entry) are appended as
+  // trailing candidates — tried only after every primary route fails, and each
+  // is tried sequentially with a full element wipe in between.
+  const primary = mediaCandidates(url, {
     skipProxy: Boolean(opts.skipProxy),
     isExclusive: Boolean(opts.isExclusive),
   });
+  const candidates = (opts.alternateUrls || []).reduce((acc, alt) => {
+    for (const c of mediaCandidates(alt, {
+      skipProxy: Boolean(opts.skipProxy),
+      isExclusive: Boolean(opts.isExclusive),
+    })) {
+      if (!acc.includes(c)) acc.push(c);
+    }
+    return acc;
+  }, primary.slice());
   let attempt = 0;
 
   let attemptedReload = false;
   let manifestLoaded = false;
   let nativeWatchdog = null;
   let nativeErrorBound = null;
+
+  // Shared retry state for the native <video> path (single active route at a
+  // time). Lives at controller scope so setNativeSrc can re-bind the error
+  // listener after a wipe without hitting a closure ReferenceError.
+  const VOD_STALL_MS = 30000; // wait this long before treating a load as stalled
+  const MAX_NATIVE_RETRIES = 1; // max same-route cache-busted retries (error + stall combined)
+  let nativeRetries = 0;
+  let stallFrom = Date.now();
 
   // Strict element release: pause, forget the source and force the browser to
   // abort any active download (incl. byte-range 206 of VOD) so the connection
@@ -243,86 +292,109 @@ export function attachHls(videoEl, url, opts = {}) {
       }
 
       // ---- Retry policy for VOD / slow panels -----------------------------
-      // PANEL-FRIENDLY policy: at most ONE cache-busted retry per route, and
-      // only when the load silently stalls (20s without metadata). A hard error
-      // stops the watchdog and moves to the next candidate immediately — the
-      // same URL is NEVER re-requested in a fast loop, and every re-assignment
-      // fully wipes the element first so the previous stream?target= connection
-      // is closed before the next one opens.
-      const VOD_STALL_MS = 20000; // wait this long before treating a load as stalled
-      const MAX_NATIVE_RETRIES = 1; // single stall-only cache-busted retry per route
-      let nativeRetries = 0;
-      let stallFrom = Date.now();
-
-      const fail = () => {
-        if (controller.destroyed) return;
-        clearInterval(nativeWatchdog);
-        nativeWatchdog = null;
-        if (nativeErrorBound && videoEl) {
-          videoEl.removeEventListener('error', nativeErrorBound);
-          nativeErrorBound = null;
-        }
-        if (typeof opts.onError === 'function') opts.onError(findMediaError(videoEl));
-      };
-      const nextCandidate = () => {
-        if (controller.destroyed) return;
-        if (attempt < candidates.length - 1) {
-          attempt += 1;
-          nativeRetries = 0;
-          controller.errorCount = 0;
-          stallFrom = Date.now();
-          doStartPlayback();
-          return;
-        }
-        fail();
-      };
-
-      // A hard network/media error on this route: stop the stall watchdog right
-      // away and move to the next candidate. No same-URL cache-busted retry — a
-      // failing route must not spam stream?target= against the panel.
-      // `controller.destroyed` is also checked so a teardown-triggered error
-      // event (pause/load with an emptied src) can never restart the stream.
-      const onNativeError = () => {
-        if (controller.destroyed) return;
-        clearInterval(nativeWatchdog);
-        nativeWatchdog = null;
-        nextCandidate();
-      };
+      // Panel-friendly but resilient: a hard error gets ONE cache-busted retry
+      // of the SAME route (a stale 302/403 from the panel warm-up often resolves
+      // on a fresh request), then advances to the next candidate. A silent stall
+      // (no metadata for VOD_STALL_MS) also retries the same route once, then
+      // advances. Retries are STRICTLY sequential: setNativeSrc wipes the
+      // element first so the previous stream?target= connection closes before
+      // the next opens — the panel never sees overlapping connections. The
+      // handlers themselves (fail / nextCandidate / onNativeError /
+      // onNativeWatch) live at controller scope so setNativeSrc can re-bind the
+      // error listener after each wipe.
+      nativeRetries = 0;
+      stallFrom = Date.now();
       nativeErrorBound = onNativeError;
       videoEl.addEventListener('error', nativeErrorBound);
-
-      // Watchdog: catches silent hangs (no error event) where we never reach
-      // metadata. After VOD_STALL_MS, retry the same route once (cache-busted),
-      // then advance to the next candidate, and only then surface the error.
-      const onNativeWatch = () => {
-        if (videoEl.readyState >= 1 || videoEl.error || controller.destroyed) {
-          clearInterval(nativeWatchdog);
-          nativeWatchdog = null;
-          return;
-        }
-        if (Date.now() - stallFrom >= VOD_STALL_MS) {
-          if (nativeRetries < MAX_NATIVE_RETRIES) {
-            nativeRetries += 1;
-            stallFrom = Date.now();
-            setNativeSrc(/* bustCache */ true);
-            return;
-          }
-          nextCandidate();
-        }
-      };
       nativeWatchdog = setInterval(onNativeWatch, 1000);
     }
     return () => controller.destroy();
   }
 
+  // A hard network/media error on this route: stop the stall watchdog and retry
+  // the SAME route once (cache-busted) before advancing. Never a fast loop —
+  // capped by MAX_NATIVE_RETRIES and sequential (wipe-first). The `destroyed`
+  // guard also ensures a teardown-triggered error event can never restart the
+  // stream after the player was left.
+  function onNativeError() {
+    if (controller.destroyed) return;
+    clearInterval(nativeWatchdog);
+    nativeWatchdog = null;
+    if (nativeRetries < MAX_NATIVE_RETRIES) {
+      nativeRetries += 1;
+      stallFrom = Date.now();
+      setNativeSrc(/* bustCache */ true);
+      return;
+    }
+    nextCandidate();
+  }
+
+  // Watchdog: catches silent hangs (no error event) where we never reach
+  // metadata. After VOD_STALL_MS, retry the same route once (cache-busted),
+  // then advance to the next candidate, and only then surface the error.
+  function onNativeWatch() {
+    if (videoEl.readyState >= 1 || videoEl.error || controller.destroyed) {
+      clearInterval(nativeWatchdog);
+      nativeWatchdog = null;
+      return;
+    }
+    if (Date.now() - stallFrom >= VOD_STALL_MS) {
+      if (nativeRetries < MAX_NATIVE_RETRIES) {
+        nativeRetries += 1;
+        stallFrom = Date.now();
+        setNativeSrc(/* bustCache */ true);
+        return;
+      }
+      nextCandidate();
+    }
+  }
+
+  function nextCandidate() {
+    if (controller.destroyed) return;
+    if (attempt < candidates.length - 1) {
+      attempt += 1;
+      controller.errorCount = 0;
+      doStartPlayback();
+      return;
+    }
+    fail();
+  }
+
+  function fail() {
+    if (controller.destroyed) return;
+    clearInterval(nativeWatchdog);
+    nativeWatchdog = null;
+    if (nativeErrorBound && videoEl) {
+      videoEl.removeEventListener('error', nativeErrorBound);
+      nativeErrorBound = null;
+    }
+    if (typeof opts.onError === 'function') opts.onError(findMediaError(videoEl));
+  }
+
   function setNativeSrc(bustCache) {
     if (controller.destroyed) return;
+    // Detach the error handler while we re-arm: the wipe below (pause + load
+    // with an emptied src) fires a MEDIA_ERR_SRC_NOT_SUPPORTED 'error' event
+    // that must NOT be treated as a playback failure. Re-bind after assigning
+    // the new URL so subsequent REAL errors are still caught.
+    if (nativeErrorBound && videoEl) {
+      videoEl.removeEventListener('error', nativeErrorBound);
+      nativeErrorBound = null;
+    }
     // Close any in-flight request first so retries never overlap on the panel.
     wipeElement();
     const base = candidates[Math.min(attempt, candidates.length - 1)];
     videoEl.src = bustCache ? addNoCache(base) : base;
     // Re-arm the play() the caller/toggle relies on.
     videoEl.load();
+    nativeErrorBound = onNativeError;
+    videoEl.addEventListener('error', nativeErrorBound);
+    // Re-arm the stall watchdog if the previous handler cleared it: a retried
+    // route that silently hangs must still be detected.
+    if (!nativeWatchdog) {
+      stallFrom = Date.now();
+      nativeWatchdog = setInterval(onNativeWatch, 1000);
+    }
     if (opts.startPosition) {
       videoEl.addEventListener(
         'loadedmetadata',

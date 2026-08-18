@@ -510,10 +510,13 @@ function upstreamFetch(urlStr, headers, redirects, handle, cb) {
     method: 'GET',
     headers,
     agent,
-    // Run a hard socket timeout by DEFAULT so a hung panel never keeps the
-    // connection open forever. If the operator explicitly set
-    // UPSTREAM_TIMEOUT_MS (e.g. for long DVR windows), that value wins.
-    timeout: UPSTREAM_TIMEOUT_MS || 10000,
+    // Run a hard socket inactivity timeout by DEFAULT so a hung panel never
+    // keeps the connection open forever. 45s gives slow CDN warm-ups (large VOD
+    // files, cold starts) room to reach the first bytes — the 10s default used
+    // to kill legitimate big-file starts that IPTV apps (with no proxy timeout)
+    // would have waited out. If the operator explicitly set UPSTREAM_TIMEOUT_MS
+    // (e.g. for long DVR windows), that value wins.
+    timeout: UPSTREAM_TIMEOUT_MS || 45000,
   };
 
   let cancel = () => {};

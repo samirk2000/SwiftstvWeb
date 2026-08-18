@@ -118,6 +118,28 @@ buffer HLS con fragmentos incompletos y congelaría el reproductor):
   reducción de peticiones, sumada al keep-alive del proxy, evita ráfagas de
   conexiones HTTP hacia el panel.
 
+## VOD que no arranca (contenedores y reintentos)
+
+Algunos episodios/películas "funcionan en otras apps" pero no cargan aquí. Tres
+causas y su mitigación:
+
+- **Contenedor no soportado por el navegador del TV** (`.mkv`, `.avi`, `.flv`,
+  `.wmv`, …): las apps IPTV usan ExoPlayer/VLC que sí los demuxan; el `<video>`
+  del navegador no. Swiftstv intenta la MISMA id como `.mp4` como candidato de
+  cola (`mp4Variant`/`alternateUrls` en `src/lib/player.js`) — muchos paneles
+  sirven el mismo archivo sin importar la extensión — y si aún falla muestra un
+  mensaje claro de formato/códec (`player.formatError`) en vez de un spinner
+  infinito.
+- **Fallo transitorio del panel** (302/403/5xx puntual): un error duro provoca UN
+  reintento cache-busted de la misma ruta (`MAX_NATIVE_RETRIES = 1`), estrictamente
+  secuencial (`setNativeSrc` limpia el elemento antes de reasignar `src`, de modo
+  que el panel nunca ve conexiones solapadas), y luego avanza al siguiente
+  candidato. Nunca hay bucle automático; tras agotar rutas se muestra error con
+  botón de reintento manual.
+- **Arranque lento de CDN/panel**: el timeout de socket del upstream del proxy
+  subió de 10s a `UPSTREAM_TIMEOUT_MS || 45000` (`vps-proxy/proxy.js`) para no
+  matar archivos grandes que tardan en responder el primer byte.
+
 ## Live en MPEG-TS continuo (1 conexión por canal)
 
 Para **live** el reproductor ya no usa HLS segmentado (`.m3u8` + `.ts`), que hace

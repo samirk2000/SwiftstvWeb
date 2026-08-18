@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { t } from '../lib/i18n.js';
-import { attachHls, attachTs, togglePip, wakeLockController } from '../lib/player.js';
+import { attachHls, attachTs, isUnsupportedContainer, mp4Variant, togglePip, wakeLockController } from '../lib/player.js';
 import { needsOriginHeaders } from '../lib/exclusivos.js';
 import { updateContinueWatching } from '../lib/session.js';
 
@@ -27,10 +27,20 @@ export default function Player() {
   const abortRef = useRef(null);
   const [controlsVisible, setControlsVisible] = useState(true);
   const [error, setError] = useState(false);
+  // MEDIA_ERR_* code when playback failed (4 = src not supported / codec).
+  const [errorCode, setErrorCode] = useState(null);
   const [started, setStarted] = useState(false);
   // Bumped by the manual Retry button so the [url] effect re-runs and rebuilds
   // the player from scratch (destroying any previous controller first).
   const [restart, setRestart] = useState(0);
+
+  // For VOD/series entries stored as .mkv/.avi/... the TV browser cannot demux
+  // them. Try the SAME id as .mp4 as a trailing candidate (many Xtream panels
+  // serve the same file regardless of extension), and surface a clear message
+  // when even that fails.
+  const mp4Alt = mp4Variant(url);
+  const alternateUrls = mp4Alt && mp4Alt !== url ? [mp4Alt] : [];
+  const unsupportedContainer = isUnsupportedContainer(url);
 
   // Wipe the media element and abort any in-flight request, releasing the
   // socket to the panel. Call on error, pause / unmount, or before a new stream.
@@ -95,7 +105,15 @@ export default function Player() {
 
     const isExclusive = needsOriginHeaders(url);
     let player = null;
-    const onPlaybackError = () => {
+    const onPlaybackError = (err) => {
+      // Capture the MEDIA_ERR_* code (2 network / 3 decode / 4 src-not-supported)
+      // so the error screen can explain a codec/container limitation.
+      const code =
+        err && typeof err.code === 'number'
+          ? err.code
+          : video && video.error && typeof video.error.code === 'number'
+            ? video.error.code
+            : null;
       // Fully release the media element + abort the request before surfacing
       // the error: no half-open connection against the panel. Also destroy the
       // controller so any native watchdog / HLS / mpegts worker is torn down and
@@ -114,6 +132,7 @@ export default function Player() {
       try {
         video.load();
       } catch {}
+      setErrorCode(code);
       setError(true);
     };
     // Live uses continuous MPEG-TS (mpegts.js + the proxy's shared .ts fan-out)
@@ -129,6 +148,7 @@ export default function Player() {
           startPosition,
           extraOrigin: isExclusive,
           isExclusive,
+          alternateUrls,
           onError: onPlaybackError,
         });
     playerRef.current = player;
@@ -226,10 +246,11 @@ export default function Player() {
   }, []);
 
   if (error || !url) {
+    const formatIssue = errorCode === 4 || unsupportedContainer;
     return (
       <div className="player-screen">
-        <div style={{ color: 'var(--text)' }}>
-          {error ? t('player.error') : t('common.error')}
+        <div style={{ color: 'var(--text)', padding: '0 24px', textAlign: 'center' }}>
+          {formatIssue ? t('player.formatError') : error ? t('player.error') : t('common.error')}
         </div>
         {error && (
           <button
@@ -240,6 +261,7 @@ export default function Player() {
               // bump `restart` so the [url] effect re-runs, destroying any old
               // controller and rebuilding the player from scratch.
               setError(false);
+              setErrorCode(null);
               setStarted(false);
               setRestart((x) => x + 1);
             }}
