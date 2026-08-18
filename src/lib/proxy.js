@@ -48,7 +48,12 @@ export function streamProxyCandidates(mediaUrl) {
   const enc = encodeURIComponent(target);
   const candidates = [];
   for (const base of STREAM_PROXY_URLS) {
-    const b = base.replace(/\/+$/, '');
+    // Some envs end up with "proxy.domain" (no scheme) or "http://..." — we run
+    // on an HTTPS page so force the proxy to https to avoid mixed-content on the
+    // outer manifest URL (and because these proxies sit behind TLS).
+    let b = base.replace(/\/+$/, '').trim();
+    if (!/^https?:\/\//i.test(b)) b = `https://${b}`;
+    else if (b.startsWith('http://')) b = `https://${b.slice('http://'.length)}`;
     candidates.push(`${b}?target=${enc}`);
   }
   if (!candidates.length) candidates.push(mediaUrl);

@@ -96,11 +96,13 @@ app.get('/stream', (req, res) => {
     return;
   }
 
-  // selfBase = the public base of THIS proxy (behind Nginx TLS) so rewritten
-  // playlist URIs reuse our own host. Honour x-forwarded-* set by Nginx.
-  const proto = req.get('x-forwarded-proto') || req.protocol;
+  // selfBase = the public base of THIS proxy (behind Nginx TLS). The browser is
+  // always on HTTPS, so ALWAYS rewrite with https regardless of what
+  // X-Forwarded-Proto Nginx reported (if it lacks the header/port 80 slipped
+  // through, we must not emit http:// segment URLs — the page would block them
+  // as mixed content). Use the incoming Host for the domain.
   const host = req.get('x-forwarded-host') || req.get('host');
-  const selfBase = `${proto}://${host}`;
+  const selfBase = `https://${host}`;
 
   // Pass the browser's Range straight to the CDN so <video> can seek.
   const upstreamHeaders = {
