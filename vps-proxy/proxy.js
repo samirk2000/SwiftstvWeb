@@ -18,6 +18,10 @@
  *
  * Usage:
  *   GET /stream?target=<encodeURIComponent("https://panel/live/U/P/ID.m3u8")>
+ *                 (HLS / VOD — rewritten playlists, Range passthrough)
+ *   GET /stream?target=<encodeURIComponent("https://panel/live/U/P/ID.ts")>&continuous=1
+ *                 (LIVE — single endless MPEG-TS, shared across viewers of the
+ *                  same channel so the panel sees exactly ONE connection)
  *
  * The frontend proxies VOD/series/live through this host. Point the web app at
  * it with:
@@ -64,6 +68,89 @@ const ALLOW_CORS = {
 // User-Agent the Xtream panels expect. The "/1.0" suffix matches IPTV Smarters.
 const UPSTREAM_UA = 'IPTVSmartersPlayer/1.0';
 
+// ---- Continuous live MPEG-TS fan-out -------------------------------------
+// For LIVE playback we request the panel's native `/live/{user}/{pass}/{id}.ts`
+// (a single never-endng MPEG-TS stream) instead of HLS segmented `.m3u8`, so the
+// panel registers exactly ONE continuous HTTP connection per channel rather than
+// counting each `.ts` fragment as a new connection.
+//
+// If several viewers watch the SAME channel, they all share that ONE origin
+// stream: we keep a per-channel registry (`LIVE_FANOUT`) that opens the upstream
+// once and `.pipe`s it to every connected client. The origin connection is torn
+// down only when the LAST client disconnects (teardown-on-idle); a single viewer
+// leaving never kills the shared stream.
+const LIVE_FANOUT = new Map(); // channelKey -> { handle, clients:Set, upRes, destroyed }
+
+// True when a `/stream` request asks for a continuous live .ts fan-out.
+// Either the frontend explicitly tagged it (`continuous=1`) OR the target itself
+// is a live MPEG-TS route (`/live/{user}/{pass}/{id}.ts` with no HLS catchup
+// start/end params). Catchup `.ts` uses `start`/`end`, so it is NOT continuous.
+function isContinuousLive(target, req) {
+  const forced = String(req.query.continuous || '').trim();
+  if (forced === '1' || forced === 'true') return true;
+  try {
+    const u = new URL(String(target || ''));
+    const segs = u.pathname.split('/').filter(Boolean);
+    const isLiveRoute = segs.length >= 4 && /^live$/i.test(segs[0]) && /\.ts$/i.test(segs[segs.length - 1]);
+    const hasWindow = u.searchParams.has('start') || u.searchParams.has('end');
+    return isLiveRoute && !hasWindow;
+  } catch {
+    return false;
+  }
+}
+
+// Canonical key that identifies a channel's origin stream. Use scheme+host+path
+// (no credentials beyond the path they live in, no query — the windowless live
+// .ts URL). Two clients requesting the same channel get the SAME key and share
+// one upstream.
+function liveChannelKey(target) {
+  const u = new URL(String(target || ''));
+  u.search = '';
+  u.hash = '';
+  return u.toString();
+}
+
+// Drop a client from a fan-out entry. When the LAST client leaves, tear the
+// whole channel down (cancel upstream + destroy) and remove the entry.
+function detachClient(key, entry, clientRes) {
+  if (!entry) return;
+  entry.clients.delete(clientRes);
+  if (entry.clients.size > 0) return; // still viewers -> keep upstream alive
+  // No viewers left: release the shared upstream so the panel no longer counts
+  // the channel as "Online".
+  if (entry.handle) {
+    try { entry.handle.cancel(); } catch {}
+  }
+  if (entry.upRes) {
+    try { entry.upRes.destroy(); } catch {}
+  }
+  LIVE_FANOUT.delete(key);
+}
+
+// Write the fixed headers for the continuous MPEG-TS response: no Content-Length
+// (endless), no Range framing (no seeking on live), allow any origin.
+function writeContinuousHeaders(res) {
+  const h = {
+    'Content-Type': 'video/mp2t',
+    'Transfer-Encoding': 'chunked',
+    'Cache-Control': 'no-store',
+    Pragma: 'no-cache',
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Expose-Headers': 'Content-Type',
+  };
+  res.writeHead(200, h);
+}
+
+function pipeContinuousUpstream(res2, upRes) {
+  const joiner = new Transform({
+    highWaterMark: 256 * 1024,
+    transform(chunk, _enc, cb) {
+      cb(null, chunk);
+    },
+  });
+  upRes.pipe(joiner).pipe(res2, { end: true });
+}
+
 app.disable('x-powered-by');
 
 // --- CORS preflight ------------------------------------------------------
@@ -98,6 +185,92 @@ app.get('/stream', (req, res) => {
   if (t.protocol !== 'http:' && t.protocol !== 'https:') {
     res.writeHead(400, { 'Content-Type': 'application/json', ...ALLOW_CORS });
     res.end(JSON.stringify({ error: 'bad target protocol' }));
+    return;
+  }
+
+  // ---- Continuous live MPEG-TS fan-out ----------------------------------
+  // For a live `.ts` route (or when the frontend tags `continuous=1`), serve a
+  // single endless MPEG-TS stream SHARED across all viewers of the channel. This
+  // branch replaces the HLS/segment logic below.
+  if (isContinuousLive(target, req)) {
+    const key = liveChannelKey(target);
+    let entry = LIVE_FANOUT.get(key);
+
+    // Per-client teardown: this viewer left, error, or the request was aborted.
+    // Only remove THIS client — the shared upstream stays alive while others
+    // watch. The entry is torn down by detachClient when the last leaves.
+    const onContinuousGone = () => detachClient(key, LIVE_FANOUT.get(key), res);
+    res.on('close', onContinuousGone);
+    res.on('error', onContinuousGone);
+    req.on('aborted', onContinuousGone);
+
+    // A healthy shared upstream already exists -> just add this viewer.
+    if (entry && entry.upRes && !entry.destroyed) {
+      entry.clients.add(res);
+      writeContinuousHeaders(res);
+      pipeContinuousUpstream(res, entry.upRes);
+      return;
+    }
+
+    // No shared upstream yet (or it died) -> open exactly ONE origin stream.
+    writeContinuousHeaders(res);
+    // Establish the fan-out entry BEFORE the async upstreamFetch so concurrent
+    // viewers arriving while we connect can be added once it resolves.
+    entry = { handle: { cancelled: false, cancel: () => {} }, clients: new Set(), upRes: null, destroyed: false };
+    entry.clients.add(res);
+    LIVE_FANOUT.set(key, entry);
+
+    const headersL = {
+      'User-Agent': UPSTREAM_UA,
+      Accept: 'video/mp2t,*/*;q=0.5',
+      'Cache-Control': 'no-cache',
+      Pragma: 'no-cache',
+      Referer: `${t.protocol}//${t.host}/`,
+    };
+    const authH = req.get('authorization');
+    if (authH) headersL.Authorization = authH;
+    const refL = req.get('referer');
+    if (refL) headersL.Referer = refL;
+
+    upstreamFetch(target, headersL, 0, entry.handle, (err, upRes) => {
+      // The channel may have been torn down while we were connecting.
+      if (entry.destroyed || !LIVE_FANOUT.has(key)) {
+        if (upRes) { try { upRes.destroy(); } catch {} }
+        return;
+      }
+      if (err) {
+        entry.destroyed = true;
+        LIVE_FANOUT.delete(key);
+        for (const clientRes of entry.clients) {
+          if (!clientRes.writableEnded && !clientRes.destroyed) {
+            clientRes.writeHead(502, { 'Content-Type': 'application/json', ...ALLOW_CORS });
+            clientRes.end(JSON.stringify({ error: 'upstream', detail: String(err && err.message || err) }));
+          }
+        }
+        return;
+      }
+      entry.upRes = upRes;
+      upRes.on('error', () => {
+        // Upstream died mid-stream: drop the channel so the next viewer
+        // re-establishes it; remaining clients will retry via onClientGone/reset.
+        entry.destroyed = true;
+        entry.upRes = null;
+        LIVE_FANOUT.delete(key);
+      });
+      // Pipe the single origin stream into every connected viewer.
+      for (const clientRes of entry.clients) {
+        if (!clientRes.writableEnded && !clientRes.destroyed) {
+          pipeContinuousUpstream(clientRes, upRes);
+        } else {
+          entry.clients.delete(clientRes);
+        }
+      }
+      if (entry.clients.size === 0) {
+        entry.handle.cancel();
+        upRes.destroy();
+        LIVE_FANOUT.delete(key);
+      }
+    });
     return;
   }
 

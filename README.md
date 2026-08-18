@@ -118,6 +118,29 @@ buffer HLS con fragmentos incompletos y congelaría el reproductor):
   reducción de peticiones, sumada al keep-alive del proxy, evita ráfagas de
   conexiones HTTP hacia el panel.
 
+## Live en MPEG-TS continuo (1 conexión por canal)
+
+Para **live** el reproductor ya no usa HLS segmentado (`.m3u8` + `.ts`), que hace
+que el panel cuente cada fragmento como una conexión nueva. En su lugar:
+
+- **URL**: `{server}/live/{u}/{p}/{ID}.ts` (`liveStreamTsUrl` en `src/lib/xtream.js`),
+  un MPEG-TS de flujo continuo.
+- **Proxy (`vps-proxy/proxy.js`)**: la ruta `/stream` detecta el live `.ts`
+  (o el flag `continuous=1`) y abre **una sola conexión origen por canal**
+  (`LIVE_FANOUT`), haciéndole `.pipe(res)` a **todos** los espectadores del canal.
+  Si otro usuario entra al mismo canal, **reutiliza el mismo upstream** sin abrir
+  una segunda conexión al panel. Cuando el **último** espectador se desconecta,
+  se cierra el upstream y se elimina la entrada (teardown-on-idle); un solo
+  espectador que sale **nunca** mata el stream compartido.
+- **Frontend (`src/lib/player.js#attachTs`)**: decodifica el `.ts` continuo con
+  **mpegts.js** (`type: 'mpegts', isLive: true`) sobre MSE, con
+  `enableWorker:false`, buffer pequeño y `autoCleanupSourceBuffer` para no pedir
+  de más. Si el dispositivo no soporta MSE para TS, cae a `<video>` nativo contra
+  la URL proxificada.
+- **VOD / series / catchup / Exclusivos siguen en HLS**: el modo continuo se
+  aplica solo a `type=live`. El catchup usa `start`/`end` (horario), por lo que
+  el proxy lo trata como NO continuo.
+
 ## Soporte
 
 - Email `soporte@swiftdigitalaccess.online` · WhatsApp `+52 662 268 4690`.

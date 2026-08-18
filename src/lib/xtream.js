@@ -340,6 +340,14 @@ export function liveStreamUrl(server, streamId) {
   return `${normalizeBaseUrl(server.baseUrl)}/live/${server.username}/${server.password}/${streamId}.m3u8`;
 }
 
+// Continuous live MPEG-TS URL for LIVE playback. Xtream panels serve endless
+// MPEG-TS at /live/U/P/ID.ts (not fragmented HLS), letting the proxy keep ONE
+// persistent connection to the panel and stream it straight to the player
+// (mpegts.js). Used instead of the .m3u8 route for live viewing.
+export function liveStreamTsUrl(server, streamId) {
+  return `${normalizeBaseUrl(server.baseUrl)}/live/${server.username}/${server.password}/${streamId}.ts`;
+}
+
 // Catchup URL for a live stream with archive enabled. Xtream panels serve the
 // archive on the SAME /live/ route with `start`/`end` unix-epoch param (UTC)
 // delimiting the programme window; without them it's the live edge. Some

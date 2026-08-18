@@ -47,7 +47,8 @@ export function hasStreamProxy() {
 //      — a panel may 403 one cloud's ranges but not another's, so try them all.
 //   2) Direct (some TVs / panels serve https manifests without a redirect).
 //   3) Cloudflare Pages Function (last resort — often 403'd by panels).
-export function streamProxyCandidates(mediaUrl) {
+export function streamProxyCandidates(mediaUrl, opts = {}) {
+  const continuous = Boolean(opts && opts.continuous);
   const origin = globalThis.location ? globalThis.location.origin : 'https://swiftstvweb.pages.dev';
   const target = new URL(mediaUrl, origin).toString();
 
@@ -59,6 +60,9 @@ export function streamProxyCandidates(mediaUrl) {
     return dedupe([target]);
   }
 
+  // For continuous live .ts, tell the VPS proxy (and any stream-proxy) to serve
+  // it as ONE endless MPEG-TS shared across viewers instead of HLS segments.
+  const flags = continuous ? '&continuous=1' : '';
   const enc = encodeURIComponent(target);
   const candidates = [];
   // Prefer the VPS /stream proxy (Hetzner, injects User-Agent IPTVSmartersPlayer
@@ -74,10 +78,10 @@ export function streamProxyCandidates(mediaUrl) {
     let b = base.replace(/\/+$/, '').trim();
     if (!/^https?:\/\//i.test(b)) b = `https://${b}`;
     else if (b.startsWith('http://')) b = `https://${b.slice('http://'.length)}`;
-    candidates.push(`${b}?target=${enc}`);
+    candidates.push(`${b}?target=${enc}${flags}`);
   }
   if (!candidates.length) candidates.push(mediaUrl);
-  candidates.push(mediaUrl, `/proxy?target=${enc}`);
+  candidates.push(mediaUrl, `/proxy?target=${enc}${flags}`);
   return dedupe(candidates);
 }
 

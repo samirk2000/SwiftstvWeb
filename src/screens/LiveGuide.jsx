@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { t } from '../lib/i18n.js';
-import { getLiveCategories, getLiveStreams, getShortEpg, liveCatchupUrl, liveStreamUrl } from '../lib/xtream.js';
+import { getLiveCategories, getLiveStreams, getShortEpg, liveCatchupUrl, liveStreamTsUrl } from '../lib/xtream.js';
 import { usePanelList } from '../hooks/usePanelList.js';
 import { usePersistedCategory } from '../hooks/usePersistedCategory.js';
 import { isCategoryLocked } from '../lib/parental.js';
@@ -150,7 +150,9 @@ export default function LiveGuide() {
   );
 
   const playChannel = (ch) => {
-    const url = liveStreamUrl(server, ch.stream_id);
+    // Continuous MPEG-TS live: /live/U/P/id.ts → the proxy keeps ONE shared
+    // upstream connection per channel and the player decodes it with mpegts.js.
+    const url = liveStreamTsUrl(server, ch.stream_id);
     navigate(`/player?type=live&id=${ch.stream_id}&url=${encodeURIComponent(url)}`);
   };
 

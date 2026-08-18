@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { t } from '../lib/i18n.js';
-import { attachHls, togglePip, wakeLockController } from '../lib/player.js';
+import { attachHls, attachTs, togglePip, wakeLockController } from '../lib/player.js';
 import { needsOriginHeaders } from '../lib/exclusivos.js';
 import { updateContinueWatching } from '../lib/session.js';
 
@@ -89,12 +89,21 @@ export default function Player() {
       } catch {}
       setError(true);
     };
-    const player = attachHls(video, url, {
-      startPosition,
-      extraOrigin: isExclusive,
-      isExclusive,
-      onError: onPlaybackError,
-    });
+    // Live uses continuous MPEG-TS (mpegts.js + the proxy's shared .ts fan-out)
+    // so the panel sees ONE endless connection per channel; VOD/series/catchup
+    // and Exclusivos keep the HLS/native path.
+    const useTs = type === 'live' && !isExclusive;
+    const player = useTs
+      ? attachTs(video, url, {
+          isExclusive,
+          onError: onPlaybackError,
+        })
+      : attachHls(video, url, {
+          startPosition,
+          extraOrigin: isExclusive,
+          isExclusive,
+          onError: onPlaybackError,
+        });
     playerRef.current = player;
 
     // Show a "Cargando…" overlay until the first real frames arrive, so slow

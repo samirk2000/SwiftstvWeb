@@ -9,6 +9,7 @@
 //  - DVR/archive playback needs the <video> `LiveSyncDurationCount` and a quick
 //    seek when `video.paused`/stall handling returns far from the live edge.
 import Hls from 'hls.js';
+import mpegts from 'mpegts.js';
 import { needsOriginHeaders, originHeaderLines, defaultOriginHeaders } from './exclusivos.js';
 import { streamProxyCandidates } from './proxy.js';
 
@@ -24,7 +25,7 @@ export function buildSrcUrl(url, opts = {}) {
 // Cloudflare's ranges. So media is routed through an OUTSIDE stream proxy
 // (Deno Deploy / Vercel) that resolves the redirects and serves https.
 // Exclusivos (needs dynamic Referer/Origin + its own proxy) is left untouched.
-export function mediaCandidates(url, { skipProxy = false, isExclusive = false } = {}) {
+export function mediaCandidates(url, { skipProxy = false, isExclusive = false, continuous = false } = {}) {
   if (skipProxy || isExclusive) return [url];
   const lu = String(url || '').toLowerCase();
   if (!lu) return [url];
@@ -38,7 +39,7 @@ export function mediaCandidates(url, { skipProxy = false, isExclusive = false } 
   const isVideoExt = /\.(mp4|m4v|mkv|ts|tsa|m3u8)(\?|$)/i.test(lu);
   const isXtreamRoute = /\/\/(?:[^/]+\/)?(live|movie|series)\//.test(lu);
   if (!isHls && !isHttp && !isVideoExt && !isXtreamRoute) return [url];
-  return streamProxyCandidates(url);
+  return streamProxyCandidates(url, continuous ? { continuous: true } : {});
 }
 
 // Legacy single-URL helper: returns the preferred (first) candidate.
@@ -306,6 +307,105 @@ export function attachHls(videoEl, url, opts = {}) {
 
   function findMediaError(videoEl) {
     return videoEl.error || new Error('media timeout');
+  }
+
+  doStartPlayback();
+  return controller;
+}
+
+// Build a continuous-MPEG-TS playback controller for a LIVE channel. Mirrors the
+// attachHls controller (destroy / reloadUrl) so Player.jsx treats live and VOD
+// uniformly. Routes the .ts through the proxy with &continuous=1 so the VPS
+// keeps ONE shared upstream connection to the panel per channel. Falls back to
+// native <video> against the proxied URL when mpegts.js cannot run here.
+export function attachTs(videoEl, url, opts = {}) {
+  const candidates = mediaCandidates(url, {
+    continuous: true,
+    isExclusive: Boolean(opts.isExclusive),
+    skipProxy: Boolean(opts.skipProxy),
+  });
+  const srcUrl = candidates[0];
+
+  const controller = {
+    player: null,
+    destroyed: false,
+    destroy() {
+      controller.destroyed = true;
+      if (controller.player) {
+        try {
+          controller.player.destroy();
+        } catch {}
+        controller.player = null;
+      }
+      // Fully release the media element so the browser closes the socket to the
+      // proxy/origin — same wipe as attachHls: pause, drop src, forget it.
+      if (videoEl) {
+        try {
+          videoEl.pause();
+        } catch {}
+        videoEl.removeAttribute('src');
+        videoEl.src = '';
+        try {
+          videoEl.load();
+        } catch {}
+      }
+    },
+    reloadUrl() {
+      doStartPlayback();
+      return controller;
+    },
+  };
+
+  function doStartPlayback() {
+    if (controller.destroyed) return;
+    if (controller.player) {
+      try {
+        controller.player.destroy();
+      } catch {}
+      controller.player = null;
+    }
+
+    // Native fallback: devices without MSE for TS get the (proxied) URL on the
+    // <video> directly; TV webviews that handle TS natively will play it.
+    if (!mpegts.isSupported()) {
+      videoEl.src = srcUrl;
+      if (typeof opts.onError === 'function') {
+        videoEl.addEventListener(
+          'error',
+          () => opts.onError(videoEl ? videoEl.error || new Error('media error') : new Error('media error')),
+          { once: true }
+        );
+      }
+      return;
+    }
+
+    const player = mpegts.createPlayer(
+      { type: 'mpegts', isLive: true, url: srcUrl },
+      {
+        // Fewer / slower network requests rather than many parallel fetches.
+        enableWorker: false,
+        enableWorkerForMSE: false,
+        isLive: true,
+        // The <video> tail is kept small so we do not fetch far ahead; the
+        // connection to the proxy/panel stays open and shares the single .ts.
+        lazyLoad: true,
+        lazyLoadMaxDuration: 10,
+        enableStashBuffer: true,
+        autoCleanupSourceBuffer: true,
+        autoCleanupMaxBackwardDuration: 60,
+        autoCleanupMinBackwardDuration: 15,
+        liveBufferLatencyChasing: false,
+      }
+    );
+    controller.player = player;
+
+    player.attachMediaElement(videoEl);
+    player.on(mpegts.Events.ERROR, (errType) => {
+      if (controller.destroyed) return;
+      if (typeof opts.onError === 'function') opts.onError(new Error(String(errType)));
+    });
+    player.load();
+    player.play();
   }
 
   doStartPlayback();
