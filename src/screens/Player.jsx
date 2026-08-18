@@ -58,9 +58,22 @@ export default function Player() {
     return () => window.removeEventListener('keydown', onKey);
   }, []);
 
-  // Safety net on true unmount: force-abort the request + wipe the video so the
-  // panel never keeps the stream "Online" after leaving the screen.
-  useEffect(() => () => wipePlayback(), []);
+  // Safety net on true unmount: destroy the controller (HLS/mpegts), force-abort
+  // the request and wipe the video so the panel never keeps the stream "Online"
+  // after leaving the screen. Runs before the [url] effect's own cleanup, so both
+  // orders are idempotent (destroy() is safe to call once the ref is null).
+  useEffect(
+    () => () => {
+      if (playerRef.current) {
+        try {
+          playerRef.current.destroy();
+        } catch {}
+        playerRef.current = null;
+      }
+      wipePlayback();
+    },
+    []
+  );
 
   useEffect(() => {
     const video = videoRef.current;
@@ -78,9 +91,17 @@ export default function Player() {
     abortRef.current = controller;
 
     const isExclusive = needsOriginHeaders(url);
+    let player = null;
     const onPlaybackError = () => {
       // Fully release the media element + abort the request before surfacing
-      // the error: no half-open connection against the panel.
+      // the error: no half-open connection against the panel. Also destroy the
+      // controller so any native watchdog / HLS / mpegts worker is torn down and
+      // the onError-caused DOM removal of <video> doesn't leave one running.
+      if (player) {
+        try { player.destroy(); } catch {}
+        player = null;
+        playerRef.current = null;
+      }
       if (abortRef.current) { try { abortRef.current.abort(); } catch {} }
       try {
         video.pause();
@@ -96,7 +117,7 @@ export default function Player() {
     // so the panel sees ONE endless connection per channel; VOD/series/catchup
     // and Exclusivos keep the HLS/native path.
     const useTs = type === 'live' && !isExclusive;
-    const player = useTs
+    player = useTs
       ? attachTs(video, url, {
           isExclusive,
           onError: onPlaybackError,
