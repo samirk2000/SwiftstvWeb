@@ -41,6 +41,9 @@ export default function Player() {
       try { video.pause(); } catch {}
       // Force the element to drop the source AND forget it — the connection to
       // the proxy/origin is closed so the panel stops marking it "Online".
+      // removeAttribute('src') before load() cancels any active download,
+      // incl. byte-range (206) requests of VOD/movies/series.
+      video.removeAttribute('src');
       video.src = '';
       try { video.load(); } catch {}
     }
@@ -165,14 +168,16 @@ export default function Player() {
       if (wake) wake.release();
       wakeRef.current = null;
       setStarted(false);
-      // Strict teardown: abort the request AND wipe the element (src='' + load)
-      // so no connection stays live against the proxy/origin on unmount or URL
-      // change. Ignore the pause the teardown itself triggers.
+      // Strict teardown on unmount/URL change: abort the request AND wipe the
+      // element (removeAttribute('src') + src='' + load) so active downloads,
+      // incl. byte-range (206) requests of VOD/movies/series, are aborted and no
+      // connection stays live against the proxy/origin.
       if (abortRef.current) {
         try { abortRef.current.abort(); } catch {}
         abortRef.current = null;
       }
       try { video.pause(); } catch {}
+      video.removeAttribute('src');
       video.src = '';
       try { video.load(); } catch {}
       video.removeEventListener('timeupdate', onTime);
