@@ -22,6 +22,7 @@ export default function Player() {
   const hideTimer = useRef(null);
   const [controlsVisible, setControlsVisible] = useState(true);
   const [error, setError] = useState(false);
+  const [started, setStarted] = useState(false);
 
   // 'p' toggles PiP; handled screen-local.
   useEffect(() => {
@@ -48,8 +49,12 @@ export default function Player() {
     });
     playerRef.current = player;
 
-    video
-      .play()
+    // Show a "Cargando…" overlay until the first real frames arrive, so slow
+    // VOD that the player is retrying doesn't look frozen.
+    const onPlaying = () => setStarted(true);
+    video.addEventListener('playing', onPlaying);
+    // A 'stalled'/'waiting' after we already started is normal buffering.
+    video.play()
       .then(() => {})
       .catch(() => setError(true));
 
@@ -90,8 +95,10 @@ export default function Player() {
       playerRef.current = null;
       if (wake) wake.release();
       wakeRef.current = null;
+      setStarted(false);
       video.removeEventListener('timeupdate', onTime);
       video.removeEventListener('stalled', onStall);
+      video.removeEventListener('playing', onPlaying);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [url]);
@@ -138,6 +145,21 @@ export default function Player() {
         playsInline
         onClick={(e) => e.stopPropagation()}
       />
+      {!started && !error && (
+        <div className="player-loading">
+          <div className="spinner" />
+          <span>{t('player.buffering')}</span>
+          <button
+            className="btn-ghost"
+            onClick={() => {
+              setStarted(false);
+              if (playerRef.current) playerRef.current.reloadUrl();
+            }}
+          >
+            {t('common.retry')}
+          </button>
+        </div>
+      )}
       {controlsVisible && (
         <div className="player-controls">
           <button className="back-btn" onClick={() => navigate(-1)}>

@@ -199,60 +199,68 @@ export function attachHls(videoEl, url, opts = {}) {
           { once: true }
         );
       }
-      // Try the NEXT candidate when a native request errors out (e.g. a proxy
-      // answers 403 for this panel) — a different proxy/direct route may work.
-      // A single decisive error moves on; transient stalls are retried below.
-      const onNativeError = () => {
-        if (attempt < candidates.length - 1) {
-          attempt += 1;
-          controller.errorCount = 0;
-          doStartPlayback();
-        } else if (typeof opts.onError === 'function') {
-          opts.onError(videoEl.error);
-        }
-      };
-      videoEl.addEventListener('error', onNativeError);
-      // Watchdog: some CDNs/proxies hang the first <video> request with zero
-      // bytes (no error event ever fires) while the panel does its 302 → CDN and
-      // starts serving a large mp4. VOD files (hundreds of MB through a proxy)
-      // can take well over 8s to reach HAVE_METADATA, so we wait much longer
-      // before treating it as a failure, and RETRY the same route a few times
-      // (with a cache-buster) instead of aborting on the first slow load.
-      const VOD_STALL_MS = 20000;
-      const MAX_NATIVE_RETRIES = 2;
+
+      // ---- Retry policy for VOD / slow panels -----------------------------
+      // A single open attempt is often not enough: panels do 302→CDN and the
+      // token can go stale while a multi-hundred-MB mp4 warms up, so the first
+      // <video> load sometimes yields nothing. Instead of failing the screen,
+      // we RETRY the same route (cache-busted) for that attempt, then try the
+      // next proxy, and only surface an error once every route is exhausted.
+      const VOD_STALL_MS = 20000; // wait this long before treating a load as stalled
+      const MAX_NATIVE_RETRIES = 3; // same-route retries (cache-busted) per candidate
       let nativeRetries = 0;
       let stallFrom = Date.now();
+
+      const fail = () => {
+        clearInterval(nativeWatchdog);
+        nativeWatchdog = null;
+        if (typeof opts.onError === 'function') opts.onError(findMediaError(videoEl));
+      };
+      const advance = () => {
+        // Prefer retrying THIS route with a fresh URL over jumping candidates:
+        // transitory 302/403s from a warm-up usually resolve on a reload.
+        if (nativeRetries < MAX_NATIVE_RETRIES) {
+          nativeRetries += 1;
+          stallFrom = Date.now();
+          setNativeSrc(/* bustCache */ true);
+          return;
+        }
+        if (attempt < candidates.length - 1) {
+          nativeRetries = 0;
+          attempt += 1;
+          controller.errorCount = 0;
+          stallFrom = Date.now();
+          doStartPlayback();
+          return;
+        }
+        fail();
+      };
+
+      // A hard network/media error on this route → retry once right away (a
+      // cache-busted reload often fixes a stale 302/403 from the panel warm-up),
+      // then advance to the next candidate on a repeated decisive error.
+      const onNativeError = () => {
+        if (videoEl.error && nativeRetries < MAX_NATIVE_RETRIES) {
+          // One immediate same-route retry; further retries are rate-limited by
+          // the stall watchdog so we don't burn them all in one instant.
+          nativeRetries += 1;
+          stallFrom = Date.now();
+          setNativeSrc(/* bustCache */ true);
+          return;
+        }
+        advance();
+      };
+      videoEl.addEventListener('error', onNativeError);
+
+      // Watchdog: catches silent hangs (no error event) where we never reach
+      // metadata. Waits VOD_STALL_MS then advances (retry/next/fail).
       const onNativeWatch = () => {
         if (videoEl.readyState >= 1 || videoEl.error || controller.destroyed) {
           clearInterval(nativeWatchdog);
           nativeWatchdog = null;
           return;
         }
-        if (Date.now() - stallFrom < VOD_STALL_MS) return;
-        // No metadata after VOD_STALL_MS → try to keep it alive instead of aborting.
-        stallFrom = Date.now(); // open a fresh window for the next wait
-        if (nativeRetries < MAX_NATIVE_RETRIES) {
-          // Reload the SAME route with a cache-buster: slow panels are often
-          // transitory (the 302 token goes stale while the CDN warms up), and a
-          // reload frequently starts the stream whereas another proxy may hit a
-          // fresh slow start.
-          nativeRetries += 1;
-          setNativeSrc(/* bustCache */ true);
-          return;
-        }
-        if (attempt < candidates.length - 1) {
-          // This route is genuinely dead after retries → try the next proxy.
-          clearInterval(nativeWatchdog);
-          nativeWatchdog = null;
-          nativeRetries = 0;
-          attempt += 1;
-          controller.errorCount = 0;
-          doStartPlayback();
-          return;
-        }
-        clearInterval(nativeWatchdog);
-        nativeWatchdog = null;
-        if (typeof opts.onError === 'function') opts.onError(findMediaError(videoEl));
+        if (Date.now() - stallFrom >= VOD_STALL_MS) advance();
       };
       nativeWatchdog = setInterval(onNativeWatch, 1000);
     }

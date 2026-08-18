@@ -50,6 +50,7 @@ export const STRINGS = {
     player: {
       error: 'No se pudo reproducir este contenido.',
       back: 'Atrás',
+      buffering: 'Cargando, espera...',
     },
     exclusivos: {
       title: 'Canales Exclusivos',
@@ -115,6 +116,7 @@ export const STRINGS = {
     player: {
       error: 'Could not play this content.',
       back: 'Back',
+      buffering: 'Loading, please wait...',
     },
     exclusivos: {
       title: 'Exclusive Channels',
