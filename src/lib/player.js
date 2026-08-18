@@ -49,25 +49,25 @@ export function proxyMediaUrl(url, opts = {}) {
 // Determine the HLS.js config (extraOrigin applies dynamic Referer/Origin).
 function hlsConfigFor(url, opts) {
   const cfg = {
-    enableWorker: true,
+    // Evita workers que disparen fetches en hilos paralelos no controlados.
+    enableWorker: false,
     backBufferLength: 30,
+    // Live: se sincroniza 3 segmentos detrás del en vivo y se permite hasta 5.
     liveSyncDurationCount: 3,
-    // Estable y sin ráfagas: baja latencia apagada y un búfer de datos mínimo
-    // para no solicitar muchos chunks en paralelo (evita picos de peticiones
-    // que abren/cierran sockets contra el panel). Los fragmentos deben llegar
-    // completos al reproductor.
+    liveMaxLatencyDurationCount: 5,
     lowLatencyMode: false,
-    // Búfer de datos (segundos / bytes): lo justo para no agotarse, sin disparar
-    // peticiones paralelas agresivas de segmentos.
+    // Búfer de datos: máx. 10s pedidos por adelantado (pico 15s), 30MB en RAM.
+    // Reduce la carga paralela agresiva que abriría varias conexiones al panel.
     maxBufferLength: 10,
-    maxMaxBufferLength: 20,
-    maxBufferSize: 60 * 1024 * 1024,
+    maxMaxBufferLength: 15,
+    maxBufferSize: 30 * 1024 * 1024,
     // No cortar la carga de un fragmento prematuramente (segmentos de varios MB).
     fragLoadingTimeOut: 30000,
     fragLoadingMaxRetry: 6,
-    // Manifests via a slow proxy can stall too — hold them longer and retry more.
-    manifestLoadingTimeOut: 15000,
-    manifestLoadingMaxRetry: 4,
+    // Manifests .m3u8 vía proxy lento: timeout 10s y 3 reintentos para no
+    // saturar con peticiones de playlist consecutivas.
+    manifestLoadingTimeOut: 10000,
+    manifestLoadingMaxRetry: 3,
     levelLoadingTimeOut: 15000,
     levelLoadingMaxRetry: 4,
     // Cache-busting of the manifest so DVR buffers don't go stale after stalls.

@@ -109,11 +109,14 @@ buffer HLS con fragmentos incompletos y congelaría el reproductor):
 - **Frontend (`Player.jsx`)**: `activeAbortController` single-flight. Aborta el
   fetch previo al arrancar un stream y limpia el `<video>` (`src=''` + `load()`)
   en `onError`/`pause`/desmontaje, soltando el socket hacia el proxy.
-- **HLS.js config**: `enableWorker: true`, `lowLatencyMode: false`,
-  `backBufferLength: 30`, y buffer mínimo (`maxBufferLength: 10`,
-  `maxMaxBufferLength: 20`) para no lanzar peticiones de chunks en ráfagas
-  paralelas descontroladas. Los segmentos se descargan completos; la reducción
-  de peticiones, sumada al keep-alive, mantiene 1 conexión estable en el panel.
+- **HLS.js config**: `enableWorker: false` (sin fetches en workers paralelos),
+  `lowLatencyMode: false`, `maxBufferLength: 10` / `maxMaxBufferLength: 15` /
+  `maxBufferSize: 30MB` (buffer mínimo, reduce peticiones de chunks en paralelo),
+  `liveSyncDurationCount: 3` / `liveMaxLatencyDurationCount: 5`, y
+  `manifestLoadingTimeOut: 10000` / `manifestLoadingMaxRetry: 3` (reutiliza y
+  ralentiza las peticiones de `.m3u8`). Los segmentos se descargan completos; la
+  reducción de peticiones, sumada al keep-alive del proxy, evita ráfagas de
+  conexiones HTTP hacia el panel.
 
 ## Soporte
 
