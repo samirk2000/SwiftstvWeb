@@ -49,19 +49,16 @@ export function proxyMediaUrl(url, opts = {}) {
 // Determine the HLS.js config (extraOrigin applies dynamic Referer/Origin).
 function hlsConfigFor(url, opts) {
   const cfg = {
-    enableWorker: false, // Worker-less is safer across TV webviews.
-    backBufferLength: 60,
+    enableWorker: true,
+    backBufferLength: 30,
     liveSyncDurationCount: 3,
-    // Priorizar estabilidad sobre latencia baja: los segmentos de ~2.9 MB tardan
-    // en cruzar el proxy, así que desactivamos el modo de baja latencia y
-    // REDUCIMOS el prefetch de buffer. Un buffer pequeño (10s pico, 20s máx.)
-    // solicita chunks con menos frecuencia y menos en paralelo, manteniendo la
-    // conexión hacia el panel estable en 1 socket (no abre/cierra en cada
-    // segmento ni el proxy ve ráfagas de sockets que el GC del panel cuenta
-    // como conexiones Online).
+    // Estable y sin ráfagas: baja latencia apagada y un búfer de datos mínimo
+    // para no solicitar muchos chunks en paralelo (evita picos de peticiones
+    // que abren/cierran sockets contra el panel). Los fragmentos deben llegar
+    // completos al reproductor.
     lowLatencyMode: false,
-    // Búfer de datos (segundos / bytes) para mantener la reproducción sin
-    // agotarse, pero mínimo para no disparar peticiones paralelas agresivas.
+    // Búfer de datos (segundos / bytes): lo justo para no agotarse, sin disparar
+    // peticiones paralelas agresivas de segmentos.
     maxBufferLength: 10,
     maxMaxBufferLength: 20,
     maxBufferSize: 60 * 1024 * 1024,

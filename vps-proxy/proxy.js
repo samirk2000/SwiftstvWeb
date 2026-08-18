@@ -38,14 +38,14 @@ const app = express();
 const PORT = Number(process.env.PORT || 3000);
 
 // Primary agent for HTTPS upstreams. Ignore invalid self-signed certificates so
-// panels/CDN IPs with broken TLS still stream. `keepAlive: true` reuses the
-// underlying TCP connection across segments, and `maxSockets: 1` forces ALL
-// concurrent upstream requests for this agent to share that ONE socket. This
-// stops the panel's GC from seeing a burst of short-lived open sockets (which
-// it counts as separate "Online" connections, e.g. 3 simultaneously).
-const INSECURE_AGENT = new https.Agent({ rejectUnauthorized: false, keepAlive: true, maxSockets: 1 });
-// For HTTP upstreams (http://IP:port CDNs) — same single-socket reuse.
-const HTTP_AGENT = new http.Agent({ keepAlive: true, maxSockets: 1 });
+// panels/CDN IPs with broken TLS still stream. `keepAlive: true` keeps each
+// underlying TCP socket open between requests so the panel does NOT register a
+// disconnect/reconnect per `.ts` segment. `maxSockets: 50` caps per-host
+// sockets high enough that HLS parallel segment fetches are never serialized
+// (which would stall playback), while still letting free sockets be reused.
+const INSECURE_AGENT = new https.Agent({ rejectUnauthorized: false, keepAlive: true, maxSockets: 50 });
+// For HTTP upstreams (http://IP:port CDNs) — same persistent-socket reuse.
+const HTTP_AGENT = new http.Agent({ keepAlive: true, maxSockets: 50 });
 
 // Run length of a slow/HLS DVR stream before timing out upstream sockets.
 const UPSTREAM_TIMEOUT_MS = Number(process.env.UPSTREAM_TIMEOUT_MS || 0);
@@ -63,83 +63,6 @@ const ALLOW_CORS = {
 
 // User-Agent the Xtream panels expect. The "/1.0" suffix matches IPTV Smarters.
 const UPSTREAM_UA = 'IPTVSmartersPlayer/1.0';
-
-// ---- Per-session stream lock -------------------------------------------
-// The IPTV panel limits simultaneous streams per account (often 1x playback,
-// rarely more). The frontend can fire several `/stream?target=` requests in
-// parallel (HLS `.m3u8` manifest + TS segments + VOD retries), which would
-// trip the panel's "max connections" (reported as e.g. 4/3).
-//
-// We keep ONE active upstream per "session key" (the Xtream username:password
-// extracted from the target URL, falling back to the client's IP). When a NEW
-// request arrives for a key that already has a live stream, we CANCEL the
-// previous one BEFORE opening the new connection — a strict
-// "last-write-wins" takeover so at most one origin connection exists per
-// account at any time.
-//
-// A session key MUST never be a full stream URL (else every TS segment would
-// be its own key and the lock would be pointless); we only use the identity
-// portion of the path (scheme + host + username + password).
-const STREAM_LOCKS = new Map(); // sessionKey -> { job, startedAt }
-const MAX_STREAM_LOCK_AGE_MS = 30 * 60 * 1000; // stale-entry GC
-
-// Extract the per-account identity that identifies a panel stream session.
-// Xtream embeds credentials in the path: /live|movie|series/{user}/{pass}/{id}.
-// Only URLs shaped like that open a panel "stream session", so we key the lock
-// on the account there. For CDN segment / unknown URLs (no creds) we fall back
-// to the client identity so at least each device is capped to one concurrent
-// upstream.
-function streamUserKey(url, req) {
-  try {
-    const u = new URL(String(url || ''));
-    const segs = u.pathname.split('/').filter(Boolean);
-    // Xtream stream route: segs[0] in {live,movie,series} and segs[1]=user,
-    // segs[2]=pass.
-    if (segs.length >= 4 && /^(live|movie|series)$/i.test(segs[0])) {
-      const user = segs[1];
-      const pass = segs[2];
-      if (user && pass) return `${u.protocol}//${u.host}/${user}:${pass}`;
-    }
-  } catch {}
-  // Not an Xtream-shaped URL: fall back to the client identity so at least
-  // each client is limited to one parallel upstream.
-  const fwd = req.get('x-forwarded-for');
-  const ip = fwd ? String(fwd).split(',')[0].trim() : req.ip || req.socket?.remoteAddress || 'unknown';
-  return `ip:${ip}`;
-}
-
-// Cancel the in-flight upstream for a session key (if any).
-function cancelStreamLock(key) {
-  const entry = STREAM_LOCKS.get(key);
-  if (!entry) return false;
-  try {
-    if (typeof entry.job.cancel === 'function') entry.job.cancel();
-    else if (typeof entry.job.destroy === 'function') entry.job.destroy();
-  } catch {}
-  if (entry.job && typeof entry.job.res?.destroy === 'function') {
-    try { entry.job.res.destroy(); } catch {}
-  }
-  STREAM_LOCKS.delete(key);
-  return true;
-}
-
-// Register the new active stream for a key AFTER the previous was cancelled,
-// so we have at most one live upstream per account.
-function setStreamLock(key, job) {
-  const prev = STREAM_LOCKS.get(key);
-  if (prev) {
-    try { if (typeof prev.job.cancel === 'function') prev.job.cancel(); } catch {}
-    try { if (prev.job && typeof prev.job.res?.destroy === 'function') prev.job.res.destroy(); } catch {}
-  }
-  STREAM_LOCKS.set(key, { job, startedAt: Date.now() });
-}
-
-// Opportunistic GC of stale lock entries (no active stream, just old map rows).
-function sweepStreamLocks(now = Date.now()) {
-  for (const [key, entry] of STREAM_LOCKS) {
-    if (now - (entry.startedAt || 0) > MAX_STREAM_LOCK_AGE_MS) STREAM_LOCKS.delete(key);
-  }
-}
 
 app.disable('x-powered-by');
 
@@ -208,20 +131,16 @@ app.get('/stream', (req, res) => {
   const extraRef = req.get('referer');
   if (extraRef) upstreamHeaders.Referer = extraRef;
 
-  // ---- Serialize per-session upstream connections -----------------------
-  // Panels cap streams per account (e.g. 1 live). HLS/VOD can issue several
-  // parallel /stream requests, so take a strict lock: cancel any prior stream
-  // for THIS session BEFORE starting the new one. This keeps the origin at
-  // most one live TCP connection per account.
-  const lockKey = streamUserKey(t.toString(), req);
-  sweepStreamLocks();
-  cancelStreamLock(lockKey);
-
   // `handle` lets the upstreamFetch redirect chain be aborted at ANY moment
-  // (including mid-connect), even before it reaches a final stream. `job` is
-  // what the lock stores and what onClientGone / a take-over calls.
+  // (including mid-connect), even before it reaches a final stream. `job.cancel`
+  // lets later teardown (onClientGone) stop the upstream cleanly. We do NOT
+  // persist a per-session lock here: cancelling previously-started fragments on
+  // arrival of a new one corrupts the HLS buffer (partial 98/131 kB chunks are
+  // cut mid-download and the player freezes). Fragments must be allowed to
+  // finish naturally; connection reuse is handled by keepAlive agents + the
+  // frontend HLS buffer config.
   const handle = { cancelled: false, cancel: () => {} };
-  let job = { cancelled: false, res: null, destroyed: false };
+  const job = { cancelled: false, res: null, destroyed: false };
   job.handle = handle;
   job.cancel = () => {
     if (job.destroyed) return;
@@ -234,20 +153,15 @@ app.get('/stream', (req, res) => {
     } else if (job.res && typeof job.res.destroy === 'function') {
       try { job.res.destroy(); } catch {}
     }
-    if (STREAM_LOCKS.get(lockKey)?.job === job) STREAM_LOCKS.delete(lockKey);
   };
-  // The NEW stream owns the lock. setStreamLock also cancels any `job` that
-  // might still be registered under this key (defensive re-check).
-  setStreamLock(lockKey, job);
 
   upstreamFetch(t.toString(), upstreamHeaders, 0, handle, (err, upRes) => {
     if (job.cancelled) {
-      // A newer stream for this session already took over — do nothing.
+      // The client went away before we finished starting — drop upstream.
       if (upRes) { try { upRes.destroy(); } catch {} }
       return;
     }
     if (err) {
-      if (STREAM_LOCKS.get(lockKey)?.job === job) STREAM_LOCKS.delete(lockKey);
       if (res.writableEnded || res.destroyed) return;
       res.writeHead(502, { 'Content-Type': 'application/json', ...ALLOW_CORS });
       res.end(JSON.stringify({ error: 'upstream', detail: String(err && err.message || err) }));

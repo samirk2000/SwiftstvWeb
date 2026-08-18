@@ -91,15 +91,29 @@ src/
 - **Catchup DVR**: el reproductor salta a `startPosition` tras `loadedmetadata`; para canales con archivo el proxy sigue 302→CDN igual que el directo. Probar el rango `Range` en el `stream-proxy` para `seek` dentro del archive.
 - Algunos modelos Tizen esperan playlists con resolución param; lo dejamos neutro (el manifest entregado manda).
 
-## Límite estricto de conexiones (capa anti "4/3")
+## Gestión de conexiones hacia el panel (sin cortar el playback)
 
-El panel limita streams simultáneos por cuenta. Para no superarlo:
+El panel limita streams simultáneos por cuenta. La estrategia evita ráfagas de
+sockets, pero NUNCA cancela un segmento a medio descargar (eso corrompería el
+buffer HLS con fragmentos incompletos y congelaría el reproductor):
 
-- **Proxy (`vps-proxy/proxy.js`)**: el path `/stream` lleva un **lock por sesión** (`STREAM_LOCKS`). La clave es la cuenta Xtream (usuario:pass extraídos del `target` `/live|movie|series/u/p/...`) y, como fallback, la IP del cliente. Cuando llega una nueva petición `/stream` para la misma clave mientras otra está en curso, **la anterior se cancela de inmediato** (`upstreamReq.destroy()` / `controller()`), cerrando el TCP contra el panel antes de abrir la nueva conexión. Efecto: como máximo **1 conexión origen activa por cuenta/dispositivo** en cada instante.
-- **Keep-Alive de un solo socket**: los `http.Agent`/`https.Agent` globales usan `keepAlive: true` + **`maxSockets: 1`**. Toda petición upstream hacia el mismo panel/CDN reutiliza UNA sola conexión TCP subyacente (en lugar de abrir/cerrar por segmento), de modo que el GC del panel no llega a registrar ráfagas de sockets "Online" simultáneos.
-- **Frontend (`Player.jsx`)**: mantiene un `activeAbortController` global single-flight. Antes de arrancar cada stream se aborta el controller previo; en `onError`, `pause` o al desmontar se aborta y se limpia el `<video>` (`video.src=''` + `video.load()`), soltando el socket hacia el proxy.
-- **Prefetch HLS reducido**: el config de HLS.js usa `maxBufferLength: 10` y `maxMaxBufferLength: 20` para que se soliciten menos chunks y de forma menos frecuente/en paralelo, reduciendo la apertura de sockets hacia el panel y manteniendo 1 sola conexión estable.
-- **Consecuencia**: el proxy serializa estrictamente las peticiones paralelas de la misma sesión (HLS/VOD). Prioridad: nunca superar el límite del panel (ni que su GC cuente ráfagas de sockets como conexiones Online).
+- **Proxy (`vps-proxy/proxy.js`)**: NO se cancela la petición anterior por
+  usuario/IP al llegar una nueva. Los fragmentos HLS concluyen de forma natural
+  para no romper el buffer. Cuando el cliente se va (desconecta/error) se aborta
+  la petición upstream correspondiente (`req.on('aborted')` / `res.on('close')`).
+- **Keep-Alive de sockets reutilizados**: los `http.Agent`/`https.Agent`
+  globales usan `keepAlive: true` + `maxSockets: 50`. Cada socket TCP del VPS
+  hacia el panel/CDN queda abierto para reutilizarse en los siguientes request —
+  así el panel no registra una desconexión/reconexión por cada `.ts`, sin
+  serializar descargas (un `maxSockets` de 1 sí rompería el streaming).
+- **Frontend (`Player.jsx`)**: `activeAbortController` single-flight. Aborta el
+  fetch previo al arrancar un stream y limpia el `<video>` (`src=''` + `load()`)
+  en `onError`/`pause`/desmontaje, soltando el socket hacia el proxy.
+- **HLS.js config**: `enableWorker: true`, `lowLatencyMode: false`,
+  `backBufferLength: 30`, y buffer mínimo (`maxBufferLength: 10`,
+  `maxMaxBufferLength: 20`) para no lanzar peticiones de chunks en ráfagas
+  paralelas descontroladas. Los segmentos se descargan completos; la reducción
+  de peticiones, sumada al keep-alive, mantiene 1 conexión estable en el panel.
 
 ## Soporte
 
