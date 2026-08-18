@@ -221,8 +221,12 @@ app.get('/stream', (req, res) => {
     LIVE_FANOUT.set(key, entry);
 
     const headersL = {
-      'User-Agent': UPSTREAM_UA,
+      // Always identify as a standard IPTV player toward the origin. Prefer the
+      // client's own UA when the browser/webview sent one (some panels behave
+      // differently per UA); otherwise fall back to a known-good VLC UA.
+      'User-Agent': req.get('user-agent') || 'VLC/3.0.18 LibVLC/3.0.18',
       Accept: 'video/mp2t,*/*;q=0.5',
+      'Connection': 'keep-alive',
       'Cache-Control': 'no-cache',
       Pragma: 'no-cache',
       Referer: `${t.protocol}//${t.host}/`,
@@ -232,6 +236,31 @@ app.get('/stream', (req, res) => {
     const refL = req.get('referer');
     if (refL) headersL.Referer = refL;
 
+    // Tear the whole channel down cleanly: destroy the upstream socket (and any
+    // still-connecting request), tell remaining clients, and remove the entry so
+    // the next viewer does a clean re-connect (fresh upstream + fresh sockets).
+    const teardownChannel = (clientError) => {
+      if (entry.destroyed) return;
+      entry.destroyed = true;
+      try { entry.handle.cancel(); } catch {}
+      if (entry.upRes) {
+        try { entry.upRes.destroy(); } catch {}
+        entry.upRes = null;
+      }
+      LIVE_FANOUT.delete(key);
+      for (const clientRes of entry.clients) {
+        entry.clients.delete(clientRes);
+        if (clientRes.writableEnded || clientRes.destroyed) continue;
+        if (clientError) {
+          clientRes.writeHead(502, { 'Content-Type': 'application/json', ...ALLOW_CORS });
+          clientRes.end(JSON.stringify({ error: 'upstream', detail: String(clientError && clientError.message || clientError) }));
+        } else {
+          // Graceful end (upstream closed): signal EOF so viewers retry.
+          try { clientRes.end(); } catch {}
+        }
+      }
+    };
+
     upstreamFetch(target, headersL, 0, entry.handle, (err, upRes) => {
       // The channel may have been torn down while we were connecting.
       if (entry.destroyed || !LIVE_FANOUT.has(key)) {
@@ -239,23 +268,15 @@ app.get('/stream', (req, res) => {
         return;
       }
       if (err) {
-        entry.destroyed = true;
-        LIVE_FANOUT.delete(key);
-        for (const clientRes of entry.clients) {
-          if (!clientRes.writableEnded && !clientRes.destroyed) {
-            clientRes.writeHead(502, { 'Content-Type': 'application/json', ...ALLOW_CORS });
-            clientRes.end(JSON.stringify({ error: 'upstream', detail: String(err && err.message || err) }));
-          }
-        }
+        teardownChannel(err);
         return;
       }
       entry.upRes = upRes;
-      upRes.on('error', () => {
-        // Upstream died mid-stream: drop the channel so the next viewer
-        // re-establishes it; remaining clients will retry via onClientGone/reset.
-        entry.destroyed = true;
-        entry.upRes = null;
-        LIVE_FANOUT.delete(key);
+      // If the upstream dies or closes unexpectedly, destroy every associated
+      // socket immediately and drop the entry so a reconnect is clean.
+      upRes.on('error', () => teardownChannel(upRes));
+      upRes.on('close', () => {
+        if (!upRes.complete) teardownChannel();
       });
       // Pipe the single origin stream into every connected viewer.
       for (const clientRes of entry.clients) {
@@ -266,6 +287,7 @@ app.get('/stream', (req, res) => {
         }
       }
       if (entry.clients.size === 0) {
+        entry.destroyed = true;
         entry.handle.cancel();
         upRes.destroy();
         LIVE_FANOUT.delete(key);
