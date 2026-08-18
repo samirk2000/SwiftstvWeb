@@ -28,6 +28,9 @@ export default function Player() {
   const [controlsVisible, setControlsVisible] = useState(true);
   const [error, setError] = useState(false);
   const [started, setStarted] = useState(false);
+  // Bumped by the manual Retry button so the [url] effect re-runs and rebuilds
+  // the player from scratch (destroying any previous controller first).
+  const [restart, setRestart] = useState(0);
 
   // Wipe the media element and abort any in-flight request, releasing the
   // socket to the panel. Call on error, pause / unmount, or before a new stream.
@@ -135,9 +138,11 @@ export default function Player() {
     const onPlaying = () => setStarted(true);
     video.addEventListener('playing', onPlaying);
     // A 'stalled'/'waiting' after we already started is normal buffering.
+    // If play() rejects (autoplay blocked / no source), tear the player down
+    // like any playback error instead of leaving the watchdog running.
     video.play()
       .then(() => {})
-      .catch(() => setError(true));
+      .catch(onPlaybackError);
 
     const wake = wakeLockController();
     wake.request();
@@ -207,7 +212,7 @@ export default function Player() {
       video.removeEventListener('pause', onPause);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [url]);
+  }, [url, restart]);
 
   // Auto-hide controls after inactivity.
   useEffect(() => {
@@ -226,6 +231,22 @@ export default function Player() {
         <div style={{ color: 'var(--text)' }}>
           {error ? t('player.error') : t('common.error')}
         </div>
+        {error && (
+          <button
+            className="btn-ghost"
+            style={{ position: 'absolute', bottom: 96, left: '50%', transform: 'translateX(-50%)' }}
+            onClick={() => {
+              // Manual retry only — never an automatic loop. Reset the error and
+              // bump `restart` so the [url] effect re-runs, destroying any old
+              // controller and rebuilding the player from scratch.
+              setError(false);
+              setStarted(false);
+              setRestart((x) => x + 1);
+            }}
+          >
+            {t('common.retry')}
+          </button>
+        )}
         <button
           className="btn-ghost"
           style={{ position: 'absolute', top: 24, left: 24 }}
@@ -249,6 +270,7 @@ export default function Player() {
         ref={videoRef}
         autoPlay
         playsInline
+        preload="none"
         onClick={(e) => e.stopPropagation()}
       />
       {!started && !error && (
