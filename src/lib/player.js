@@ -62,6 +62,12 @@ function hlsConfigFor(url, opts) {
     maxBufferSize: 60 * 1024 * 1024,
     // No cortar la carga de un fragmento prematuramente (segmentos de varios MB).
     fragLoadingTimeOut: 30000,
+    fragLoadingMaxRetry: 6,
+    // Manifests via a slow proxy can stall too — hold them longer and retry more.
+    manifestLoadingTimeOut: 15000,
+    manifestLoadingMaxRetry: 4,
+    levelLoadingTimeOut: 15000,
+    levelLoadingMaxRetry: 4,
     // Cache-busting of the manifest so DVR buffers don't go stale after stalls.
     progressive: true,
   };
@@ -90,7 +96,9 @@ export function attachHls(videoEl, url, opts = {}) {
     hls: null,
     native: false,
     errorCount: 0,
+    destroyed: false,
     destroy() {
+      controller.destroyed = true;
       if (nativeWatchdog) {
         clearInterval(nativeWatchdog);
         nativeWatchdog = null;
@@ -193,6 +201,7 @@ export function attachHls(videoEl, url, opts = {}) {
       }
       // Try the NEXT candidate when a native request errors out (e.g. a proxy
       // answers 403 for this panel) — a different proxy/direct route may work.
+      // A single decisive error moves on; transient stalls are retried below.
       const onNativeError = () => {
         if (attempt < candidates.length - 1) {
           attempt += 1;
@@ -203,27 +212,76 @@ export function attachHls(videoEl, url, opts = {}) {
         }
       };
       videoEl.addEventListener('error', onNativeError);
-      // Watchdog: some CDNs hang the first <video> request with zero bytes (no
-      // error event ever fires). If we never get to HAVE_METADATA within a few
-      // seconds, move on to the next candidate.
-      const STALL_MS = 8000;
-      const stallFrom = Date.now();
-      nativeWatchdog = setInterval(() => {
-        if (videoEl.readyState >= 1 || videoEl.error) {
+      // Watchdog: some CDNs/proxies hang the first <video> request with zero
+      // bytes (no error event ever fires) while the panel does its 302 → CDN and
+      // starts serving a large mp4. VOD files (hundreds of MB through a proxy)
+      // can take well over 8s to reach HAVE_METADATA, so we wait much longer
+      // before treating it as a failure, and RETRY the same route a few times
+      // (with a cache-buster) instead of aborting on the first slow load.
+      const VOD_STALL_MS = 20000;
+      const MAX_NATIVE_RETRIES = 2;
+      let nativeRetries = 0;
+      let stallFrom = Date.now();
+      const onNativeWatch = () => {
+        if (videoEl.readyState >= 1 || videoEl.error || controller.destroyed) {
           clearInterval(nativeWatchdog);
           nativeWatchdog = null;
           return;
         }
-        if (Date.now() - stallFrom > STALL_MS && attempt < candidates.length - 1) {
-          // Loading with no metadata → this route is hanging; try the next one.
+        if (Date.now() - stallFrom < VOD_STALL_MS) return;
+        // No metadata after VOD_STALL_MS → try to keep it alive instead of aborting.
+        stallFrom = Date.now(); // open a fresh window for the next wait
+        if (nativeRetries < MAX_NATIVE_RETRIES) {
+          // Reload the SAME route with a cache-buster: slow panels are often
+          // transitory (the 302 token goes stale while the CDN warms up), and a
+          // reload frequently starts the stream whereas another proxy may hit a
+          // fresh slow start.
+          nativeRetries += 1;
+          setNativeSrc(/* bustCache */ true);
+          return;
+        }
+        if (attempt < candidates.length - 1) {
+          // This route is genuinely dead after retries → try the next proxy.
           clearInterval(nativeWatchdog);
           nativeWatchdog = null;
+          nativeRetries = 0;
           attempt += 1;
+          controller.errorCount = 0;
           doStartPlayback();
+          return;
         }
-      }, 1000);
+        clearInterval(nativeWatchdog);
+        nativeWatchdog = null;
+        if (typeof opts.onError === 'function') opts.onError(findMediaError(videoEl));
+      };
+      nativeWatchdog = setInterval(onNativeWatch, 1000);
     }
     return () => controller.destroy();
+  }
+
+  function setNativeSrc(bustCache) {
+    const base = candidates[Math.min(attempt, candidates.length - 1)];
+    videoEl.src = bustCache ? addNoCache(base) : base;
+    // Re-arm the play() the caller/toggle relies on.
+    videoEl.load();
+    if (opts.startPosition) {
+      videoEl.addEventListener(
+        'loadedmetadata',
+        () => {
+          videoEl.currentTime = Math.min(opts.startPosition, videoEl.duration || opts.startPosition);
+        },
+        { once: true }
+      );
+    }
+  }
+
+  function addNoCache(u) {
+    const sep = String(u).includes('?') ? '&' : '?';
+    return `${u}${sep}nocache=${Date.now()}`;
+  }
+
+  function findMediaError(videoEl) {
+    return videoEl.error || new Error('media timeout');
   }
 
   doStartPlayback();
