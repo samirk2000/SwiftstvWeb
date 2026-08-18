@@ -405,26 +405,28 @@ export function attachTs(videoEl, url, opts = {}) {
     const player = mpegts.createPlayer(
       { type: 'mpegts', isLive: true, url: srcUrl },
       {
-        // Latencia suavizada para live: seguimos el borde del directo, pero con
-        // suficiente colchón de buffer (8s máx / 2.5s de sobra) para absorber
-        // fluctuaciones de red sin que el stream brinque o se trabe.
+        // Estabilidad para FHD/60fps: sin perseguir agresivamente el borde del
+        // directo (evita descartar frames), con buffering en memoria para
+        // absorber picos de bitrate y una conexión HTTP viva e indefinida.
         enableWorker: false,
         enableWorkerForMSE: false,
         isLive: true,
-        // Desactiva el buffering agresivo en memoria; buffer inicial pequeño.
-        enableStashBuffer: false,
-        stashInitialSize: 128 * 1024,
-        liveBufferLatencyChasing: true,
-        liveBufferLatencyMaxLatency: 8,
-        liveBufferLatencyMinRemain: 2.5,
+        // Buffering en memoria para absorber picos; inicial 384 KB.
+        enableStashBuffer: true,
+        stashInitialSize: 384 * 1024,
+        // Sin chasing agresivo (no se descartan frames). Estos límites quedan
+        // como margen amplio de buffer (~10s, mínimo 3s de sobra).
+        liveBufferLatencyChasing: false,
+        liveBufferLatencyMaxLatency: 10,
+        liveBufferLatencyMinRemain: 3,
         // Limpia el buffer ya consumido para liberar memoria.
         autoCleanupSourceBuffer: true,
         autoCleanupMaxBackwardDuration: 30,
         autoCleanupMinBackwardDuration: 10,
-        // Conexión hacia el proxy/panel: pedir algo más por adelantado (12s) para
-        // mantener la única .ts compartida abierta y con red estable.
+        // Conexión hacia el proxy/panel: pedir más por adelantado (15s) para
+        // mantener la única .ts compartida abierta y estable.
         lazyLoad: true,
-        lazyLoadMaxDuration: 12,
+        lazyLoadMaxDuration: 15,
       }
     );
     controller.player = player;
