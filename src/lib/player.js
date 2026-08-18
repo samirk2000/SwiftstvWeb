@@ -53,12 +53,17 @@ function hlsConfigFor(url, opts) {
     backBufferLength: 60,
     liveSyncDurationCount: 3,
     // Priorizar estabilidad sobre latencia baja: los segmentos de ~2.9 MB tardan
-    // en cruzar el proxy, así que ampliamos el búfer y desactivamos el modo de
-    // baja latencia para evitar agotamiento del búfer / congelamientos.
+    // en cruzar el proxy, así que desactivamos el modo de baja latencia y
+    // REDUCIMOS el prefetch de buffer. Un buffer pequeño (10s pico, 20s máx.)
+    // solicita chunks con menos frecuencia y menos en paralelo, manteniendo la
+    // conexión hacia el panel estable en 1 socket (no abre/cierra en cada
+    // segmento ni el proxy ve ráfagas de sockets que el GC del panel cuenta
+    // como conexiones Online).
     lowLatencyMode: false,
-    // Búfer de datos (segundos / bytes) para absorber conectividades lentas.
-    maxBufferLength: 60,
-    maxMaxBufferLength: 120,
+    // Búfer de datos (segundos / bytes) para mantener la reproducción sin
+    // agotarse, pero mínimo para no disparar peticiones paralelas agresivas.
+    maxBufferLength: 10,
+    maxMaxBufferLength: 20,
     maxBufferSize: 60 * 1024 * 1024,
     // No cortar la carga de un fragmento prematuramente (segmentos de varios MB).
     fragLoadingTimeOut: 30000,

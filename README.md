@@ -96,8 +96,10 @@ src/
 El panel limita streams simultáneos por cuenta. Para no superarlo:
 
 - **Proxy (`vps-proxy/proxy.js`)**: el path `/stream` lleva un **lock por sesión** (`STREAM_LOCKS`). La clave es la cuenta Xtream (usuario:pass extraídos del `target` `/live|movie|series/u/p/...`) y, como fallback, la IP del cliente. Cuando llega una nueva petición `/stream` para la misma clave mientras otra está en curso, **la anterior se cancela de inmediato** (`upstreamReq.destroy()` / `controller()`), cerrando el TCP contra el panel antes de abrir la nueva conexión. Efecto: como máximo **1 conexión origen activa por cuenta/dispositivo** en cada instante.
+- **Keep-Alive de un solo socket**: los `http.Agent`/`https.Agent` globales usan `keepAlive: true` + **`maxSockets: 1`**. Toda petición upstream hacia el mismo panel/CDN reutiliza UNA sola conexión TCP subyacente (en lugar de abrir/cerrar por segmento), de modo que el GC del panel no llega a registrar ráfagas de sockets "Online" simultáneos.
 - **Frontend (`Player.jsx`)**: mantiene un `activeAbortController` global single-flight. Antes de arrancar cada stream se aborta el controller previo; en `onError`, `pause` o al desmontar se aborta y se limpia el `<video>` (`video.src=''` + `video.load()`), soltando el socket hacia el proxy.
-- **Consecuencia**: el proxy rechaza/stridamente serializa peticiones paralelas de la misma sesión (HLS/VOD) — típicamente no paras las descargas de segmentos de CDN (que no abren sesión en el panel), pero si alguna conectividad lo exige se puede ajustar `MAX_STREAM_LOCK_AGE_MS`/timeout. Prioridad: nunca superar el límite del panel.
+- **Prefetch HLS reducido**: el config de HLS.js usa `maxBufferLength: 10` y `maxMaxBufferLength: 20` para que se soliciten menos chunks y de forma menos frecuente/en paralelo, reduciendo la apertura de sockets hacia el panel y manteniendo 1 sola conexión estable.
+- **Consecuencia**: el proxy serializa estrictamente las peticiones paralelas de la misma sesión (HLS/VOD). Prioridad: nunca superar el límite del panel (ni que su GC cuente ráfagas de sockets como conexiones Online).
 
 ## Soporte
 

@@ -38,10 +38,14 @@ const app = express();
 const PORT = Number(process.env.PORT || 3000);
 
 // Primary agent for HTTPS upstreams. Ignore invalid self-signed certificates so
-// panels/CDN IPs with broken TLS still stream.
-const INSECURE_AGENT = new https.Agent({ rejectUnauthorized: false, keepAlive: true });
-// For HTTP upstreams (http://IP:port CDNs).
-const HTTP_AGENT = new http.Agent({ keepAlive: true });
+// panels/CDN IPs with broken TLS still stream. `keepAlive: true` reuses the
+// underlying TCP connection across segments, and `maxSockets: 1` forces ALL
+// concurrent upstream requests for this agent to share that ONE socket. This
+// stops the panel's GC from seeing a burst of short-lived open sockets (which
+// it counts as separate "Online" connections, e.g. 3 simultaneously).
+const INSECURE_AGENT = new https.Agent({ rejectUnauthorized: false, keepAlive: true, maxSockets: 1 });
+// For HTTP upstreams (http://IP:port CDNs) — same single-socket reuse.
+const HTTP_AGENT = new http.Agent({ keepAlive: true, maxSockets: 1 });
 
 // Run length of a slow/HLS DVR stream before timing out upstream sockets.
 const UPSTREAM_TIMEOUT_MS = Number(process.env.UPSTREAM_TIMEOUT_MS || 0);
