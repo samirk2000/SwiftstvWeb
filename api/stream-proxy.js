@@ -65,9 +65,14 @@ export default async function handler(req, res) {
     Accept: '*/*',
     'Cache-Control': 'no-cache',
     Pragma: 'no-cache',
+    // Refer the origin panel host so CDNs that validate the referrer don't 403.
+    Referer: `${t.protocol}//${t.host}/`,
   };
   const range = req.headers.range;
   if (range) upstreamHeaders.Range = range;
+  // Pass through client auth if the panel/CDN needs it (Bearer/cookie tokens).
+  const clientAuth = req.headers.authorization;
+  if (clientAuth) upstreamHeaders.Authorization = clientAuth;
 
   try {
     const upstream = await fetch(t.toString(), { headers: upstreamHeaders, redirect: 'follow' });

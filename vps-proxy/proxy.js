@@ -31,6 +31,7 @@
 const express = require('express');
 const http = require('http');
 const https = require('https');
+const { Transform } = require('node:stream');
 const { URL } = require('url');
 
 const app = express();
@@ -104,15 +105,27 @@ app.get('/stream', (req, res) => {
   const host = req.get('x-forwarded-host') || req.get('host');
   const selfBase = `https://${host}`;
 
-  // Pass the browser's Range straight to the CDN so <video> can seek.
+  // Headers every Xtream panel/CDN expects. Always include a player UA so VOD
+  // mp4/mkv requests aren't rejected with 403. Refer to the ORIGINAL host so
+  // CDNs that validate the referrer don't block the redirected request.
   const upstreamHeaders = {
     'User-Agent': UPSTREAM_UA,
     Accept: '*/*',
     'Cache-Control': 'no-cache',
     Pragma: 'no-cache',
+    Referer: `${t.protocol}//${t.host}/`,
   };
+  // Forward the browser's Range to the CDN so <video> can seek on VOD.
   const range = req.get('range');
   if (range) upstreamHeaders.Range = range;
+  // Pass through auth/cookie headers from the client if the panel/CDN needs
+  // them (e.g. token-in-cookie or Bearer) — preserve the original UA/Range too.
+  const auth = req.get('authorization');
+  if (auth) upstreamHeaders.Authorization = auth;
+  const cookie = req.get('cookie');
+  if (cookie && req.get('x-forward-cookies')) upstreamHeaders.Cookie = cookie;
+  const extraRef = req.get('referer');
+  if (extraRef) upstreamHeaders.Referer = extraRef;
 
   upstreamFetch(t.toString(), upstreamHeaders, 0, (err, upRes) => {
     if (err) {
@@ -173,7 +186,16 @@ app.get('/stream', (req, res) => {
     // versa so aborts don't leak sockets and streams close promptly.
     upStream.on('error', () => res.destroy());
     res.on('close', () => upStream.destroy());
-    upStream.pipe(res);
+    // Stream pure passthrough with a larger write highWaterMark than the 16 KB
+    // default: for multi-MB TS/mp4 segments this writes bigger chunks per flush,
+    // reducing syscall overhead and keeping the pipe at the CDN's bitrate.
+    const joiner = new Transform({
+      highWaterMark: 256 * 1024,
+      transform(chunk, _enc, cb) {
+        cb(null, chunk);
+      },
+    });
+    upStream.pipe(joiner).pipe(res);
   });
 });
 
@@ -234,15 +256,20 @@ function upstreamFetch(urlStr, headers, redirects, cb) {
 
   const upstreamReq = httpModule.request(opts, (upRes) => {
     const status = upRes.statusCode || 0;
-    // Follow 30x to the CDN (limit the hop count).
+    // Final effective URL of this hop (also what playlist URIs resolve against).
+    upRes.url = url.toString();
+    // Follow 30x to the CDN (limit the hop count) — same headers (UA/Range/
+    // Authorization/Referer) are reused verbatim on the redirected request so
+    // the CDN still sees a player identity and doesn't 403.
     if (status >= 301 && status <= 308 && upRes.headers.location && redirects < MAX_REDIRECTS) {
       upRes.resume(); // drain so the socket can be reused
       let next = upRes.headers.location;
       if (!/^https?:\/\//i.test(next)) next = new URL(next, url).toString();
       return upstreamFetch(next, headers, redirects + 1, cb);
     }
-    // Attach final URL for playlist rewriting.
-    upRes.url = urlStr;
+    // Attach the FINAL resolved URL for playlist rewriting / debug (the value
+    // from the last successful hop).
+    upRes.url = url.toString();
     cb(null, upRes);
   });
 

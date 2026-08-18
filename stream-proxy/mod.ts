@@ -42,9 +42,14 @@ export async function handler(req) {
     Accept: '*/*',
     'Cache-Control': 'no-cache',
     Pragma: 'no-cache',
+    // Refer the origin panel host so CDNs that validate the referrer don't 403.
+    Referer: `${t.protocol}//${t.host}/`,
   };
   const range = req.headers.get('range');
   if (range) headers.Range = range;
+  // Pass through client auth if the panel/CDN needs it (Bearer/cookie tokens).
+  const clientAuth = req.headers.get('authorization');
+  if (clientAuth) headers.Authorization = clientAuth;
 
   // Follow the panel 302 → CDN http manifest. The CDN cert is invalid, but
   // server-side fetch for the manifest is over http from the panel's own

@@ -52,8 +52,17 @@ function hlsConfigFor(url, opts) {
     enableWorker: false, // Worker-less is safer across TV webviews.
     backBufferLength: 60,
     liveSyncDurationCount: 3,
-    // Cache-busting of the manifest so DVR buffers don't go stale after stalls.
+    // Priorizar estabilidad sobre latencia baja: los segmentos de ~2.9 MB tardan
+    // en cruzar el proxy, así que ampliamos el búfer y desactivamos el modo de
+    // baja latencia para evitar agotamiento del búfer / congelamientos.
+    lowLatencyMode: false,
+    // Búfer de datos (segundos / bytes) para absorber conectividades lentas.
     maxBufferLength: 60,
+    maxMaxBufferLength: 120,
+    maxBufferSize: 60 * 1024 * 1024,
+    // No cortar la carga de un fragmento prematuramente (segmentos de varios MB).
+    fragLoadingTimeOut: 30000,
+    // Cache-busting of the manifest so DVR buffers don't go stale after stalls.
     progressive: true,
   };
   if (opts?.extraOrigin) {
