@@ -1,9 +1,10 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { t } from '../lib/i18n.js';
 import { getSeriesCategories, getSeries } from '../lib/xtream.js';
 import { usePanelList } from '../hooks/usePanelList.js';
 import { usePersistedCategory } from '../hooks/usePersistedCategory.js';
+import { isCategoryLocked } from '../lib/parental.js';
 import { useFocusable } from '../components/Focusable.jsx';
 
 function SeriesTile({ series, onOpen }) {
@@ -30,6 +31,17 @@ export default function SeriesList() {
   const [catId, setCatId] = usePersistedCategory('series');
   const catArgs = useMemo(() => (catId ? [catId] : []), [catId]);
   const { data: series, loading, error } = usePanelList(getSeries, catArgs);
+  const [query, setQuery] = useState('');
+  const visibleCats = useMemo(
+    () => (categories || []).filter((c) => !isCategoryLocked(c.category_id)),
+    [categories]
+  );
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q || !series) return series || [];
+    return (series || []).filter((s) => String(s.name || '').toLowerCase().includes(q));
+  }, [series, query]);
 
   return (
     <div>
@@ -37,12 +49,19 @@ export default function SeriesList() {
         <h1>{t('series.title')}</h1>
       </div>
 
-      {categories && categories.length > 0 && (
+      <input
+        className="search-box"
+        placeholder={t('series.search')}
+        value={query}
+        onChange={(e) => setQuery(e.target.value)}
+      />
+
+      {visibleCats && visibleCats.length > 0 && (
         <div className="cat-bar">
           <button className={`cat-chip ${catId === '' ? 'selected' : ''}`} onClick={() => setCatId('')}>
             {t('live.all')}
           </button>
-          {categories.map((cat) => (
+          {visibleCats.map((cat) => (
             <button
               key={cat.category_id}
               className={`cat-chip ${String(catId) === String(cat.category_id) ? 'selected' : ''}`}
@@ -59,11 +78,11 @@ export default function SeriesList() {
           <div className="spinner" />
           {t('common.loading')}
         </div>
-      ) : error || !series?.length ? (
+      ) : error || !filtered?.length ? (
         <div className="state">{t('vod.noResults')}</div>
       ) : (
         <div className="grid">
-          {series.map((s) => (
+          {filtered.map((s) => (
             <SeriesTile
               key={s.series_id}
               series={s}

@@ -58,6 +58,10 @@ export function updateContinueWatching(item) {
     id: item.id,
     title: item.title,
     image: item.image,
+    // Keep the raw (un-proxied) Xtream URL so Home's "resume" can rebuild the
+    // player route. It's stored per-playback; absent items fall back to
+    // reconstruction from type/id + session.
+    url: item.url || '',
     baseUrl: item.baseUrl,
     position: item.position || 0,
     duration: item.duration || 0,

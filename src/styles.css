@@ -724,6 +724,139 @@ input:focus-visible {
   border-color: var(--accent);
 }
 
+/* ---------- Buttons / misc ---------- */
+.btn-xs {
+  padding: 4px 10px;
+  font-size: 12px;
+  border-radius: 8px;
+}
+
+.fav-on {
+  color: #ffd60a !important;
+  border-color: #ffd60a;
+}
+
+.fav-btn {
+  color: var(--text-dim);
+  font-size: 16px;
+  padding: 4px 8px;
+  border-radius: 8px;
+}
+.fav-btn.fa,
+.fav-btn.fa:hover,
+.fav-btn.fa:focus {
+  color: #ffd60a;
+}
+.fav-btn:hover,
+.fav-btn:focus {
+  color: #ffd60a;
+  border-color: #ffd60a;
+}
+
+.hint {
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
+/* Continue-watching tile card + its resume button. */
+.cw-tile {
+  position: relative;
+  flex: 0 0 auto;
+  width: clamp(140px, 22vw, 208px);
+}
+.cw-tile .btn-resume {
+  position: absolute;
+  bottom: 8px;
+  right: 8px;
+  background: rgba(0, 0, 0, 0.65);
+  backdrop-filter: blur(4px);
+  z-index: 2;
+}
+
+/* ---------- Parental ---------- */
+.parental-card {
+  max-width: 520px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 20px;
+  margin-bottom: 20px;
+}
+.pin-input {
+  max-width: 100%;
+  font-variant-numeric: tabular-nums;
+}
+.cat-bar.wrap {
+  flex-wrap: wrap;
+  overflow-x: visible;
+}
+
+/* ---------- Catch-up panel ---------- */
+.channel.active {
+  border-color: var(--accent);
+}
+.catchup-panel {
+  border: 1px solid var(--accent);
+  border-radius: 12px;
+  background: var(--bg-card);
+  padding: 14px;
+  margin: 6px 0;
+}
+.catchup-head {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 10px;
+}
+.catchup-head strong {
+  font-size: 16px;
+  flex: 1;
+}
+.epg-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+.epg-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 8px 12px;
+  text-align: left;
+}
+.epg-row:hover,
+.epg-row:focus,
+.epg-row.selected {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.epg-row .epg-time {
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  width: 52px;
+  text-align: right;
+  flex: 0 0 auto;
+}
+.epg-row .epg-title {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.catchup-badge {
+  color: var(--accent);
+  border-color: var(--accent);
+  flex: 0 0 auto;
+}
+
 /* ---------- Responsive (phone) ---------- */
 @media (max-width: 640px) {
   .content {

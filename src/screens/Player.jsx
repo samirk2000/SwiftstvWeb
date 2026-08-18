@@ -70,6 +70,8 @@ export default function Player() {
           id,
           title: title || '',
           image: '',
+          // Keep the RAW (pre-proxy) URL so Home's resume can rebuild it.
+          url: url || '',
           position: Math.floor(video.currentTime || 0),
           duration: Math.floor(video.duration || 0),
         });

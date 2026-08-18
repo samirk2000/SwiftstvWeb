@@ -3,6 +3,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { t } from '../lib/i18n.js';
 import { getVodInfo, vodStreamUrl } from '../lib/xtream.js';
 import { getSession } from '../lib/session.js';
+import { isFavorite, toggleFavorite } from '../lib/session.js';
 import { formatDuration } from '../lib/time.js';
 
 export default function VodDetail() {
@@ -10,6 +11,7 @@ export default function VodDetail() {
   const navigate = useNavigate();
   const [info, setInfo] = useState(null);
   const [server, setServer] = useState(null);
+  const [fav, setFav] = useState(false);
 
   useEffect(() => {
     const saved = getSession();
@@ -19,6 +21,7 @@ export default function VodDetail() {
     }
     const srv = { baseUrl: saved.baseUrl, username: saved.username, password: saved.password };
     setServer(srv);
+    setFav(isFavorite('vod', id));
     (async () => {
       // get_vod_info returns { info, movie_data }; keep the WHOLE object so the
       // detail reads both the stream (info.info) and its metadata (movie_data).
@@ -69,6 +72,22 @@ export default function VodDetail() {
             <div className="detail-actions">
               <button className="btn-primary" onClick={play}>
                 ▶ {t('vod.play')}
+              </button>
+              <button
+                className={fav ? 'btn-ghost fav-on' : 'btn-ghost'}
+                onClick={() => {
+                  const added = toggleFavorite({
+                    type: 'vod',
+                    id,
+                    title: streamData?.name || '',
+                    image:
+                      meta?.cover_big || streamData?.cover_big || streamData?.backdrop_path || meta?.cover || '',
+                  });
+                  setFav(added);
+                }}
+              >
+                {fav ? '★ ' : '☆ '}
+                {t('common.favorite')}
               </button>
             </div>
           </div>

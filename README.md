@@ -64,23 +64,31 @@ src/
 ## MVP cubierto
 
 - Login con **multi-DNS failover** (CVC aliases se corren primero, luego los demás paneles) leyendo el `servers.json` remoto de GitHub con fallback embebido; sesión persistida en `localStorage` y restaurada al relanzar.
-- Home (Live / Movies / Series / Exclusivos) + fila **seguir viendo**.
-- Guía en vivo (canales + categorías), VOD (grid + detalle), Series (lista + detalle con temporadas/capítulos).
+- Home (Live / Movies / Series / Exclusivos / Control parental) + fila **seguir viendo** (botón "Resumir" que reanuda por posición) + fila **Favoritos**.
+- Guía en vivo con canales/categorías + **catchup** (selector por canal con `get_short_epg`: elige un programa del archivo y se reproduce por `start`).
+- VOD (grid + detalle), Series (lista + detalle con temporadas/capítulos), ambos con **búsqueda** en el cliente.
+- **Favoritos** (toggle en detalle VOD/Series y en canales) persistidos en `localStorage`.
 - Player con **HLS.js** (manifiesto, retry/recovery en stall DVR, posición de catchup), **PiP** y **Screen Wake Lock** best-effort.
 - **Exclusivos**: catálogo remoto + parsing `hls/direct/m3u/json/extract`, y **proxy/origen dinámico** (Referer/Origin/User-Agent) detectado contra `proxy_base_url`/host/`proxy_path` publicados — sin dominios hardcodeados. Un JSON de solo canales no borra la config de proxy ya publicada.
+- **Control parental por PIN**: restringe `category_ids` por perfil guardado en `localStorage`; por defecto todo pasa sin PIN (gate abierto). Admón. en `/parental`.
 
 ## Stubs / best-effort en este MVP
 
-- **EPG** por canal: en la guía se listan canales/categorías; la EPG corta y el catchup se preparan en `xtream.js` /`player.js`, pero el MVP prioriza una reproducción end-to-end antes que el pase de programación completo.
-- **Favoritos**: utilidades en `session.js` listas; sin pantalla dedicada aún.
-- **Gate parental**: previsto como stub futuro.
+- **Catchup por fecha/hora**: el selector está en la guía por canal (lee `get_short_epg` y arma la URL de archivo con `start`). Depende de que el panel ofrezca el archivo; canales sin `tv_archive:1` no muestran el selector.
+- **Favoritos**: utilidades en `session.js` + UI de toggle y fila en Home. Sin gestión de "eliminar desde Home", pero el toggle en detalle/canal la mantiene.
+- **Gate parental**: administración básica (`/parental`): PIN + categorías bloqueadas por perfil; el bloqueo se aplica ocultando `category_ids` en las listas. Sin perfiles múltiples por usuario todavía — un solo perfil activo.
 - **Voz a texto / teclado OS** en login: los campos son `<input>` nativos para el teclado remoto del TV (compatible webOS/Tizen); sin diálogo custom.
 
 ## Notas de CORS / codecs de navegador (Tizen / webOS / Vidaa)
 
 - **CORS**: los paneles Xtream y el proxy Exclusivos pueden **no** mandar cabeceras CORS. En este MVP estático el navegador del TV/intérnate llama directo; algunos paneles podrían bloquear (CORS) ciertas peticiones. Aceptado por ahora — ver el comentario CORS en `src/lib/player.js`. El camino correcto a futuro es un **Pages Function / Worker** que proxée (documentado en `wrangler.toml`).
-- **Codecs**: webOS/Tizen/Vidaa varían en soporte de **AC3/EAC3** y de ciertos subtítulos; hls.js degrada pero emitir A/HE-AAC/AC3 podría quedar sin audio en algunos dispositivos. Best-effort.
+- **Codecs AC3/EAC3 (VOD y en vivo)** — probar en hardware, no asumas:
+  - **LG webOS (WebKit)**: soporta AC3 en MP4/TTS por enmuxer nativo, pero **EAC3 puede sonar mudo** o requerir `.ac3`/`.eac3` envueltos en TS. hls.js degrada el audio pero el párametro del panel manda.
+  - **Samsung Tizen (Chromium-WebKit)**: AC3 soportado de forma inconsistente entre años; **EAC3 (Dolby Digital Plus)** frecuentemente **sin audio** en cajas más viejas. La app los entrega tal cual; no transcodeamos.
+  - **HISENSE Vidaa**: limitado; AC3 a 5.1 a menudo se colapsa a estéreo o silencio, y EAC3 puede no reproducirse. Best-effort.
+  - **Sin transcodificación**: Swiftstv sólo reenvía los contenedores/programas originales del panel; si el panel entrega AC3/EAC3 y el TV lo rechaza, se espera la caída a estéreo/otro programa, no un downgrade automático. Esto se documenta para futura decisión (proxy con transcode a HE-AAC/aac).
 - **HLS.js**: `enableWorker:false` (sin Worker es más seguro en webviews de TV), `backBufferLength`, `LiveSyncDurationCount` y recovery de manifest en stalls DVR.
+- **Catchup DVR**: el reproductor salta a `startPosition` tras `loadedmetadata`; para canales con archivo el proxy sigue 302→CDN igual que el directo. Probar el rango `Range` en el `stream-proxy` para `seek` dentro del archive.
 - Algunos modelos Tizen esperan playlists con resolución param; lo dejamos neutro (el manifest entregado manda).
 
 ## Soporte

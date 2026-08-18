@@ -1,9 +1,10 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { t } from '../lib/i18n.js';
 import { getVodCategories, getVodStreams } from '../lib/xtream.js';
 import { usePanelList } from '../hooks/usePanelList.js';
 import { usePersistedCategory } from '../hooks/usePersistedCategory.js';
+import { isCategoryLocked } from '../lib/parental.js';
 import { useFocusable } from '../components/Focusable.jsx';
 
 function VodTile({ vod, onOpen }) {
@@ -30,6 +31,18 @@ export default function VodGrid() {
   const [catId, setCatId] = usePersistedCategory('vod');
   const catArgs = useMemo(() => (catId ? [catId] : []), [catId]);
   const { data: streams, loading, error } = usePanelList(getVodStreams, catArgs);
+  const [query, setQuery] = useState('');
+  const visibleCats = useMemo(
+    () => (categories || []).filter((c) => !isCategoryLocked(c.category_id)),
+    [categories]
+  );
+
+  // Client-side search over the current category's stream list.
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q || !streams) return streams || [];
+    return (streams || []).filter((v) => String(v.name || '').toLowerCase().includes(q));
+  }, [streams, query]);
 
   return (
     <div>
@@ -37,12 +50,19 @@ export default function VodGrid() {
         <h1>{t('vod.title')}</h1>
       </div>
 
-      {categories && categories.length > 0 && (
+      <input
+        className="search-box"
+        placeholder={t('vod.search')}
+        value={query}
+        onChange={(e) => setQuery(e.target.value)}
+      />
+
+      {visibleCats && visibleCats.length > 0 && (
         <div className="cat-bar">
           <button className={`cat-chip ${catId === '' ? 'selected' : ''}`} onClick={() => setCatId('')}>
             {t('live.all')}
           </button>
-          {categories.map((cat) => (
+          {visibleCats.map((cat) => (
             <button
               key={cat.category_id}
               className={`cat-chip ${String(catId) === String(cat.category_id) ? 'selected' : ''}`}
@@ -59,11 +79,11 @@ export default function VodGrid() {
           <div className="spinner" />
           {t('common.loading')}
         </div>
-      ) : error || !streams?.length ? (
+      ) : error || !filtered?.length ? (
         <div className="state">{t('vod.noResults')}</div>
       ) : (
         <div className="grid">
-          {streams.map((vod) => (
+          {filtered.map((vod) => (
             <VodTile
               key={vod.stream_id}
               vod={vod}

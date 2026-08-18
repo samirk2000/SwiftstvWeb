@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { t } from '../lib/i18n.js';
 import { getSeriesInfo, seriesStreamUrl } from '../lib/xtream.js';
-import { getSession } from '../lib/session.js';
+import { getSession, isFavorite, toggleFavorite } from '../lib/session.js';
 import { useFocusable } from '../components/Focusable.jsx';
 
 function EpisodeRow({ index, ep, onPlay }) {
@@ -28,6 +28,7 @@ export default function SeriesDetail() {
   const [info, setInfo] = useState(null); // { info, seasons, episodes }
   const [server, setServer] = useState(null);
   const [season, setSeason] = useState(null);
+  const [fav, setFav] = useState(false);
 
   useEffect(() => {
     const saved = getSession();
@@ -37,6 +38,7 @@ export default function SeriesDetail() {
     }
     const srv = { baseUrl: saved.baseUrl, username: saved.username, password: saved.password };
     setServer(srv);
+    setFav(isFavorite('series', id));
     (async () => {
       // get_series_info returns { info, seasons, episodes } where seasons and
       // episodes are TOP-LEVEL siblings of info. Keep the whole object (not just
@@ -89,6 +91,23 @@ export default function SeriesDetail() {
               <h1>{meta.name}</h1>
               {meta.genre ? <div className="badges"><span className="badge">{meta.genre}</span></div> : null}
               {meta.plot && <p>{meta.plot}</p>}
+              <div className="detail-actions">
+                <button
+                  className={fav ? 'btn-ghost fav-on' : 'btn-ghost'}
+                  onClick={() => {
+                    const added = toggleFavorite({
+                      type: 'series',
+                      id,
+                      title: meta.name || '',
+                      image: meta.cover_big || meta.cover || '',
+                    });
+                    setFav(added);
+                  }}
+                >
+                  {fav ? '★ ' : '☆ '}
+                  {t('common.favorite')}
+                </button>
+              </div>
             </div>
           </div>
 

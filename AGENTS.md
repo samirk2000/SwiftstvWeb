@@ -49,13 +49,15 @@ Key contracts to replicate:
 ## MVP vertical slice (current goal)
 Build a working React+Vite TV web app:
 - [x] scaffold README (this repo)
-- [ ] Vite + React + routing + TV-first UI shell (focusable rows, remote nav)
-- [ ] Login screen (user/pass) + multi-DNS failover reading remote `servers.json` / `cvc_aliases`
-- [ ] Home (menu: Live, Movies, Series, Exclusivos), continue watching
-- [ ] Live guide (channels + EPG), catchup where panel provides archive
-- [ ] VOD grid + detail, Series with seasons/episodes
-- [ ] Player: HLS.js integration, back buffer, audio/subs best-effort, PiP when supported
-- [ ] Exclusivos: remote catalog + dynamic proxy (via Pages Function for CORS)
+- [x] Vite + React + routing + TV-first UI shell (focusable rows, remote nav)
+- [x] Login screen (user/pass) + multi-DNS failover reading remote `servers.json` / `cvc_aliases`
+- [x] Home (menu: Live, Movies, Series, Exclusivos), continue watching + favorites
+- [x] Live guide (channels + EPG), catchup where panel provides archive
+- [x] VOD grid + detail (search), Series with seasons/episodes (search)
+- [x] Player: HLS.js integration, back buffer, audio/subs best-effort, PiP when supported
+- [x] Exclusivos: remote catalog + dynamic proxy (via Pages Function for CORS)
+- [x] Favorites (persisted, toggle + Home row)
+- [x] Parental gate by PIN (blocked category_ids per saved profile; open by default)
 
 ## Build / run
 `npm create vite@latest . -- --template react` (or manual), then `npm install`, `npm run dev`,

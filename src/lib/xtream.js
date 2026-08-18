@@ -340,6 +340,22 @@ export function liveStreamUrl(server, streamId) {
   return `${normalizeBaseUrl(server.baseUrl)}/live/${server.username}/${server.password}/${streamId}.m3u8`;
 }
 
+// Catchup URL for a live stream with archive enabled. Xtream panels serve the
+// archive on the SAME /live/ route with `start`/`end` unix-epoch param (UTC)
+// delimiting the programme window; without them it's the live edge. Some
+// panels prefer `.ts` (archive) over `.m3u8`. The player seeks `startPosition`
+// (seconds into the window) once metadata loads.
+export function liveCatchupUrl(server, streamId, { startEpoch, endEpoch, ts = false } = {}) {
+  const base = `${normalizeBaseUrl(server.baseUrl)}/live/${server.username}/${server.password}/${streamId}.${
+    ts ? 'ts' : 'm3u8'
+  }`;
+  if (!startEpoch) return base;
+  const qs = new URLSearchParams();
+  qs.set('start', startEpoch);
+  if (endEpoch) qs.set('end', endEpoch);
+  return `${base}?${qs.toString()}`;
+}
+
 export function vodStreamUrl(server, vodId, extension) {
   return `${normalizeBaseUrl(server.baseUrl)}/movie/${server.username}/${server.password}/${vodId}.${
     extension || 'mp4'
