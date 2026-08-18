@@ -405,26 +405,26 @@ export function attachTs(videoEl, url, opts = {}) {
     const player = mpegts.createPlayer(
       { type: 'mpegts', isLive: true, url: srcUrl },
       {
-        // Control estricto de buffer y latencia para live:
-        //  - TODO en un solo hilo (sin fetches paralelos extra).
+        // Latencia suavizada para live: seguimos el borde del directo, pero con
+        // suficiente colchón de buffer (8s máx / 2.5s de sobra) para absorber
+        // fluctuaciones de red sin que el stream brinque o se trabe.
         enableWorker: false,
         enableWorkerForMSE: false,
         isLive: true,
         // Desactiva el buffering agresivo en memoria; buffer inicial pequeño.
         enableStashBuffer: false,
         stashInitialSize: 128 * 1024,
-        // Fuerza a seguir el tiempo real: máx 3s de buffer, mínimo 1s de sobra.
         liveBufferLatencyChasing: true,
-        liveBufferLatencyMaxLatency: 3,
-        liveBufferLatencyMinRemain: 1,
+        liveBufferLatencyMaxLatency: 8,
+        liveBufferLatencyMinRemain: 2.5,
         // Limpia el buffer ya consumido para liberar memoria.
         autoCleanupSourceBuffer: true,
         autoCleanupMaxBackwardDuration: 30,
         autoCleanupMinBackwardDuration: 10,
-        // Conexión hacia el proxy/panel: no pedir muy adelantado, mantener la
-        // única .ts compartida abierta.
+        // Conexión hacia el proxy/panel: pedir algo más por adelantado (12s) para
+        // mantener la única .ts compartida abierta y con red estable.
         lazyLoad: true,
-        lazyLoadMaxDuration: 6,
+        lazyLoadMaxDuration: 12,
       }
     );
     controller.player = player;
