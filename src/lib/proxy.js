@@ -57,11 +57,21 @@ export function streamProxyCandidates(mediaUrl, opts = {}) {
   // just return it as the single candidate so it keeps hitting the SAME host
   // (which injects the IPTV player UA) instead of being bounced back to /proxy.
   if (/\/stream\?target=|stream-proxy\?target=|\?target=/.test(target) || target.startsWith('/proxy?')) {
+    // Continuous live must always keep continuous=1, even if the URL was already
+    // proxied (e.g. a reload/retry) — otherwise it would silently drop to the
+    // old segmented /stream behavior and break the single-connection guarantee.
+    if (continuous && !/continuous=1|continuous=true/.test(target)) {
+      const sep = String(target).includes('?') ? '&' : '?';
+      return dedupe([`${target}${sep}continuous=1`]);
+    }
     return dedupe([target]);
   }
 
   // For continuous live .ts, tell the VPS proxy (and any stream-proxy) to serve
   // it as ONE endless MPEG-TS shared across viewers instead of HLS segments.
+  // In continuous mode the live channel MUST go through a proxy that implements
+  // the fan-out (continuous=1) — we do NOT fall back to a raw direct URL or to
+  // the Cloudflare /proxy function (which aren't the continuous passthrough).
   const flags = continuous ? '&continuous=1' : '';
   const enc = encodeURIComponent(target);
   const candidates = [];
@@ -79,6 +89,13 @@ export function streamProxyCandidates(mediaUrl, opts = {}) {
     if (!/^https?:\/\//i.test(b)) b = `https://${b}`;
     else if (b.startsWith('http://')) b = `https://${b.slice('http://'.length)}`;
     candidates.push(`${b}?target=${enc}${flags}`);
+  }
+  if (continuous) {
+    // Live: only the continuous-passthrough proxies are valid candidates. If
+    // none is configured, keep the raw URL so the list is non-empty, but never
+    // add the generic direct/CF fallbacks (they'd skip the continuous flag).
+    if (!candidates.length) candidates.push(mediaUrl);
+    return dedupe(candidates);
   }
   if (!candidates.length) candidates.push(mediaUrl);
   candidates.push(mediaUrl, `/proxy?target=${enc}${flags}`);
