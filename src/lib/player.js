@@ -349,30 +349,27 @@ export function attachTs(videoEl, url, opts = {}) {
         } catch {}
         controller.hls = null;
       }
-      if (controller.player) {
-        try {
-          controller.player.destroy();
-        } catch {}
-        controller.player = null;
-      }
-      // Fully release the media element so the browser closes the socket to the
-      // proxy/origin — same wipe as attachHls: pause, drop src, forget it.
-      if (videoEl) {
-        try {
-          videoEl.pause();
-        } catch {}
-        videoEl.removeAttribute('src');
-        videoEl.src = '';
-        try {
-          videoEl.load();
-        } catch {}
-      }
+      teardownMpegts();
+      wipeElement();
     },
     reloadUrl() {
       doStartPlayback();
       return controller;
     },
   };
+
+  function teardownMpegts() {
+    const p = controller.player;
+    controller.player = null;
+    if (!p) return;
+    // Stop the mpegts player explicitly: pause, unload the source, detach the
+    // media element, then destroy it — this aborts any in-flight HTTP request
+    // and closes the continuous stream/socket toward the proxy.
+    try { p.pause(); } catch {}
+    try { p.unload(); } catch {}
+    try { p.detachMediaElement(); } catch {}
+    try { p.destroy(); } catch {}
+  }
 
   function wipeElement() {
     if (!videoEl) return;
@@ -435,12 +432,7 @@ export function attachTs(videoEl, url, opts = {}) {
       if (controller.destroyed || fellBack) return;
       fellBack = true;
       // Fatal TS error: release the mpegts player + wipe before HLS fallback.
-      if (controller.player) {
-        try {
-          controller.player.destroy();
-        } catch {}
-        controller.player = null;
-      }
+      teardownMpegts();
       wipeElement();
       startHls();
     };
@@ -458,12 +450,7 @@ export function attachTs(videoEl, url, opts = {}) {
       } catch {}
       controller.hls = null;
     }
-    if (controller.player) {
-      try {
-        controller.player.destroy();
-      } catch {}
-      controller.player = null;
-    }
+    teardownMpegts();
     wipeElement();
     startTs();
   }
