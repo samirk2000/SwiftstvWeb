@@ -91,6 +91,14 @@ src/
 - **Catchup DVR**: el reproductor salta a `startPosition` tras `loadedmetadata`; para canales con archivo el proxy sigue 302→CDN igual que el directo. Probar el rango `Range` en el `stream-proxy` para `seek` dentro del archive.
 - Algunos modelos Tizen esperan playlists con resolución param; lo dejamos neutro (el manifest entregado manda).
 
+## Límite estricto de conexiones (capa anti "4/3")
+
+El panel limita streams simultáneos por cuenta. Para no superarlo:
+
+- **Proxy (`vps-proxy/proxy.js`)**: el path `/stream` lleva un **lock por sesión** (`STREAM_LOCKS`). La clave es la cuenta Xtream (usuario:pass extraídos del `target` `/live|movie|series/u/p/...`) y, como fallback, la IP del cliente. Cuando llega una nueva petición `/stream` para la misma clave mientras otra está en curso, **la anterior se cancela de inmediato** (`upstreamReq.destroy()` / `controller()`), cerrando el TCP contra el panel antes de abrir la nueva conexión. Efecto: como máximo **1 conexión origen activa por cuenta/dispositivo** en cada instante.
+- **Frontend (`Player.jsx`)**: mantiene un `activeAbortController` global single-flight. Antes de arrancar cada stream se aborta el controller previo; en `onError`, `pause` o al desmontar se aborta y se limpia el `<video>` (`video.src=''` + `video.load()`), soltando el socket hacia el proxy.
+- **Consecuencia**: el proxy rechaza/stridamente serializa peticiones paralelas de la misma sesión (HLS/VOD) — típicamente no paras las descargas de segmentos de CDN (que no abren sesión en el panel), pero si alguna conectividad lo exige se puede ajustar `MAX_STREAM_LOCK_AGE_MS`/timeout. Prioridad: nunca superar el límite del panel.
+
 ## Soporte
 
 - Email `soporte@swiftdigitalaccess.online` · WhatsApp `+52 662 268 4690`.

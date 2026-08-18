@@ -117,6 +117,7 @@ export function attachHls(videoEl, url, opts = {}) {
           videoEl.pause();
         } catch {}
         videoEl.removeAttribute('src');
+        videoEl.src = '';
         try {
           videoEl.load();
         } catch {}

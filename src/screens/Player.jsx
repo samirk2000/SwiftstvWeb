@@ -20,9 +20,31 @@ export default function Player() {
   const playerRef = useRef(null);
   const wakeRef = useRef(null);
   const hideTimer = useRef(null);
+  // Strict single-flight AbortController: only ONE outstanding request load is
+  // allowed at a time. Before starting a NEW stream (or on error/pause/unmount)
+  // we abort the previous controller so no parallel fetch keeps the panel at
+  // 4/3 connections.
+  const abortRef = useRef(null);
   const [controlsVisible, setControlsVisible] = useState(true);
   const [error, setError] = useState(false);
   const [started, setStarted] = useState(false);
+
+  // Wipe the media element and abort any in-flight request, releasing the
+  // socket to the panel. Call on error, pause / unmount, or before a new stream.
+  const wipePlayback = () => {
+    if (abortRef.current) {
+      try { abortRef.current.abort(); } catch {}
+      abortRef.current = null;
+    }
+    const video = videoRef.current;
+    if (video) {
+      try { video.pause(); } catch {}
+      // Force the element to drop the source AND forget it — the connection to
+      // the proxy/origin is closed so the panel stops marking it "Online".
+      video.src = '';
+      try { video.load(); } catch {}
+    }
+  };
 
   // 'p' toggles PiP; handled screen-local.
   useEffect(() => {
@@ -33,6 +55,10 @@ export default function Player() {
     return () => window.removeEventListener('keydown', onKey);
   }, []);
 
+  // Safety net on true unmount: force-abort the request + wipe the video so the
+  // panel never keeps the stream "Online" after leaving the screen.
+  useEffect(() => () => wipePlayback(), []);
+
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !url) {
@@ -40,15 +66,24 @@ export default function Player() {
       return undefined;
     }
 
+    // Strict serialization: only one live request load. Abort any previous
+    // controller BEFORE starting this stream so the previous socket closes.
+    if (abortRef.current) {
+      try { abortRef.current.abort(); } catch {}
+    }
+    const controller = new AbortController();
+    abortRef.current = controller;
+
     const isExclusive = needsOriginHeaders(url);
     const onPlaybackError = () => {
-      // Fully release the media element before surfacing the error: stop
-      // playback and drop the source so the <video> doesn't keep the panel's
-      // session "Online" after a failed/aborted load.
+      // Fully release the media element + abort the request before surfacing
+      // the error: no half-open connection against the panel.
+      if (abortRef.current) { try { abortRef.current.abort(); } catch {} }
       try {
         video.pause();
       } catch {}
       video.removeAttribute('src');
+      video.src = '';
       try {
         video.load();
       } catch {}
@@ -104,6 +139,16 @@ export default function Player() {
     };
     video.addEventListener('stalled', onStall);
 
+    // Draining the buffer / pausing releases the connection: abort any
+    // outstanding request load so the panel sees the socket close.
+    const onPause = () => {
+      if (abortRef.current) {
+        try { abortRef.current.abort(); } catch {}
+        abortRef.current = null;
+      }
+    };
+    video.addEventListener('pause', onPause);
+
     return () => {
       video.dispatchEvent(new Event('timeupdate'));
       if (player) player.destroy();
@@ -111,9 +156,20 @@ export default function Player() {
       if (wake) wake.release();
       wakeRef.current = null;
       setStarted(false);
+      // Strict teardown: abort the request AND wipe the element (src='' + load)
+      // so no connection stays live against the proxy/origin on unmount or URL
+      // change. Ignore the pause the teardown itself triggers.
+      if (abortRef.current) {
+        try { abortRef.current.abort(); } catch {}
+        abortRef.current = null;
+      }
+      try { video.pause(); } catch {}
+      video.src = '';
+      try { video.load(); } catch {}
       video.removeEventListener('timeupdate', onTime);
       video.removeEventListener('stalled', onStall);
       video.removeEventListener('playing', onPlaying);
+      video.removeEventListener('pause', onPause);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [url]);

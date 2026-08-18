@@ -60,6 +60,83 @@ const ALLOW_CORS = {
 // User-Agent the Xtream panels expect. The "/1.0" suffix matches IPTV Smarters.
 const UPSTREAM_UA = 'IPTVSmartersPlayer/1.0';
 
+// ---- Per-session stream lock -------------------------------------------
+// The IPTV panel limits simultaneous streams per account (often 1x playback,
+// rarely more). The frontend can fire several `/stream?target=` requests in
+// parallel (HLS `.m3u8` manifest + TS segments + VOD retries), which would
+// trip the panel's "max connections" (reported as e.g. 4/3).
+//
+// We keep ONE active upstream per "session key" (the Xtream username:password
+// extracted from the target URL, falling back to the client's IP). When a NEW
+// request arrives for a key that already has a live stream, we CANCEL the
+// previous one BEFORE opening the new connection — a strict
+// "last-write-wins" takeover so at most one origin connection exists per
+// account at any time.
+//
+// A session key MUST never be a full stream URL (else every TS segment would
+// be its own key and the lock would be pointless); we only use the identity
+// portion of the path (scheme + host + username + password).
+const STREAM_LOCKS = new Map(); // sessionKey -> { job, startedAt }
+const MAX_STREAM_LOCK_AGE_MS = 30 * 60 * 1000; // stale-entry GC
+
+// Extract the per-account identity that identifies a panel stream session.
+// Xtream embeds credentials in the path: /live|movie|series/{user}/{pass}/{id}.
+// Only URLs shaped like that open a panel "stream session", so we key the lock
+// on the account there. For CDN segment / unknown URLs (no creds) we fall back
+// to the client identity so at least each device is capped to one concurrent
+// upstream.
+function streamUserKey(url, req) {
+  try {
+    const u = new URL(String(url || ''));
+    const segs = u.pathname.split('/').filter(Boolean);
+    // Xtream stream route: segs[0] in {live,movie,series} and segs[1]=user,
+    // segs[2]=pass.
+    if (segs.length >= 4 && /^(live|movie|series)$/i.test(segs[0])) {
+      const user = segs[1];
+      const pass = segs[2];
+      if (user && pass) return `${u.protocol}//${u.host}/${user}:${pass}`;
+    }
+  } catch {}
+  // Not an Xtream-shaped URL: fall back to the client identity so at least
+  // each client is limited to one parallel upstream.
+  const fwd = req.get('x-forwarded-for');
+  const ip = fwd ? String(fwd).split(',')[0].trim() : req.ip || req.socket?.remoteAddress || 'unknown';
+  return `ip:${ip}`;
+}
+
+// Cancel the in-flight upstream for a session key (if any).
+function cancelStreamLock(key) {
+  const entry = STREAM_LOCKS.get(key);
+  if (!entry) return false;
+  try {
+    if (typeof entry.job.cancel === 'function') entry.job.cancel();
+    else if (typeof entry.job.destroy === 'function') entry.job.destroy();
+  } catch {}
+  if (entry.job && typeof entry.job.res?.destroy === 'function') {
+    try { entry.job.res.destroy(); } catch {}
+  }
+  STREAM_LOCKS.delete(key);
+  return true;
+}
+
+// Register the new active stream for a key AFTER the previous was cancelled,
+// so we have at most one live upstream per account.
+function setStreamLock(key, job) {
+  const prev = STREAM_LOCKS.get(key);
+  if (prev) {
+    try { if (typeof prev.job.cancel === 'function') prev.job.cancel(); } catch {}
+    try { if (prev.job && typeof prev.job.res?.destroy === 'function') prev.job.res.destroy(); } catch {}
+  }
+  STREAM_LOCKS.set(key, { job, startedAt: Date.now() });
+}
+
+// Opportunistic GC of stale lock entries (no active stream, just old map rows).
+function sweepStreamLocks(now = Date.now()) {
+  for (const [key, entry] of STREAM_LOCKS) {
+    if (now - (entry.startedAt || 0) > MAX_STREAM_LOCK_AGE_MS) STREAM_LOCKS.delete(key);
+  }
+}
+
 app.disable('x-powered-by');
 
 // --- CORS preflight ------------------------------------------------------
@@ -127,16 +204,57 @@ app.get('/stream', (req, res) => {
   const extraRef = req.get('referer');
   if (extraRef) upstreamHeaders.Referer = extraRef;
 
-  upstreamFetch(t.toString(), upstreamHeaders, 0, (err, upRes) => {
+  // ---- Serialize per-session upstream connections -----------------------
+  // Panels cap streams per account (e.g. 1 live). HLS/VOD can issue several
+  // parallel /stream requests, so take a strict lock: cancel any prior stream
+  // for THIS session BEFORE starting the new one. This keeps the origin at
+  // most one live TCP connection per account.
+  const lockKey = streamUserKey(t.toString(), req);
+  sweepStreamLocks();
+  cancelStreamLock(lockKey);
+
+  // `handle` lets the upstreamFetch redirect chain be aborted at ANY moment
+  // (including mid-connect), even before it reaches a final stream. `job` is
+  // what the lock stores and what onClientGone / a take-over calls.
+  const handle = { cancelled: false, cancel: () => {} };
+  let job = { cancelled: false, res: null, destroyed: false };
+  job.handle = handle;
+  job.cancel = () => {
+    if (job.destroyed) return;
+    job.destroyed = true;
+    job.cancelled = true;
+    handle.cancelled = true;
+    try { handle.cancel(); } catch {}
+    if (job.res && typeof job.res.controller === 'function') {
+      try { job.res.controller(); } catch {}
+    } else if (job.res && typeof job.res.destroy === 'function') {
+      try { job.res.destroy(); } catch {}
+    }
+    if (STREAM_LOCKS.get(lockKey)?.job === job) STREAM_LOCKS.delete(lockKey);
+  };
+  // The NEW stream owns the lock. setStreamLock also cancels any `job` that
+  // might still be registered under this key (defensive re-check).
+  setStreamLock(lockKey, job);
+
+  upstreamFetch(t.toString(), upstreamHeaders, 0, handle, (err, upRes) => {
+    if (job.cancelled) {
+      // A newer stream for this session already took over — do nothing.
+      if (upRes) { try { upRes.destroy(); } catch {} }
+      return;
+    }
     if (err) {
+      if (STREAM_LOCKS.get(lockKey)?.job === job) STREAM_LOCKS.delete(lockKey);
+      if (res.writableEnded || res.destroyed) return;
       res.writeHead(502, { 'Content-Type': 'application/json', ...ALLOW_CORS });
       res.end(JSON.stringify({ error: 'upstream', detail: String(err && err.message || err) }));
       return;
     }
 
+    job.res = upRes;
     const upStream = upRes;
     // Abort the upstream request (and its sockets) as soon as the CLIENT goes
-    // away. We listen to the real disconnect signals:
+    // away or a NEWER request takes this session's lock over. We listen to the
+    // real disconnect signals:
     //   - res 'close' / 'error': the response socket is torn down (the <video>
     //     element or an `onError` cleanup drops the connection, so the response
     //     object can be destroyed without us noticing otherwise).
@@ -147,12 +265,8 @@ app.get('/stream', (req, res) => {
     // (normal completion), BEFORE the stream starts, so it would wrongly abort
     // every connection. `req.on('aborted')` is the signal that means the client
     // actually went away.
-    const abortUpstream = () => {
-      if (typeof upStream.controller === 'function') upStream.controller();
-      else upStream.destroy();
-    };
     const onClientGone = () => {
-      abortUpstream();
+      job.cancel();
       res.destroy();
     };
     req.on('aborted', onClientGone);
@@ -259,8 +373,13 @@ app.use((req, res) => {
  * The returned stream also carries a `.controller()` that aborts the CURRENT
  * upstream request (even mid redirect-chain). The `/stream` route calls it on
  * client disconnect so no TCP socket stays open against the IPTV origin.
+ *
+ * `handle` is `{ cancelled, cancel }`. `handle.cancel` is re-pointed at each hop
+ * so an external catch-up (a newer request taking this session's lock over, or
+ * a client abort) can tear down the in-flight HTTP request immediately, even
+ * while it is still connecting / following redirects.
  */
-function upstreamFetch(urlStr, headers, redirects, cb) {
+function upstreamFetch(urlStr, headers, redirects, handle, cb) {
   let url;
   try {
     url = new URL(urlStr);
@@ -284,34 +403,49 @@ function upstreamFetch(urlStr, headers, redirects, cb) {
     timeout: UPSTREAM_TIMEOUT_MS || 10000,
   };
 
-  // Cancels the in-flight request (aborts redirect chasing + tears down the
-  // TCP socket to the panel/CDN). Safe to call multiple times.
   let cancel = () => {};
   const upstreamReq = httpModule.request(opts, (upRes) => {
     const status = upRes.statusCode || 0;
     // Final effective URL of this hop (also what playlist URIs resolve against).
     upRes.url = url.toString();
     // Give every hop's response a way to abort the whole request chain, so a
-    // client disconnect during a later hop still stops the earlier sockets.
+    // client disconnect or a take-over during a later hop still stops the
+    // earlier sockets.
     upRes.controller = () => {
       cancel();
       upRes.destroy();
     };
+    // Stop immediately if a newer stream for the same session has cancelled us.
+    if (handle.cancelled) {
+      upRes.destroy();
+      return;
+    }
     // Follow 30x to the CDN (limit the hop count) — same headers (UA/Range/
     // Authorization/Referer) are reused verbatim on the redirected request so
     // the CDN still sees a player identity and doesn't 403.
     if (status >= 301 && status <= 308 && upRes.headers.location && redirects < MAX_REDIRECTS) {
+      // If we've been taken over during the 3xx, don't chase it.
+      if (handle.cancelled) {
+        upRes.destroy();
+        return;
+      }
       upRes.resume(); // drain so the socket can be reused
       let next = upRes.headers.location;
       if (!/^https?:\/\//i.test(next)) next = new URL(next, url).toString();
-      return upstreamFetch(next, headers, redirects + 1, cb);
+      return upstreamFetch(next, headers, redirects + 1, handle, cb);
     }
     cb(null, upRes);
   });
 
+  // Point the shared handle at THIS hop's request so an external cancel aborts
+  // it immediately (not just at the next hop boundary).
+  handle.cancel = () => upstreamReq.destroy();
   cancel = () => upstreamReq.destroy();
   upstreamReq.on('timeout', () => upstreamReq.destroy(new Error('upstream timeout')));
-  upstreamReq.on('error', (e) => cb(e));
+  upstreamReq.on('error', (e) => {
+    if (handle.cancelled) return; // we were cancelled; not an error to surface
+    cb(e);
+  });
   upstreamReq.end();
 }
 
