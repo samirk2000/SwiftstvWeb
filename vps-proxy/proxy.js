@@ -135,6 +135,29 @@ app.get('/stream', (req, res) => {
     }
 
     const upStream = upRes;
+    // Abort the upstream request (and its sockets) as soon as the CLIENT goes
+    // away. We listen to the real disconnect signals:
+    //   - res 'close' / 'error': the response socket is torn down (the <video>
+    //     element or an `onError` cleanup drops the connection, so the response
+    //     object can be destroyed without us noticing otherwise).
+    //   - req 'aborted': the client explicitly cancelled the request (the
+    //     accurate request-side signal for a GET proxy).
+    // NOTE: we deliberately do NOT use plain `req.on('close')` here — for a
+    // GET request that fires as soon as the request line/headers are parsed
+    // (normal completion), BEFORE the stream starts, so it would wrongly abort
+    // every connection. `req.on('aborted')` is the signal that means the client
+    // actually went away.
+    const abortUpstream = () => {
+      if (typeof upStream.controller === 'function') upStream.controller();
+      else upStream.destroy();
+    };
+    const onClientGone = () => {
+      abortUpstream();
+      res.destroy();
+    };
+    req.on('aborted', onClientGone);
+    res.on('close', onClientGone);
+    res.on('error', onClientGone);
 
     const ct = String(upRes.headers['content-type'] || 'application/octet-stream');
     const isPlaylist = /mpegurl|vnd\.apple/i.test(ct);
@@ -149,12 +172,12 @@ app.get('/stream', (req, res) => {
       upStream.setEncoding('utf8');
       upStream.on('data', (chunk) => (body += chunk));
       upStream.on('error', (e) => {
-        if (res.writableEnded) return;
+        if (res.writableEnded || res.destroyed) return;
         res.writeHead(502, { 'Content-Type': 'application/json', ...ALLOW_CORS });
         res.end(JSON.stringify({ error: 'playlist', detail: String(e && e.message || e) }));
       });
       upStream.on('end', () => {
-        if (res.writableEnded) return;
+        if (res.writableEnded || res.destroyed) return;
         const rewritten = rewritePlaylist(body, upRes.url || t.toString(), selfBase);
         outHeaders['Content-Length'] = Buffer.byteLength(rewritten);
         res.writeHead(200, outHeaders);
@@ -183,9 +206,9 @@ app.get('/stream', (req, res) => {
 
     res.writeHead(status, outHeaders);
     // Tie the lifetime of the upstream socket to the client response and vice
-    // versa so aborts don't leak sockets and streams close promptly.
+    // versa so aborts don't leak sockets and streams close promptly. The shared
+    // onClientGone (above) already aborts upstream on req/res close/error.
     upStream.on('error', () => res.destroy());
-    res.on('close', () => upStream.destroy());
     // Stream pure passthrough with a larger write highWaterMark than the 16 KB
     // default: for multi-MB TS/mp4 segments this writes bigger chunks per flush,
     // reducing syscall overhead and keeping the pipe at the CDN's bitrate.
@@ -232,6 +255,10 @@ app.use((req, res) => {
  * Follows redirects manually using Node's http/https.request so we can attach an
  * `https.Agent({ rejectUnauthorized: false })` to bypass invalid CDN certs.
  * Calls back with the FINAL upstream stream (piped later) and its IncomingMessage.
+ *
+ * The returned stream also carries a `.controller()` that aborts the CURRENT
+ * upstream request (even mid redirect-chain). The `/stream` route calls it on
+ * client disconnect so no TCP socket stays open against the IPTV origin.
  */
 function upstreamFetch(urlStr, headers, redirects, cb) {
   let url;
@@ -251,13 +278,25 @@ function upstreamFetch(urlStr, headers, redirects, cb) {
     method: 'GET',
     headers,
     agent,
-    timeout: UPSTREAM_TIMEOUT_MS || undefined,
+    // Run a hard socket timeout by DEFAULT so a hung panel never keeps the
+    // connection open forever. If the operator explicitly set
+    // UPSTREAM_TIMEOUT_MS (e.g. for long DVR windows), that value wins.
+    timeout: UPSTREAM_TIMEOUT_MS || 10000,
   };
 
+  // Cancels the in-flight request (aborts redirect chasing + tears down the
+  // TCP socket to the panel/CDN). Safe to call multiple times.
+  let cancel = () => {};
   const upstreamReq = httpModule.request(opts, (upRes) => {
     const status = upRes.statusCode || 0;
     // Final effective URL of this hop (also what playlist URIs resolve against).
     upRes.url = url.toString();
+    // Give every hop's response a way to abort the whole request chain, so a
+    // client disconnect during a later hop still stops the earlier sockets.
+    upRes.controller = () => {
+      cancel();
+      upRes.destroy();
+    };
     // Follow 30x to the CDN (limit the hop count) — same headers (UA/Range/
     // Authorization/Referer) are reused verbatim on the redirected request so
     // the CDN still sees a player identity and doesn't 403.
@@ -267,12 +306,10 @@ function upstreamFetch(urlStr, headers, redirects, cb) {
       if (!/^https?:\/\//i.test(next)) next = new URL(next, url).toString();
       return upstreamFetch(next, headers, redirects + 1, cb);
     }
-    // Attach the FINAL resolved URL for playlist rewriting / debug (the value
-    // from the last successful hop).
-    upRes.url = url.toString();
     cb(null, upRes);
   });
 
+  cancel = () => upstreamReq.destroy();
   upstreamReq.on('timeout', () => upstreamReq.destroy(new Error('upstream timeout')));
   upstreamReq.on('error', (e) => cb(e));
   upstreamReq.end();

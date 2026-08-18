@@ -107,7 +107,20 @@ export function attachHls(videoEl, url, opts = {}) {
         controller.hls.destroy();
         controller.hls = null;
       }
-      if (videoEl) videoEl.removeAttribute('src');
+      // Fully release the media element so the browser closes the underlying
+      // socket to the proxy/origin: pause any active playback, drop the src,
+      // and force the source to be forgotten. Without this the <video> can keep
+      // the connection "Online" on the panel even after the screen unmounts or
+      // the player errors out.
+      if (videoEl) {
+        try {
+          videoEl.pause();
+        } catch {}
+        videoEl.removeAttribute('src');
+        try {
+          videoEl.load();
+        } catch {}
+      }
     },
     reloadUrl() {
       controller.errorCount = 0;

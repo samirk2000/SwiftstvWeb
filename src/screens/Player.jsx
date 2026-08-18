@@ -41,11 +41,24 @@ export default function Player() {
     }
 
     const isExclusive = needsOriginHeaders(url);
+    const onPlaybackError = () => {
+      // Fully release the media element before surfacing the error: stop
+      // playback and drop the source so the <video> doesn't keep the panel's
+      // session "Online" after a failed/aborted load.
+      try {
+        video.pause();
+      } catch {}
+      video.removeAttribute('src');
+      try {
+        video.load();
+      } catch {}
+      setError(true);
+    };
     const player = attachHls(video, url, {
       startPosition,
       extraOrigin: isExclusive,
       isExclusive,
-      onError: () => setError(true),
+      onError: onPlaybackError,
     });
     playerRef.current = player;
 
