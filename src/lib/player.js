@@ -313,11 +313,21 @@ export function attachHls(videoEl, url, opts = {}) {
   return controller;
 }
 
+// Derive the HLS .m3u8 URL for a channel from its continuous .ts URL, so we can
+// fall back to segmented HLS when mpegts.js can't decode the TS stream.
+function tsToHlsUrl(tsUrl) {
+  return String(tsUrl || '').replace(/\.ts(?=\?|$)/i, '.m3u8');
+}
+
 // Build a continuous-MPEG-TS playback controller for a LIVE channel. Mirrors the
 // attachHls controller (destroy / reloadUrl) so Player.jsx treats live and VOD
 // uniformly. Routes the .ts through the proxy with &continuous=1 so the VPS
-// keeps ONE shared upstream connection to the panel per channel. Falls back to
-// native <video> against the proxied URL when mpegts.js cannot run here.
+// keeps ONE shared upstream connection to the panel per channel.
+//
+// Falls back to HLS: if mpegts.js is unsupported on this device OR it emits a
+// fatal error while attach/decoding the TS stream (e.g. an MSE/decode failure),
+// we automatically switch the same channel to its .m3u8 URL via attachHls. The
+// onError callback is only surfaced if the HLS fallback also fails.
 export function attachTs(videoEl, url, opts = {}) {
   const candidates = mediaCandidates(url, {
     continuous: true,
@@ -325,12 +335,20 @@ export function attachTs(videoEl, url, opts = {}) {
     skipProxy: Boolean(opts.skipProxy),
   });
   const srcUrl = candidates[0];
+  const hlsUrl = tsToHlsUrl(url);
 
   const controller = {
     player: null,
+    hls: null, // attachHls controller used for the fallback
     destroyed: false,
     destroy() {
       controller.destroyed = true;
+      if (controller.hls) {
+        try {
+          controller.hls.destroy();
+        } catch {}
+        controller.hls = null;
+      }
       if (controller.player) {
         try {
           controller.player.destroy();
@@ -356,26 +374,31 @@ export function attachTs(videoEl, url, opts = {}) {
     },
   };
 
-  function doStartPlayback() {
-    if (controller.destroyed) return;
-    if (controller.player) {
-      try {
-        controller.player.destroy();
-      } catch {}
-      controller.player = null;
-    }
+  function wipeElement() {
+    if (!videoEl) return;
+    try {
+      videoEl.pause();
+    } catch {}
+    videoEl.removeAttribute('src');
+    videoEl.src = '';
+    try {
+      videoEl.load();
+    } catch {}
+  }
 
-    // Native fallback: devices without MSE for TS get the (proxied) URL on the
-    // <video> directly; TV webviews that handle TS natively will play it.
-    if (!mpegts.isSupported()) {
-      videoEl.src = srcUrl;
-      if (typeof opts.onError === 'function') {
-        videoEl.addEventListener(
-          'error',
-          () => opts.onError(videoEl ? videoEl.error || new Error('media error') : new Error('media error')),
-          { once: true }
-        );
-      }
+  function startHls() {
+    if (controller.destroyed || !hlsUrl) {
+      if (typeof opts.onError === 'function' && !controller.destroyed) opts.onError(new Error('no hls fallback'));
+      return;
+    }
+    controller.hls = attachHls(videoEl, hlsUrl, opts);
+  }
+
+  function startTs() {
+    if (controller.destroyed) return;
+    // No MSE for TS on this device -> HLS segmented fallback.
+    if (!mpegts.isSupported() || !mpegts.getFeatureList().mseLivePlayback) {
+      startHls();
       return;
     }
 
@@ -399,13 +422,42 @@ export function attachTs(videoEl, url, opts = {}) {
     );
     controller.player = player;
 
+    let fellBack = false;
+    const fallback = () => {
+      if (controller.destroyed || fellBack) return;
+      fellBack = true;
+      // Fatal TS error: release the mpegts player + wipe before HLS fallback.
+      if (controller.player) {
+        try {
+          controller.player.destroy();
+        } catch {}
+        controller.player = null;
+      }
+      wipeElement();
+      startHls();
+    };
+
     player.attachMediaElement(videoEl);
-    player.on(mpegts.Events.ERROR, (errType) => {
-      if (controller.destroyed) return;
-      if (typeof opts.onError === 'function') opts.onError(new Error(String(errType)));
-    });
+    player.on(mpegts.Events.ERROR, fallback);
     player.load();
     player.play();
+  }
+
+  function doStartPlayback() {
+    if (controller.hls) {
+      try {
+        controller.hls.destroy();
+      } catch {}
+      controller.hls = null;
+    }
+    if (controller.player) {
+      try {
+        controller.player.destroy();
+      } catch {}
+      controller.player = null;
+    }
+    wipeElement();
+    startTs();
   }
 
   doStartPlayback();

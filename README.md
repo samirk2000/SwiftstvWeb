@@ -135,8 +135,12 @@ que el panel cuente cada fragmento como una conexión nueva. En su lugar:
 - **Frontend (`src/lib/player.js#attachTs`)**: decodifica el `.ts` continuo con
   **mpegts.js** (`type: 'mpegts', isLive: true`) sobre MSE, con
   `enableWorker:false`, buffer pequeño y `autoCleanupSourceBuffer` para no pedir
-  de más. Si el dispositivo no soporta MSE para TS, cae a `<video>` nativo contra
-  la URL proxificada.
+  de más.
+- **Fallback a HLS**: si `mpegts.js` no está soportado (no hay MSE live) o emite
+  un **error fatal** al adjuntar/decodificar el TS (p. ej. error de MSE/decode),
+  el reproductor conmuta automáticamente el mismo canal a su URL `.m3u8`
+  (`tsToHlsUrl` → `attachHls`). El error solo se muestra si el fallback HLS
+  también falla.
 - **VOD / series / catchup / Exclusivos siguen en HLS**: el modo continuo se
   aplica solo a `type=live`. El catchup usa `start`/`end` (horario), por lo que
   el proxy lo trata como NO continuo.
