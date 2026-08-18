@@ -125,40 +125,80 @@ app.get('/stream', (req, res) => {
 
     const ct = String(upRes.headers['content-type'] || 'application/octet-stream');
     const isPlaylist = /mpegurl|vnd\.apple/i.test(ct);
-    const outHeaders = { 'Content-Type': ct, ...ALLOW_CORS };
+    const status = upRes.statusCode || 200;
+    const outHeaders = {};
 
     if (isPlaylist) {
-      // Buffer the manifest, rewrite URIs to route back through this proxy,
-      // then send as one response. Manifests are small.
+      // --- Playlist (m3u8): rewrite URIs so every child/segment routes back
+      // through this proxy. One small response, no streaming needed.
+      Object.assign(outHeaders, ALLOW_CORS, { 'Content-Type': ct });
       let body = '';
       upStream.setEncoding('utf8');
       upStream.on('data', (chunk) => (body += chunk));
       upStream.on('error', (e) => {
+        if (res.writableEnded) return;
         res.writeHead(502, { 'Content-Type': 'application/json', ...ALLOW_CORS });
         res.end(JSON.stringify({ error: 'playlist', detail: String(e && e.message || e) }));
       });
       upStream.on('end', () => {
+        if (res.writableEnded) return;
         const rewritten = rewritePlaylist(body, upRes.url || t.toString(), selfBase);
         outHeaders['Content-Length'] = Buffer.byteLength(rewritten);
-        res.writeHead(upRes.statusCode || 200, outHeaders);
+        res.writeHead(200, outHeaders);
         res.end(rewritten);
       });
-    } else {
-      // Binary (mp4/TS/audio): stream straight through. Relay framing headers.
-      const len = upRes.headers['content-length'];
-      if (len) outHeaders['Content-Length'] = len;
-      const status = upRes.statusCode || 200;
-      if (status >= 200 && status < 300 && range) {
-        if (upRes.headers['content-range']) outHeaders['Content-Range'] = upRes.headers['content-range'];
-        outHeaders['Accept-Ranges'] = 'bytes';
-      }
-      res.writeHead(status, outHeaders);
-      upStream.on('error', () => res.destroy());
-      res.on('close', () => upStream.destroy());
-      upStream.pipe(res);
+      return;
     }
+
+    // Copy the upstream headers of interest (type, length, range framing, etag…).
+    copyUpstreamHeaders(upRes.headers, outHeaders);
+    outHeaders['Content-Type'] = ct;
+    // The CDN often echoes a bogus Accept-Ranges (e.g. "0-<size>") or omits it.
+    // Force the correct value so <video> performs byte-range seeks for VOD.
+    outHeaders['Accept-Ranges'] = 'bytes';
+
+    // CORS for the browser regardless of what the origin sends.
+    Object.assign(outHeaders, ALLOW_CORS);
+    delete outHeaders['cache-control']; // keep no-store (injected below)
+
+    if (status >= 200 && status < 300) {
+      // If the origin returned a Content-Range/Content-Length, they were copied
+      // above. For a fresh 200 (no Range requested) the full Content-Length is
+      // relayed, letting the browser stream progressively.
+      outHeaders['Cache-Control'] = 'no-store';
+    }
+
+    res.writeHead(status, outHeaders);
+    // Tie the lifetime of the upstream socket to the client response and vice
+    // versa so aborts don't leak sockets and streams close promptly.
+    upStream.on('error', () => res.destroy());
+    res.on('close', () => upStream.destroy());
+    upStream.pipe(res);
   });
 });
+
+// Copy the headers that matter for streaming/range integrity straight through.
+// Case-insensitive; keep them as the origin sent them (Node lower-cases).
+function copyUpstreamHeaders(src, out) {
+  if (!src) return;
+  for (const key of Object.keys(src)) {
+    const v = src[key];
+    if (v === undefined) continue;
+    switch (key) {
+      // Framing / identity that MUST pass untouched so Range works.
+      case 'content-length':
+      case 'content-range':
+      case 'content-type':
+      case 'last-modified':
+      case 'etag':
+      case 'date':
+        out[key] = v;
+        break;
+      default:
+        break; // ignore everything else (auth/cache headers we don't control)
+    }
+  }
+}
 
 // Standard 404 for anything else.
 app.use((req, res) => {
@@ -214,6 +254,8 @@ function upstreamFetch(urlStr, headers, redirects, cb) {
 /**
  * Rewrite every media URI in an HLS playlist so it routes back through THIS
  * proxy (which serves valid HTTPS). Lines already pointing at us are untouched.
+ * Processed line-by-line so a fragment/master manifest (usually < a few KB)
+ * rewrites in microseconds and never buffers more than one response.
  */
 function rewritePlaylist(text, resolvedUrl, selfBase) {
   if (!text) return text;
@@ -223,22 +265,32 @@ function rewritePlaylist(text, resolvedUrl, selfBase) {
   } catch {
     return text;
   }
-  return text
-    .split(/\r?\n/)
-    .map((line) => {
-      const t = line.trim();
-      if (!t || t.startsWith('#')) return line;
-      let abs;
-      try {
-        abs = new URL(t, base);
-      } catch {
-        return line;
-      }
-      const s = abs.toString();
-      if (s.includes(selfBase)) return line; // already ours
-      return `${selfBase}/stream?target=${encodeURIComponent(s)}`;
-    })
-    .join('\n');
+
+  const lines = text.split(/\r?\n/);
+  const out = new Array(lines.length);
+  let changed = false;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.charCodeAt(0) === 35 /* '#' */ || line.trim() === '') {
+      out[i] = line; // EXTM3U / EXINF / blank stay untouched
+      continue;
+    }
+    let abs;
+    try {
+      abs = new URL(line, base);
+    } catch {
+      out[i] = line;
+      continue;
+    }
+    const s = abs.toString();
+    if (s.startsWith(selfBase) || s.includes('stream?target=')) {
+      out[i] = line; // already ours
+      continue;
+    }
+    out[i] = `${selfBase}/stream?target=${encodeURIComponent(s)}`;
+    changed = true;
+  }
+  return changed ? out.join('\n') : text;
 }
 
 if (require.main === module) {
