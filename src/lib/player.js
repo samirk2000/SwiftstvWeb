@@ -110,6 +110,14 @@ export function attachHls(videoEl, url, opts = {}) {
         controller.hls.destroy();
         controller.hls = null;
       }
+      // Detach the native retry/error handlers BEFORE wiping the element: the
+      // wipe below (pause + load() with an empty src) can fire an `error` event
+      // on the <video>, and a still-bound onNativeError would re-arm the src
+      // (cache-busted) and restart playback after the screen was left.
+      if (nativeErrorBound && videoEl) {
+        videoEl.removeEventListener('error', nativeErrorBound);
+        nativeErrorBound = null;
+      }
       // Fully release the media element so the browser closes the underlying
       // socket to the proxy/origin: pause any active playback, drop the src,
       // and force the source to be forgotten. Without this the <video> can keep
@@ -145,12 +153,17 @@ export function attachHls(videoEl, url, opts = {}) {
   let attemptedReload = false;
   let manifestLoaded = false;
   let nativeWatchdog = null;
+  let nativeErrorBound = null;
   function doStartPlayback() {
     if (controller.hls) controller.hls.destroy();
     manifestLoaded = false;
     if (nativeWatchdog) {
       clearInterval(nativeWatchdog);
       nativeWatchdog = null;
+    }
+    if (nativeErrorBound && videoEl) {
+      videoEl.removeEventListener('error', nativeErrorBound);
+      nativeErrorBound = null;
     }
 
     const wantsHls = /\.m3u8(\?|$)/i.test(url);
@@ -229,11 +242,13 @@ export function attachHls(videoEl, url, opts = {}) {
       let stallFrom = Date.now();
 
       const fail = () => {
+        if (controller.destroyed) return;
         clearInterval(nativeWatchdog);
         nativeWatchdog = null;
         if (typeof opts.onError === 'function') opts.onError(findMediaError(videoEl));
       };
       const advance = () => {
+        if (controller.destroyed) return;
         // Prefer retrying THIS route with a fresh URL over jumping candidates:
         // transitory 302/403s from a warm-up usually resolve on a reload.
         if (nativeRetries < MAX_NATIVE_RETRIES) {
@@ -256,7 +271,11 @@ export function attachHls(videoEl, url, opts = {}) {
       // A hard network/media error on this route → retry once right away (a
       // cache-busted reload often fixes a stale 302/403 from the panel warm-up),
       // then advance to the next candidate on a repeated decisive error.
+      // `controller.destroyed` is checked so a teardown-triggered error event
+      // (pause/load with an emptied src) can never re-arm the src and restart
+      // the stream after the player was left.
       const onNativeError = () => {
+        if (controller.destroyed) return;
         if (videoEl.error && nativeRetries < MAX_NATIVE_RETRIES) {
           // One immediate same-route retry; further retries are rate-limited by
           // the stall watchdog so we don't burn them all in one instant.
@@ -267,7 +286,8 @@ export function attachHls(videoEl, url, opts = {}) {
         }
         advance();
       };
-      videoEl.addEventListener('error', onNativeError);
+      nativeErrorBound = onNativeError;
+      videoEl.addEventListener('error', nativeErrorBound);
 
       // Watchdog: catches silent hangs (no error event) where we never reach
       // metadata. Waits VOD_STALL_MS then advances (retry/next/fail).
@@ -285,6 +305,7 @@ export function attachHls(videoEl, url, opts = {}) {
   }
 
   function setNativeSrc(bustCache) {
+    if (controller.destroyed) return;
     const base = candidates[Math.min(attempt, candidates.length - 1)];
     videoEl.src = bustCache ? addNoCache(base) : base;
     // Re-arm the play() the caller/toggle relies on.
