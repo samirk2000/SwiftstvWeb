@@ -285,6 +285,13 @@ input:focus-visible {
 .tile {
   flex: 0 0 auto;
   position: relative;
+  content-visibility: auto;
+  contain-intrinsic-size: 1px 224px;
+}
+
+.tile:focus,
+.tile.focused {
+  content-visibility: visible;
 }
 
 .tile[data-aspect] {
@@ -455,6 +462,13 @@ input:focus-visible {
   border-radius: 10px;
   background: var(--bg-card);
   padding: 10px 14px;
+  /* Reserve layout but skip painting off-screen rows on long channel lists. */
+  content-visibility: auto;
+  contain-intrinsic-size: 1px 48px;
+}
+
+.channel:focus {
+  content-visibility: visible;
 }
 
 .channel:hover,
@@ -641,6 +655,12 @@ input:focus-visible {
 .grid .tile {
   width: 100%;
   height: 200px;
+  /* Per-tile content-visibility: off-screen rows reserve their size (via
+     contain-intrinsic-size) but aren't painted or image-decoded, so catalogs
+     with hundreds of posters don't freeze the UI on a TV browser. Focused
+     tiles are forced visible so D-pad navigation still works. */
+  content-visibility: auto;
+  contain-intrinsic-size: 1px 224px;
 }
 
 .grid .tile.poster {

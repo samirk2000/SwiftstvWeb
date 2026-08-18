@@ -1,8 +1,9 @@
-import { useMemo, useState } from 'react';
+import { useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { t } from '../lib/i18n.js';
 import { getSeriesCategories, getSeries } from '../lib/xtream.js';
 import { usePanelList } from '../hooks/usePanelList.js';
+import { usePersistedCategory } from '../hooks/usePersistedCategory.js';
 import { useFocusable } from '../components/Focusable.jsx';
 
 function SeriesTile({ series, onOpen }) {
@@ -26,7 +27,7 @@ function SeriesTile({ series, onOpen }) {
 export default function SeriesList() {
   const navigate = useNavigate();
   const { data: categories } = usePanelList(getSeriesCategories);
-  const [catId, setCatId] = useState('');
+  const [catId, setCatId] = usePersistedCategory('series');
   const catArgs = useMemo(() => (catId ? [catId] : []), [catId]);
   const { data: series, loading, error } = usePanelList(getSeries, catArgs);
 

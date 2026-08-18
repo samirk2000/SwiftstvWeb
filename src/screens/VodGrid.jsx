@@ -1,8 +1,9 @@
-import { useMemo, useState } from 'react';
+import { useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { t } from '../lib/i18n.js';
 import { getVodCategories, getVodStreams } from '../lib/xtream.js';
 import { usePanelList } from '../hooks/usePanelList.js';
+import { usePersistedCategory } from '../hooks/usePersistedCategory.js';
 import { useFocusable } from '../components/Focusable.jsx';
 
 function VodTile({ vod, onOpen }) {
@@ -26,7 +27,7 @@ function VodTile({ vod, onOpen }) {
 export default function VodGrid() {
   const navigate = useNavigate();
   const { data: categories } = usePanelList(getVodCategories);
-  const [catId, setCatId] = useState('');
+  const [catId, setCatId] = usePersistedCategory('vod');
   const catArgs = useMemo(() => (catId ? [catId] : []), [catId]);
   const { data: streams, loading, error } = usePanelList(getVodStreams, catArgs);
 

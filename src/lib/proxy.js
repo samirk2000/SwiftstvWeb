@@ -25,7 +25,12 @@ export const STREAM_PROXY_URLS = (() => {
     return splitList(import.meta.env.VITE_STREAM_PROXY_URLS);
   }
   const single = (import.meta.env && import.meta.env.VITE_STREAM_PROXY_URL) || '';
-  return single ? [single] : [];
+  if (single) return [single];
+  // Build-time fallback so production catches the Xtream 302→CDN redirect
+  // through one of OUR proxies instead of falling to the Cloudflare `/proxy`
+  // (which the panels/CDNs 403). These are PUBLIC stream endpoints (no
+  // credentials) — override per-deploy via VITE_STREAM_PROXY_URLS.
+  return ['https://proxy.swiftstv.com/stream', 'https://swiftstv-web.vercel.app/api/stream-proxy'];
 })();
 
 // Backwards-compatible single URL (first configured external proxy).

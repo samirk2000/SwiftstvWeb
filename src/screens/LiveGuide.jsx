@@ -1,8 +1,9 @@
-import { useMemo, useState } from 'react';
+import { useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { t } from '../lib/i18n.js';
 import { getLiveCategories, getLiveStreams, liveStreamUrl } from '../lib/xtream.js';
 import { usePanelList } from '../hooks/usePanelList.js';
+import { usePersistedCategory } from '../hooks/usePersistedCategory.js';
 import { useFocusable } from '../components/Focusable.jsx';
 
 function ChannelRow({ channel, index, onPlay }) {
@@ -29,7 +30,7 @@ function ChannelRow({ channel, index, onPlay }) {
 export default function LiveGuide() {
   const navigate = useNavigate();
   const { data: categories, server } = usePanelList(getLiveCategories);
-  const [catId, setCatId] = useState('');
+  const [catId, setCatId] = usePersistedCategory('live');
   const catArgs = useMemo(() => (catId ? [catId] : []), [catId]);
   const { data: streams, loading, error } = usePanelList(getLiveStreams, catArgs);
 
