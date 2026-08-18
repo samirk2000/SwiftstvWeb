@@ -43,16 +43,31 @@ export function hasStreamProxy() {
 
 // How many different routes we try for a media URL before giving up.
 // Ordered by "most likely to work from an HTTPS page":
-//   1) Each external stream proxy (Deno/Vercel), in configured order — a panel
-//      may 403 one cloud's ranges but not another's, so try them all.
+//   1) The VPS /stream proxy first, then any other external proxy (Deno/Vercel)
+//      — a panel may 403 one cloud's ranges but not another's, so try them all.
 //   2) Direct (some TVs / panels serve https manifests without a redirect).
 //   3) Cloudflare Pages Function (last resort — often 403'd by panels).
 export function streamProxyCandidates(mediaUrl) {
   const origin = globalThis.location ? globalThis.location.origin : 'https://swiftstvweb.pages.dev';
   const target = new URL(mediaUrl, origin).toString();
+
+  // If the URL is ALREADY routed through one of our proxies (a rewritten segment
+  // from the VPS manifest or a previous cache-buster retry), don't re-wrap it —
+  // just return it as the single candidate so it keeps hitting the SAME host
+  // (which injects the IPTV player UA) instead of being bounced back to /proxy.
+  if (/\/stream\?target=|stream-proxy\?target=|\?target=/.test(target) || target.startsWith('/proxy?')) {
+    return dedupe([target]);
+  }
+
   const enc = encodeURIComponent(target);
   const candidates = [];
-  for (const base of STREAM_PROXY_URLS) {
+  // Prefer the VPS /stream proxy (Hetzner, injects User-Agent IPTVSmartersPlayer
+  // and follows the panel 302→CDN) whenever it's configured, so VOD/MP4 never
+  // silently drops to the Cloudflare /proxy function (which the panels/CDNs 403).
+  const vps = STREAM_PROXY_URLS.find((u) => /\/stream($|[?#])/i.test(u.replace(/\/+$/, '')));
+  const rest = STREAM_PROXY_URLS.filter((u) => u !== vps);
+  for (const base of [vps, ...rest]) {
+    if (!base) continue;
     // Some envs end up with "proxy.domain" (no scheme) or "http://..." — we run
     // on an HTTPS page so force the proxy to https to avoid mixed-content on the
     // outer manifest URL (and because these proxies sit behind TLS).
@@ -63,5 +78,17 @@ export function streamProxyCandidates(mediaUrl) {
   }
   if (!candidates.length) candidates.push(mediaUrl);
   candidates.push(mediaUrl, `/proxy?target=${enc}`);
-  return candidates;
+  return dedupe(candidates);
+}
+
+// Drop duplicate candidate URLs (e.g. the same proxy listed twice), preserving order.
+function dedupe(list) {
+  const seen = new Set();
+  const out = [];
+  for (const u of list) {
+    if (!u || seen.has(u)) continue;
+    seen.add(u);
+    out.push(u);
+  }
+  return out;
 }
