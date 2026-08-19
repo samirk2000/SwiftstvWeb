@@ -450,9 +450,11 @@ export function attachTs(videoEl, url, opts = {}) {
   const controller = {
     player: null,
     hls: null, // attachHls controller used for the fallback
+    fellBack: false,
     destroyed: false,
     destroy() {
       controller.destroyed = true;
+      clearStartupWatchdog();
       if (controller.hls) {
         try {
           controller.hls.destroy();
@@ -493,12 +495,61 @@ export function attachTs(videoEl, url, opts = {}) {
     } catch {}
   }
 
+  // ---- Startup watchdog (fallback a HLS si mpegts nunca arranca) ---------
+  // Algunos canales se CONECTAN en el panel/proxy y descargan sin parar, pero
+  // mpegts.js nunca alcanza el primer keyframe (o no puede parsear ese flujo:
+  // GOP raro, timestamps, variante) y NO emite ningún error — la app se
+  // quedaría en "Cargando…" para siempre mientras el panel cuenta la conexión.
+  // Si no hay reproducción tras STARTUP_TIMEOUT_MS, se hace teardown del
+  // reproductor mpegts (cierra la conexión continua) y se conmuta a la ruta
+  // HLS .m3u8, que es la vía por la que esos canales ya cargaban antes de la
+  // migración a TS continuo.
+  const STARTUP_TIMEOUT_MS = 15000;
+  let startupWatchdog = null;
+  function onStartupPlaying() {
+    clearStartupWatchdog();
+  }
+  function clearStartupWatchdog() {
+    if (startupWatchdog) {
+      clearTimeout(startupWatchdog);
+      startupWatchdog = null;
+    }
+    if (videoEl) videoEl.removeEventListener('playing', onStartupPlaying);
+  }
+  function armStartupWatchdog() {
+    clearStartupWatchdog();
+    if (!videoEl) return;
+    videoEl.addEventListener('playing', onStartupPlaying);
+    startupWatchdog = setTimeout(() => {
+      startupWatchdog = null;
+      if (controller.destroyed) return;
+      if (videoEl.readyState >= 2) return; // ya hay frames decodificados
+      fallbackToHls('startup timeout');
+    }, STARTUP_TIMEOUT_MS);
+  }
+
   function startHls() {
+    clearStartupWatchdog();
     if (controller.destroyed || !hlsUrl) {
       if (typeof opts.onError === 'function' && !controller.destroyed) opts.onError(new Error('no hls fallback'));
       return;
     }
     controller.hls = attachHls(videoEl, hlsUrl, opts);
+  }
+
+  // Conmutar del TS continuo al HLS .m3u8. Se usa para: error fatal de mpegts,
+  // MSE no soportado, o watchdog de arranque (canal que conecta en el panel
+  // pero mpegts no produce frames). Desarma el watchdog, libera el reproductor
+  // mpegts y el elemento ANTES de asignar la URL HLS.
+  function fallbackToHls(reason) {
+    if (controller.destroyed || controller.fellBack) return;
+    controller.fellBack = true;
+    clearStartupWatchdog();
+    // eslint-disable-next-line no-console
+    console.warn('[attachTs] fallback a HLS:', reason || 'error mpegts');
+    teardownMpegts();
+    wipeElement();
+    startHls();
   }
 
   function startTs() {
@@ -566,20 +617,13 @@ export function attachTs(videoEl, url, opts = {}) {
     );
     controller.player = player;
 
-    let fellBack = false;
-    const fallback = () => {
-      if (controller.destroyed || fellBack) return;
-      fellBack = true;
-      // Fatal TS error: release the mpegts player + wipe before HLS fallback.
-      teardownMpegts();
-      wipeElement();
-      startHls();
-    };
-
     player.attachMediaElement(videoEl);
-    player.on(mpegts.Events.ERROR, fallback);
+    player.on(mpegts.Events.ERROR, () => fallbackToHls('mpegts ERROR'));
     player.load();
     player.play();
+    // Vigila el arranque: si en STARTUP_TIMEOUT_MS no hubo frames (playing /
+    // readyState>=2), conmuta a HLS (ver armStartupWatchdog).
+    armStartupWatchdog();
   }
 
   function doStartPlayback() {
@@ -589,6 +633,8 @@ export function attachTs(videoEl, url, opts = {}) {
       } catch {}
       controller.hls = null;
     }
+    // Reset del flag para que un reloadUrl/reintento pueda volver a caer a HLS.
+    controller.fellBack = false;
     teardownMpegts();
     wipeElement();
     startTs();
