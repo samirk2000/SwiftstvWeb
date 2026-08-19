@@ -78,26 +78,32 @@ export function proxyMediaUrl(url, opts = {}) {
 
 // Determine the HLS.js config (extraOrigin applies dynamic Referer/Origin).
 function hlsConfigFor(url, opts) {
-  // LIVE (o su fallback HLS): buffer mínimo para que hls.js descargue 1-2
-  // segmentos a la vez y NUNCA abra 3+ peticiones paralelas al panel — eso es
-  // lo que hace que Xtream detecte varias conexiones y corte la transmisión.
-  // VOD/catchup conservan buffer normal (10s) para evitar rebuffering.
-  const isLive = Boolean(opts?.isLive);
+  // El único camino HLS para live es el FALLBACK de attachTs (canales cuyo .ts
+  // continuo mpegts.js no puede reproducir). Para esos canales el buffer
+  // estricto (maxBufferLength 3 / liveSyncDurationCount 2) era contraproducente:
+  // con segmentos grandes y CDN lenta (3.3MB por segmento, 8-10s de descarga)
+  // HLS.js nunca alcanzaba el borde vivo, abortaba el fragmento lento y
+  // recargaba el playlist en bucle → "Cargando" para siempre mientras el panel
+  // sí contaba la conexión. Volvemos a la config tolerante pre-migración (la
+  // que reproducía estos canales): sigue acotando a ~1-2 segmentos en vuelo
+  // (máx. 10s por delante) para no abrir 3+ conexiones al panel, pero con
+  // margen para arrancar y mantener el búfer. VOD/catchup usan la misma.
   const cfg = {
     // Evita workers que disparen fetches en hilos paralelos no controlados.
     enableWorker: false,
-    backBufferLength: isLive ? 5 : 30,
-    // Live: se sincroniza 2 segmentos detrás del en vivo (máx 4).
-    liveSyncDurationCount: isLive ? 2 : 3,
-    liveMaxLatencyDurationCount: isLive ? 4 : 5,
+    backBufferLength: 30,
+    // Live: se sincroniza 3 segmentos detrás del en vivo (máx 5).
+    liveSyncDurationCount: 3,
+    liveMaxLatencyDurationCount: 5,
     lowLatencyMode: false,
-    // Búfer de datos: live 3s por delante (1 segmento) / VOD 10s (pico 15s).
-    maxBufferLength: isLive ? 3 : 10,
-    maxMaxBufferLength: isLive ? 6 : 15,
+    // Búfer de datos: máx. 10s pedidos por adelantado (pico 15s), 30MB en RAM.
+    // Reduce la carga paralela agresiva que abriría varias conexiones al panel.
+    maxBufferLength: 10,
+    maxMaxBufferLength: 15,
     maxBufferSize: 30 * 1024 * 1024,
     // No cortar la carga de un fragmento prematuramente (segmentos de varios MB).
     fragLoadingTimeOut: 30000,
-    fragLoadingMaxRetry: isLive ? 3 : 6,
+    fragLoadingMaxRetry: 6,
     // Manifests .m3u8 vía proxy lento: timeout 10s y 3 reintentos para no
     // saturar con peticiones de playlist consecutivas.
     manifestLoadingTimeOut: 10000,
@@ -454,7 +460,8 @@ export function attachTs(videoEl, url, opts = {}) {
     destroyed: false,
     destroy() {
       controller.destroyed = true;
-      clearStartupWatchdog();
+      clearWatchdogs();
+      if (videoEl) videoEl.removeEventListener('playing', onStartupPlaying);
       if (controller.hls) {
         try {
           controller.hls.destroy();
@@ -503,33 +510,59 @@ export function attachTs(videoEl, url, opts = {}) {
   // Si no hay reproducción tras STARTUP_TIMEOUT_MS, se hace teardown del
   // reproductor mpegts (cierra la conexión continua) y se conmuta a la ruta
   // HLS .m3u8, que es la vía por la que esos canales ya cargaban antes de la
-  // migración a TS continuo.
-  const STARTUP_TIMEOUT_MS = 15000;
+  // migración a TS continuo. Un segundo watchdog vigila ese fallback: si el HLS
+  // tampoco arranca en FALLBACK_STALL_MS, se reporta el error real (codec/red)
+  // para que la UI salga de "Cargando" infinito con pantalla de error/Reintentar.
+  const STARTUP_TIMEOUT_MS = 10000;
+  const FALLBACK_STALL_MS = 40000;
+  let startedPlaying = false;
   let startupWatchdog = null;
+  let fallbackWatchdog = null;
   function onStartupPlaying() {
-    clearStartupWatchdog();
+    startedPlaying = true;
+    clearWatchdogs();
   }
-  function clearStartupWatchdog() {
+  function clearWatchdogs() {
     if (startupWatchdog) {
       clearTimeout(startupWatchdog);
       startupWatchdog = null;
     }
-    if (videoEl) videoEl.removeEventListener('playing', onStartupPlaying);
+    if (fallbackWatchdog) {
+      clearTimeout(fallbackWatchdog);
+      fallbackWatchdog = null;
+    }
+  }
+  function listenPlayingOnce() {
+    if (!videoEl || startedPlaying) return;
+    videoEl.removeEventListener('playing', onStartupPlaying);
+    videoEl.addEventListener('playing', onStartupPlaying);
   }
   function armStartupWatchdog() {
-    clearStartupWatchdog();
-    if (!videoEl) return;
-    videoEl.addEventListener('playing', onStartupPlaying);
+    if (!videoEl || controller.destroyed) return;
+    listenPlayingOnce();
     startupWatchdog = setTimeout(() => {
       startupWatchdog = null;
-      if (controller.destroyed) return;
-      if (videoEl.readyState >= 2) return; // ya hay frames decodificados
+      if (controller.destroyed || startedPlaying) return;
+      // Solo se da por bueno si hay datos de frames FUTUROS (>=3): un stream
+      // atascado puede alcanzar HAVE_CURRENT_DATA (2) sin reproducir jamás.
+      if (videoEl.readyState >= 3) return;
       fallbackToHls('startup timeout');
     }, STARTUP_TIMEOUT_MS);
   }
+  function armFallbackWatchdog() {
+    if (!videoEl || controller.destroyed) return;
+    listenPlayingOnce();
+    fallbackWatchdog = setTimeout(() => {
+      fallbackWatchdog = null;
+      if (controller.destroyed || startedPlaying) return;
+      if (videoEl.readyState >= 3) return; // ya hay frames decodificados
+      // El fallback HLS tampoco arrancó: salir de "Cargando" infinito.
+      if (typeof opts.onError === 'function') opts.onError(new Error('hls fallback stalled'));
+    }, FALLBACK_STALL_MS);
+  }
 
   function startHls() {
-    clearStartupWatchdog();
+    clearWatchdogs();
     if (controller.destroyed || !hlsUrl) {
       if (typeof opts.onError === 'function' && !controller.destroyed) opts.onError(new Error('no hls fallback'));
       return;
@@ -544,12 +577,13 @@ export function attachTs(videoEl, url, opts = {}) {
   function fallbackToHls(reason) {
     if (controller.destroyed || controller.fellBack) return;
     controller.fellBack = true;
-    clearStartupWatchdog();
+    clearWatchdogs();
     // eslint-disable-next-line no-console
     console.warn('[attachTs] fallback a HLS:', reason || 'error mpegts');
     teardownMpegts();
     wipeElement();
     startHls();
+    armFallbackWatchdog();
   }
 
   function startTs() {
@@ -557,6 +591,7 @@ export function attachTs(videoEl, url, opts = {}) {
     // No MSE for TS on this device -> HLS segmented fallback.
     if (!mpegts.isSupported() || !mpegts.getFeatureList().mseLivePlayback) {
       startHls();
+      armFallbackWatchdog();
       return;
     }
 
@@ -622,7 +657,7 @@ export function attachTs(videoEl, url, opts = {}) {
     player.load();
     player.play();
     // Vigila el arranque: si en STARTUP_TIMEOUT_MS no hubo frames (playing /
-    // readyState>=2), conmuta a HLS (ver armStartupWatchdog).
+    // readyState>=3), conmuta a HLS (ver armStartupWatchdog).
     armStartupWatchdog();
   }
 
@@ -633,8 +668,11 @@ export function attachTs(videoEl, url, opts = {}) {
       } catch {}
       controller.hls = null;
     }
-    // Reset del flag para que un reloadUrl/reintento pueda volver a caer a HLS.
+    // Reset del flag para que un reloadUrl/reintento pueda volver a caer a HLS
+    // y los watchdogs de arranque/fallback vuelvan a vigilar desde cero.
     controller.fellBack = false;
+    startedPlaying = false;
+    clearWatchdogs();
     teardownMpegts();
     wipeElement();
     startTs();

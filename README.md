@@ -197,14 +197,20 @@ que el panel cuente cada fragmento como una conexión nueva. En su lugar:
   **o no arranca en el tiempo de espera** (algunos canales se CONECTAN en el
   panel y descargan sin parar pero mpegts nunca alcanza un keyframe decodificable
   y no emite error — la app se quedaría en "Cargando…" para siempre): un
-  **watchdog de arranque** (`armStartupWatchdog`, 15s) hace teardown del
+  **watchdog de arranque** (`armStartupWatchdog`, 10s) hace teardown del
   reproductor mpegts (cierra la conexión continua) y conmuta automáticamente el
-  mismo canal a su URL `.m3u8` (`tsToHlsUrl` → `attachHls`). El error solo se
-  muestra si el fallback HLS también falla. Para no repetir el patrón de 3+
-  conexiones del panel, el **fallback HLS en live usa buffer mínimo**
-  (`hlsConfigFor` con `isLive`): `maxBufferLength: 3` / `maxMaxBufferLength: 6`,
-  `liveSyncDurationCount: 2` / `liveMaxLatencyDurationCount: 4` → descarga 1-2
-  segmentos a la vez, nunca la ráfaga paralela que corta la sesión en Xtream.
+  mismo canal a su URL `.m3u8` (`tsToHlsUrl` → `attachHls`). El fallback HLS usa
+  la **config tolerante pre-migración** (`maxBufferLength: 10`, `liveSyncDurationCount: 3`,
+  `fragLoadingMaxRetry: 6`): la config estricta de mono-conexión (2 segmentos de
+  sincronía, 3s de búfer) hacía que canales con segmentos grandes y CDN lenta
+  (p. ej. 3.3MB por segmento descargado en 8-10s) nunca alcanzaran el borde vivo
+  → HLS.js abortaba el fragmento lento y recargaba el playlist en bucle →
+  "Cargando" infinito aunque el panel mostrara la conexión. Un **segundo
+  watchdog** (`armFallbackWatchdog`, 40s) vigila ese fallback: si el HLS tampoco
+  arranca (contenido realmente no decodificable, p. ej. HEVC sin soporte), se
+  reporta el error real para que la UI salga de "Cargando" infinito con pantalla
+  de error/Reintentar en vez de quedarse colgada. El error solo se muestra si el
+  fallback HLS también falla.
 - **VOD / series / catchup / Exclusivos siguen en HLS**: el modo continuo se
   aplica solo a `type=live`. El catchup usa `start`/`end` (horario), por lo que
   el proxy lo trata como NO continuo.
