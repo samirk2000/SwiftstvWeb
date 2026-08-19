@@ -686,9 +686,14 @@ export function attachTs(videoEl, url, opts = {}) {
       { type: 'mpegts', isLive, url: srcUrl, cors: true },
       isLive
         ? {
-            // Demux en thread secundario para no congelar la UI.
-            enableWorker: true,
-            enableWorkerForMSE: true,
+            // Demux + MSE en el hilo principal: el worker dedicado de mpegts
+            // (`enableWorkerForMSE:true`) fallaba SILENCIOSAMENTE en algunos
+            // navegadores/TV (logs llenos de "Worker MediaSource attachment is
+            // closing" y NINGUNA petición .ts saliendo del reproductor). Con el
+            // worker desactivado, el .ts continuo se solicita y decodifica de
+            // forma fiable; el costo de UI es despreciable en hilos modernos.
+            enableWorker: false,
+            enableWorkerForMSE: false,
             isLive: true,
             // Stash holgado: retiene hasta encontrar el primer keyframe H.264
             // (SPS/PPS) y suaviza picos de red. El tamaño se adapta a la
@@ -711,8 +716,8 @@ export function attachTs(videoEl, url, opts = {}) {
           }
         : {
             // VOD / archivo: stash pequeño para arranque rápido y sin chasing.
-            enableWorker: true,
-            enableWorkerForMSE: true,
+            enableWorker: false,
+            enableWorkerForMSE: false,
             isLive: false,
             enableStashBuffer: true,
             stashInitialSize: 128 * 1024,

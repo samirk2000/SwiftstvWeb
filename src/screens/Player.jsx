@@ -189,6 +189,12 @@ export default function Player() {
     wakeRef.current = wake;
 
     const onTime = () => {
+      // Clear the loading overlay as soon as the video is demonstrably
+      // reproducing real content. Some TV browsers/webviews never fire the
+      // `playing` event for MSE (hls.js/mpegts), leaving the spinner stuck over
+      // an already-playing stream; an advancing currentTime is the reliable
+      // signal. Guarded to >=1s so a still/black first frame doesn't clear it.
+      if (video.currentTime >= 1) setStarted(true);
       if (video.duration > 0) {
         // Best-effort continue-watching: persist position periodically.
         updateContinueWatching({

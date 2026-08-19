@@ -162,6 +162,10 @@ El VOD arranca en cuanto el navegador tiene el primer frame decodificado:
   live (arranque fluido y margen de estabilidad) y 128KB para VOD/archivo, y
   `lazyLoad: false` / `deferLoadAfterSourceOpen: false` para empezar en cuanto
   llegan los primeros bytes del `.ts` continuo.
+- **Overlay "Cargando" robusto** (`Player.jsx`): el spinner se oculta al
+  reproducir de verdad (evento `playing` **o** `currentTime >= 1s` en
+  `timeupdate`), porque algunos navegadores/TV nunca emiten `playing` para MSE
+  (hls.js/mpegts) y dejaban el spinner pegado sobre un video ya reproduciendo.
 
 ## Live en MPEG-TS continuo (1 conexión por canal)
 
@@ -187,9 +191,16 @@ que el panel cuente cada fragmento como una conexión nueva. En su lugar:
     direct-seek en el `<video>` cada vez que el buffer adelantado supera el
     umbral; como el proxy entrega más rápido que el tiempo real, eso provocaba
     un trabo periódico cada ~10s. Sin chasing el video avanza continuo sin
-    saltos y el buffer natural queda acotado por el stash. Se mantienen
-    `autoCleanupSourceBuffer: true` (limpia memoria sin reconectar),
-    `enableWorker:true` y `lazyLoad:false` / `deferLoadAfterSourceOpen:false`.
+    saltos y el buffer natural queda acotado por el stash. El demux y el MSE
+    corren en el **hilo principal** (`enableWorker:false` /
+    `enableWorkerForMSE:false`): el worker dedicado de mpegts fallaba de forma
+    silenciosa en algunos navegadores/TV (logs llenos de "Worker MediaSource
+    attachment is closing" y **cero** peticiones `.ts` saliendo del reproductor,
+    lo que forzaba el fallback HLS y abría conexiones segmentadas contra el
+    panel); sin worker el `.ts` continuo se solicita y decodifica de forma
+    fiable en todos los navegadores. Se mantienen `autoCleanupSourceBuffer: true`
+    (limpia memoria sin reconectar) y `lazyLoad:false` /
+    `deferLoadAfterSourceOpen:false`.
   - **VOD/archivo (`isLive:false`)** — `enableStashBuffer: true` con
     `stashInitialSize` de 128KB, sin chasing, para arranque rápido y estable.
 - **Fallback a HLS**: si `mpegts.js` no está soportado (no hay MSE live), emite
