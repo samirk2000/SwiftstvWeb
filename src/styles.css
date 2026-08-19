@@ -878,6 +878,98 @@ input:focus-visible {
   flex: 0 0 auto;
 }
 
+/* ---------- Settings ---------- */
+.settings-card {
+  max-width: 680px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 20px;
+  margin-bottom: 20px;
+}
+.settings-card .row-title {
+  margin: 0;
+}
+
+/* ---------- Home favorite tile (toggle) ---------- */
+.fav-tile {
+  position: relative;
+  flex: 0 0 auto;
+}
+.fav-tile .tile-fav {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(4px);
+  z-index: 2;
+}
+
+/* ---------- Focused channel now / next ---------- */
+.nownext {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 16px;
+  border: 1px solid var(--accent);
+  border-radius: 12px;
+  background: var(--bg-card);
+  padding: 12px 16px;
+  margin: 4px 0 14px;
+}
+.nownext-title strong {
+  font-size: 16px;
+}
+.nownext-now,
+.nownext-next {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.now-badge {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.nownext-prog {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 44vw;
+}
+
+/* ---------- Catch-up manual date/time selector ---------- */
+.catchup-manual {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px;
+  margin-bottom: 12px;
+}
+.catchup-manual-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+.catchup-label {
+  color: var(--text-dim);
+  font-size: 13px;
+  min-width: 46px;
+  padding-top: 8px;
+}
+.chip-row {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 2px 2px 6px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+
 /* ---------- Responsive (phone) ---------- */
 @media (max-width: 640px) {
   .content {

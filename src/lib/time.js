@@ -38,3 +38,20 @@ export function currentProgramme(epg) {
   const now = Date.now() / 1000;
   return epg.find((e) => Number(e.start) <= now && Number(e.stop || 0) > now) || null;
 }
+
+// Local epoch seconds for `dayOffset` days ago (0 = today) at the given hour.
+// Used by the catch-up selector to build a programme window from a picked
+// date + hour (startEpoch), independent of the short EPG list.
+export function epochAtLocal(dayOffset = 0, hour = 0) {
+  const d = new Date();
+  d.setDate(d.getDate() - dayOffset);
+  d.setHours(hour, 0, 0, 0);
+  return Math.floor(d.getTime() / 1000);
+}
+
+// Short "18 Aug" style label for a day offset (0 = today), locale-aware.
+export function shortDayLabel(dayOffset = 0) {
+  const d = new Date();
+  d.setDate(d.getDate() - dayOffset);
+  return d.toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
+}
