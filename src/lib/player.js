@@ -511,12 +511,11 @@ export function attachTs(videoEl, url, opts = {}) {
 
     // LIVE (TV en vivo) vs VOD/archivo: la configuración del motor cambia por
     // completo. Para live usamos baja latencia + mono-conexión estricta (el
-    // panel de Xtream corta la sesión si ve >N conexiones simultáneas), pero
-    // con un stash mínimo: si el stash se desactiva del todo, mpegts.js no
-    // retiene los bytes hasta encontrar el primer keyframe H.264 (SPS/PPS) y el
-    // demuxer nunca arranca en MSE — la pantalla se queda en "Cargando…" aunque
-    // la red siga descargando. 128KB bastan para detectar ese primer keyframe
-    // y despacharlo a MSE casi de inmediato.
+    // panel de Xtream corta la sesión si ve >N conexiones simultáneas), con un
+    // stash holgado para un arranque estable: si el stash es mínimo, el
+    // demuxer apenas retiene bytes y el chasing agresivo deja el buffer en
+    // seco cada pocos segundos (stuttering). 384KB aseguran un arranque fluido
+    // y un margen de 8s con mínimo de 3s evita los saltos que causan el trabo.
     const isLive = opts.isLive !== false;
     const player = mpegts.createPlayer(
       { type: 'mpegts', isLive, url: srcUrl, cors: true },
@@ -526,16 +525,16 @@ export function attachTs(videoEl, url, opts = {}) {
             enableWorker: true,
             enableWorkerForMSE: true,
             isLive: true,
-            // Stash mínimo (no desactivado): retiene hasta encontrar el primer
-            // keyframe H.264 (SPS/PPS) y arranca el demuxer en MSE.
+            // Stash holgado: retiene hasta encontrar el primer keyframe H.264
+            // (SPS/PPS) y arranca el demuxer en MSE con margen inicial.
             enableStashBuffer: true,
-            stashInitialSize: 128 * 1024,
-            // Auto-ajustar latencia sin reabrir conexiones: si el buffer se
-            // atrasa >4s, salta dentro del rango ya descargado para volver a
-            // quedar con 1s de margen. Nunca re-consulta la URL.
+            stashInitialSize: 384 * 1024,
+            // Auto-ajustar latencia sin reabrir conexiones: permite hasta 8s
+            // de margen en vivo y mantiene SIEMPRE 3s de buffer mínimo, de
+            // modo que el video nunca se queda en seco. Nunca re-consulta la URL.
             liveBufferLatencyChasing: true,
-            liveBufferLatencyMaxLatency: 4,
-            liveBufferLatencyMinRemain: 1,
+            liveBufferLatencyMaxLatency: 8,
+            liveBufferLatencyMinRemain: 3,
             // Limpia la memoria del buffer consumido sin reconectar.
             autoCleanupSourceBuffer: true,
             autoCleanupMaxBackwardDuration: 30,

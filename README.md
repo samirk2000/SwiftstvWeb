@@ -158,8 +158,8 @@ El VOD arranca en cuanto el navegador tiene el primer frame decodificado:
   primeros KB sin esperar a llenar el buffer. Un rechazo con `AbortError` se
   ignora (significa que un reintento/candidato reemplazó la carga), no se trata
   como error.
-- **Buffer de arranque mínimo en mpegts.js** (`attachTs`): stash de 128KB tanto
-  para live (detectar el primer keyframe H.264 SPS/PPS) como para VOD/archivo, y
+- **Buffer de arranque mínimo en mpegts.js** (`attachTs`): stash de 384KB para
+  live (arranque fluido y margen de estabilidad) y 128KB para VOD/archivo, y
   `lazyLoad: false` / `deferLoadAfterSourceOpen: false` para empezar en cuanto
   llegan los primeros bytes del `.ts` continuo.
 
@@ -181,12 +181,12 @@ que el panel cuente cada fragmento como una conexión nueva. En su lugar:
   **mpegts.js** (`type: 'mpegts', cors: true`) sobre MSE. El config distingue
   **LIVE vs VOD** (`opts.isLive`):
   - **Live (`isLive:true`)** — baja latencia + mono-conexión estricta con
-    **stash mínimo**: `enableStashBuffer: true` con `stashInitialSize` de 128KB
-    (desactivarlo del todo deja a mpegts.js sin poder retener bytes hasta el
-    primer keyframe H.264 SPS/PPS y el demuxer no arranca en MSE → pantalla
-    congelada en "Cargando…" aunque la red descargue). `liveBufferLatencyChasing:
-    true` con `liveBufferLatencyMaxLatency: 4` / `liveBufferLatencyMinRemain: 1`
-    (auto-ajusta la latencia dentro del buffer, **sin reabrir** el socket hacia
+    **stash holgado**: `enableStashBuffer: true` con `stashInitialSize` de
+    384KB para un arranque fluido (un stash mínimo + chasing agresivo deja el
+    buffer en seco y produce stuttering cada 3-4s). `liveBufferLatencyChasing:
+    true` con `liveBufferLatencyMaxLatency: 8` / `liveBufferLatencyMinRemain: 3`
+    (permite hasta 8s de margen en vivo y mantiene SIEMPRE 3s de buffer mínimo,
+    auto-ajustando dentro del rango descargado **sin reabrir** el socket hacia
     el proxy/panel), `autoCleanupSourceBuffer: true` (limpia memoria sin
     reconectar), `enableWorker:true` y `lazyLoad:false` /
     `deferLoadAfterSourceOpen:false`.
