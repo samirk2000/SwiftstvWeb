@@ -49,6 +49,16 @@ export function hasStreamProxy() {
 //   3) Cloudflare Pages Function (last resort — often 403'd by panels).
 export function streamProxyCandidates(mediaUrl, opts = {}) {
   const continuous = Boolean(opts && opts.continuous);
+  // LIVE HLS FALLBACK is a strictly MONO-CONNECTION route. Instead of handing
+  // back a fat list of proxy candidates (each of which hls.js will poke with
+  // fragment retries and manifest reloads), we return only the SINGLE most
+  // reliable route — the VPS /stream proxy. The panel/CDN counts every socket
+  // as a separate connection, and probing several proxies at once on a slow
+  // live channel is what made the panel show multiple connections and flood
+  // the network tab. The few channels that genuinely need the fallback can
+  // keep the one route stable; if it hard-fails the caller still surfaces a
+  // Retry (never an automatic multi-proxy loop on live).
+  const singleLiveRoute = Boolean(opts && opts.liveFallback);
   const origin = globalThis.location ? globalThis.location.origin : 'https://swiftstvweb.pages.dev';
   const target = new URL(mediaUrl, origin).toString();
 
@@ -80,6 +90,20 @@ export function streamProxyCandidates(mediaUrl, opts = {}) {
   // silently drops to the Cloudflare /proxy function (which the panels/CDNs 403).
   const vps = STREAM_PROXY_URLS.find((u) => /\/stream($|[?#])/i.test(u.replace(/\/+$/, '')));
   const rest = STREAM_PROXY_URLS.filter((u) => u !== vps);
+  // Live HLS fallback: commit to the VPS /stream proxy alone and stop. We do
+  // NOT append the raw URL / CF-function / second proxy — a live .m3u8 that
+  // stalls on one route just needs a bounded Retry, not four concurrent
+  // probes that keep 3 connections alive on the panel.
+  if (singleLiveRoute) {
+    if (!vps) candidates.push(mediaUrl);
+    else {
+      let b = vps.replace(/\/+$/, '').trim();
+      if (!/^https?:\/\//i.test(b)) b = `https://${b}`;
+      else if (b.startsWith('http://')) b = `https://${b.slice('http://'.length)}`;
+      candidates.push(`${b}?target=${enc}`);
+    }
+    return dedupe(candidates);
+  }
   for (const base of [vps, ...rest]) {
     if (!base) continue;
     // Some envs end up with "proxy.domain" (no scheme) or "http://..." — we run

@@ -54,7 +54,7 @@ export function buildSrcUrl(url, opts = {}) {
 // Cloudflare's ranges. So media is routed through an OUTSIDE stream proxy
 // (Deno Deploy / Vercel) that resolves the redirects and serves https.
 // Exclusivos (needs dynamic Referer/Origin + its own proxy) is left untouched.
-export function mediaCandidates(url, { skipProxy = false, isExclusive = false, continuous = false } = {}) {
+export function mediaCandidates(url, { skipProxy = false, isExclusive = false, continuous = false, liveFallback = false } = {}) {
   if (skipProxy || isExclusive) return [url];
   const lu = String(url || '').toLowerCase();
   if (!lu) return [url];
@@ -68,7 +68,13 @@ export function mediaCandidates(url, { skipProxy = false, isExclusive = false, c
   const isVideoExt = /\.(mp4|m4v|mkv|ts|tsa|m3u8)(\?|$)/i.test(lu);
   const isXtreamRoute = /\/\/(?:[^/]+\/)?(live|movie|series)\//.test(lu);
   if (!isHls && !isHttp && !isVideoExt && !isXtreamRoute) return [url];
-  return streamProxyCandidates(url, continuous ? { continuous: true } : {});
+  const opts = {};
+  if (continuous) opts.continuous = true;
+  // LIVE HLS FALLBACK uses a single-route (mono-connection) candidate list so
+  // hls.js never probes multiple proxies at once on a slow live channel — that's
+  // what kept several connections alive on the panel and flooded the network tab.
+  if (liveFallback) opts.liveFallback = true;
+  return streamProxyCandidates(url, opts);
 }
 
 // Legacy single-URL helper: returns the preferred (first) candidate.
@@ -84,10 +90,13 @@ function hlsConfigFor(url, opts) {
   // segmentos de 3.3MB que bajan en 8-10s, casi a la velocidad de reproducción).
   // La config "normal" abortaba el fragmento lento y recargaba el playlist en
   // bucle. Para estos canales damos margen: NO abortar fragmentos (timeout 60s),
-  // más reintentos y algo más de buffer por delante, manteniendo la sincronía en
-  // vivo de 3 segmentos (la que reproducía estos canales antes de la migración
-  // a TS). Abre ~2-3 conexiones al panel, pero es el fallback de canales que de
-  // otro modo no se ven; el panel ya las tolera (era el modo pre-migración).
+  // algo más de buffer por delante, manteniendo la sincronía en vivo de 3
+  // segmentos. Pero es una ruta MONO-CONEXIÓN (mediaCandidates devuelve un solo
+  // proxy), así que limitamos los reintentos por fragmento/manifiesto: cuando un
+  // canal lento se traba, más reintentos solo abren más sockets al panel/CDN y
+  // disparan la oleada de peticiones (panel mostrando 3 conexiones simultáneas).
+  // Un reintento moderado + la conmutación por el watchdog de liveness (y el
+  // botón Reintentar) bastan; no convierten un canal con CDN rota en una tormenta.
   const isLiveFallback = Boolean(opts?.isLiveFallback);
   const cfg = {
     // Evita workers que disparen fetches en hilos paralelos no controlados.
@@ -104,13 +113,13 @@ function hlsConfigFor(url, opts) {
     // No cortar la carga de un fragmento prematuramente (segmentos de varios MB
     // en CDN lentas pueden tardar 20-40s; 60s de margen).
     fragLoadingTimeOut: isLiveFallback ? 60000 : 30000,
-    fragLoadingMaxRetry: isLiveFallback ? 10 : 6,
-    // Manifests .m3u8 vía proxy lento: timeout 10s y reintentos para no
-    // saturar con peticiones de playlist consecutivas.
+    // Live fallback = un solo reintento de fragmento; VOD conserva los suyos.
+    fragLoadingMaxRetry: isLiveFallback ? 2 : 6,
+    // Manifests .m3u8 vía proxy lento: timeout 10s y reintentos moderados.
     manifestLoadingTimeOut: 10000,
-    manifestLoadingMaxRetry: isLiveFallback ? 6 : 3,
+    manifestLoadingMaxRetry: isLiveFallback ? 3 : 3,
     levelLoadingTimeOut: 20000,
-    levelLoadingMaxRetry: isLiveFallback ? 6 : 4,
+    levelLoadingMaxRetry: isLiveFallback ? 2 : 4,
     // Cache-busting of the manifest so DVR buffers don't go stale after stalls.
     progressive: true,
   };
@@ -181,11 +190,13 @@ export function attachHls(videoEl, url, opts = {}) {
   const primary = mediaCandidates(url, {
     skipProxy: Boolean(opts.skipProxy),
     isExclusive: Boolean(opts.isExclusive),
+    liveFallback: Boolean(opts.isLiveFallback),
   });
   const candidates = (opts.alternateUrls || []).reduce((acc, alt) => {
     for (const c of mediaCandidates(alt, {
       skipProxy: Boolean(opts.skipProxy),
       isExclusive: Boolean(opts.isExclusive),
+      liveFallback: Boolean(opts.isLiveFallback),
     })) {
       if (!acc.includes(c)) acc.push(c);
     }
@@ -549,8 +560,19 @@ export function attachTs(videoEl, url, opts = {}) {
   // Vigila que currentTime avance de forma continua. Si no avanza durante
   // `stallMs` consecutivos, invoca `onGiveUp`. Cubre tanto el arranque (nunca
   // avanzó) como un congelamiento posterior.
+  //
+  // PAUSA en vivo: el reproductor live NO tiene botón de pausa (solo PiP/atrás),
+  // así que una `videoEl.paused` en reproducción en vivo casi siempre es un
+  // ATASCO/fallo (el navegador pausa al quedarse sin buffer) y no una acción del
+  // usuario. Antes esto se trataba como "pausa intencional" y reseteaba el
+  // watchdog: un stream trabado que pausaba quedaba congelado PARA SIEMPRE, sin
+  // conmutar a HLS ni cerrar la conexión — el panel lo seguía marcando "Online"
+  // y la app se quedaba en "Cargando" sin reanudar. Para live, `paused` cuenta
+  // como atasco (el teardown/fallback cerrará la conexión); solo en VOD/archivo
+  // (donde sí hay pausa real) se respeta como pausa intencional.
   function livenessWatch(stallMs, onGiveUp) {
     if (!videoEl || controller.destroyed) return null;
+    const isLive = opts.isLive !== false;
     let lastAdvanceAt = Date.now();
     let lastT = videoEl.currentTime || 0;
     return setInterval(() => {
@@ -559,8 +581,10 @@ export function attachTs(videoEl, url, opts = {}) {
         return;
       }
       const t = videoEl.currentTime || 0;
-      if (videoEl.paused || t - lastT >= LIVENESS_ADVANCE_DELTA) {
-        // Reproduciendo de verdad (avanza) o pausa intencional: se resetea.
+      const advanced = t - lastT >= LIVENESS_ADVANCE_DELTA;
+      const isPauseFault = videoEl.paused && isLive; // live pause = atasco
+      if ((advanced && !isPauseFault) || (videoEl.paused && !isLive)) {
+        // Reproduciendo de verdad (avanza) o pausa intencional (solo VOD): reset.
         lastAdvanceAt = Date.now();
         lastT = t;
       } else if (Date.now() - lastAdvanceAt >= stallMs) {

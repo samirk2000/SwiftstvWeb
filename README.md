@@ -211,7 +211,9 @@ que el panel cuente cada fragmento como una conexión nueva. En su lugar:
   congelado y `readyState` queda alto porque MSE sigue recibiendo datos, así que
   comprobar readyState no basta). Un **watchdog de liveness** (`livenessWatch`)
   muestrea `currentTime` cada 2s y, si no avanza ≥0.5s durante **12s** (tanto en
-  el arranque como a mitad de reproducción; una pausa intencional no cuenta),
+  el arranque como a mitad de reproducción; en **live** una pausa también cuenta
+  como atasco porque el reproductor live no tiene botón de pausa — solo hay pausa
+  intencional en VOD/archivo),
   hace teardown del reproductor mpegts (cierra la conexión continua) y conmuta
   automáticamente el mismo canal a su URL `.m3u8` (`tsToHlsUrl` → `attachHls`).
   La conmutación espera **3s** (`HLS_START_DELAY_MS`) para que el worker de
@@ -221,8 +223,8 @@ que el panel cuente cada fragmento como una conexión nueva. En su lugar:
   (3.3MB en 8-10s) y hls.js nunca alcanza el borde en vivo (aborta el fragmento
   lento, recarga el playlist en bucle y no reproduce). El fallback HLS usa una
   **config de CDN lenta** (`maxBufferLength: 15` / `maxMaxBufferLength: 30`,
-  `liveSyncDurationCount: 3`, `fragLoadingTimeOut: 60s`, `fragLoadingMaxRetry: 10`,
-  `manifestLoadingMaxRetry: 6`): los canales que caen aquí suelen servir sus
+  `liveSyncDurationCount: 3`, `fragLoadingTimeOut: 60s`): los canales que caen aquí
+  suelen servir sus
   segmentos desde una CDN que los baja casi a velocidad de reproducción, y la
   config normal abortaba el fragmento lento y recargaba el playlist en bucle →
   "Cargando" infinito aunque el panel mostrara la conexión. Como el arranque
@@ -233,6 +235,16 @@ que el panel cuente cada fragmento como una conexión nueva. En su lugar:
   HEVC sin soporte) reporta el error real **con diagnóstico** (readyState,
   paused, currentTime, buffered ranges y `video.error`) para que la UI salga de
   "Cargando" infinito con pantalla de error/Reintentar.
+  **Parche diferenciado (live HLS fallback = mono-conexión):** a diferencia de
+  VOD, el fallback HLS en vivo NO prueba los 4 candidatos de proxy.
+  `mediaCandidates(liveFallback)` devuelve **un único proxy** (el VPS `/stream`)
+  y el config limita los reintentos (`fragLoadingMaxRetry: 2`,
+  `manifestLoadingMaxRetry: 3`, `levelLoadingMaxRetry: 2`). Esto evita que un
+  canal cuyo `.m3u8` el CDN sirve mal/404 se convierta en una **tormenta de
+  peticiones** y en **múltiples conexiones simultáneas** al panel (el síntoma del
+  canal 5: el panel mostrando ~3 conexiones y el network tab lleno). Un único
+  reintento + el watchdog por fases + el botón "Reintentar" bastan; no se fuerza
+  un bucle multi-proxy.
   Para depurar, `attachTs` registra en consola la ruta activa (`mpegts start` /
   `HLS fallback` / `fallback a HLS: <motivo>` / `reintento HLS #N`). El error
   solo se muestra si el fallback HLS también falla.
