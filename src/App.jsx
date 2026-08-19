@@ -13,6 +13,7 @@ import SeriesDetail from './screens/SeriesDetail.jsx';
 import Player from './screens/Player.jsx';
 import Exclusivos from './screens/Exclusivos.jsx';
 import Parental from './screens/Parental.jsx';
+import Settings from './screens/Settings.jsx';
 
 function TopBar() {
   const { logout, toggleLanguage, lang } = useSession();
@@ -143,6 +144,14 @@ function AppShell() {
             element={
               <RequireSession>
                 <Parental />
+              </RequireSession>
+            }
+          />
+          <Route
+            path="/settings"
+            element={
+              <RequireSession>
+                <Settings />
               </RequireSession>
             }
           />
