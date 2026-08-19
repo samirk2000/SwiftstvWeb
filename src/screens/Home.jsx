@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { t } from '../lib/i18n.js';
-import { getContinueWatching, getFavorites, getSession } from '../lib/session.js';
+import { getContinueWatching, getFavorites, getSession, toggleFavorite } from '../lib/session.js';
 import { useSession } from '../context/SessionContext.jsx';
 import { useFocusable } from '../components/Focusable.jsx';
 import { Row, Tile } from '../components/ui.jsx';
@@ -50,6 +50,10 @@ export default function Home() {
     else if (f.type === 'live') navigate('/live');
     else navigate('/');
   };
+  const removeFavorite = (f) => {
+    toggleFavorite({ type: f.type, id: f.id, title: f.title, image: f.image });
+    setTick((x) => x + 1);
+  };
 
   const openContinue = (c) => {
     const qs = new URLSearchParams();
@@ -69,6 +73,7 @@ export default function Home() {
         <MenuItem to="series" icon="📚" label={t('home.series')} onNavigate={() => go('/series')} />
         <MenuItem to="exclusivos" icon="⚡" label={t('home.exclusivos')} onNavigate={() => go('/exclusivos')} />
         <MenuItem to="parental" icon="🔒" label={t('home.parental')} onNavigate={() => go('/parental')} />
+        <MenuItem to="settings" icon="⚙" label={t('home.settings')} onNavigate={() => go('/settings')} />
       </div>
 
       {continueRow.length > 0 && (
@@ -93,13 +98,24 @@ export default function Home() {
           items={favorites}
           itemKey={(f) => `${f.type}-${f.id}`}
           renderItem={(f) => (
-            <Tile
-              key={`${f.type}-${f.id}`}
-              title={f.title}
-              poster={f.image}
-              aspect="2/3"
-              onActivate={() => toFavorite(f)}
-            />
+            <div className="fav-tile" key={`${f.type}-${f.id}`}>
+              <Tile
+                title={f.title}
+                poster={f.image}
+                aspect="2/3"
+                onActivate={() => toFavorite(f)}
+              />
+              <button
+                className="btn-ghost btn-xs fav-btn fa tile-fav"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  removeFavorite(f);
+                }}
+                title={t('common.unfavorite')}
+              >
+                ★
+              </button>
+            </div>
           )}
         />
       )}
