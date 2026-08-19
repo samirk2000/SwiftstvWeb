@@ -461,7 +461,6 @@ export function attachTs(videoEl, url, opts = {}) {
     destroy() {
       controller.destroyed = true;
       clearWatchdogs();
-      if (videoEl) videoEl.removeEventListener('playing', onStartupPlaying);
       if (controller.hls) {
         try {
           controller.hls.destroy();
@@ -502,63 +501,71 @@ export function attachTs(videoEl, url, opts = {}) {
     } catch {}
   }
 
-  // ---- Startup watchdog (fallback a HLS si mpegts nunca arranca) ---------
+  // ---- Liveness watchdogs (fallback a HLS si el video no avanza) ----------
   // Algunos canales se CONECTAN en el panel/proxy y descargan sin parar, pero
-  // mpegts.js nunca alcanza el primer keyframe (o no puede parsear ese flujo:
-  // GOP raro, timestamps, variante) y NO emite ningún error — la app se
-  // quedaría en "Cargando…" para siempre mientras el panel cuenta la conexión.
-  // Si no hay reproducción tras STARTUP_TIMEOUT_MS, se hace teardown del
-  // reproductor mpegts (cierra la conexión continua) y se conmuta a la ruta
-  // HLS .m3u8, que es la vía por la que esos canales ya cargaban antes de la
-  // migración a TS continuo. Un segundo watchdog vigila ese fallback: si el HLS
-  // tampoco arranca en FALLBACK_STALL_MS, se reporta el error real (codec/red)
-  // para que la UI salga de "Cargando" infinito con pantalla de error/Reintentar.
-  const STARTUP_TIMEOUT_MS = 10000;
-  const FALLBACK_STALL_MS = 40000;
-  let startedPlaying = false;
+  // mpegts.js no logra reproducirlos y NO emite error:
+  //  - sin keyframe decodificable → no llegan frames → no arranca;
+  //  - keyframes que SÍ decodifican pero el playback no avanza → el <video>
+  //    renderiza un "slideshow": la imagen cambia cada GOP (~10s) mientras
+  //    currentTime está congelado y readyState puede quedar ALTO porque MSE
+  //    sigue recibiendo datos. Una comprobación de readyState no basta.
+  // Por eso ambos watchdogs miden el AVANCE de currentTime de forma continua:
+  // si no avanza ≥LIVENESS_ADVANCE_DELTA durante `stallMs` consecutivos (tanto
+  // en el arranque como a mitad de reproducción), la ruta actual está rota para
+  // ese canal. Fase mpegts → teardown del reproductor continuo (cierra la
+  // conexión) y conmutar a HLS .m3u8 (la vía que usaban esos canales antes de
+  // la migración a TS). Fase HLS → reportar el error real (codec/red) para
+  // salir de "Cargando" infinito con pantalla de error/Reintentar. Una pausa
+  // intencional del usuario no cuenta como atasco.
+  const LIVENESS_SAMPLE_MS = 2000;
+  const LIVENESS_ADVANCE_DELTA = 0.5; // avance mínimo por muestra para "vivo"
+  const MPEGTS_STALL_MS = 15000; // sin avance durante 15s con mpegts → HLS
+  const HLS_STALL_MS = 40000; // sin avance durante 40s con HLS → error real
   let startupWatchdog = null;
   let fallbackWatchdog = null;
-  function onStartupPlaying() {
-    startedPlaying = true;
-    clearWatchdogs();
-  }
   function clearWatchdogs() {
     if (startupWatchdog) {
-      clearTimeout(startupWatchdog);
+      clearInterval(startupWatchdog);
       startupWatchdog = null;
     }
     if (fallbackWatchdog) {
-      clearTimeout(fallbackWatchdog);
+      clearInterval(fallbackWatchdog);
       fallbackWatchdog = null;
     }
   }
-  function listenPlayingOnce() {
-    if (!videoEl || startedPlaying) return;
-    videoEl.removeEventListener('playing', onStartupPlaying);
-    videoEl.addEventListener('playing', onStartupPlaying);
+  // Vigila que currentTime avance de forma continua. Si no avanza durante
+  // `stallMs` consecutivos, invoca `onGiveUp`. Cubre tanto el arranque (nunca
+  // avanzó) como un congelamiento posterior.
+  function livenessWatch(stallMs, onGiveUp) {
+    if (!videoEl || controller.destroyed) return null;
+    let lastAdvanceAt = Date.now();
+    let lastT = videoEl.currentTime || 0;
+    return setInterval(() => {
+      if (controller.destroyed) {
+        clearWatchdogs();
+        return;
+      }
+      const t = videoEl.currentTime || 0;
+      if (videoEl.paused || t - lastT >= LIVENESS_ADVANCE_DELTA) {
+        // Reproduciendo de verdad (avanza) o pausa intencional: se resetea.
+        lastAdvanceAt = Date.now();
+        lastT = t;
+      } else if (Date.now() - lastAdvanceAt >= stallMs) {
+        clearWatchdogs();
+        onGiveUp();
+      }
+    }, LIVENESS_SAMPLE_MS);
   }
   function armStartupWatchdog() {
-    if (!videoEl || controller.destroyed) return;
-    listenPlayingOnce();
-    startupWatchdog = setTimeout(() => {
-      startupWatchdog = null;
-      if (controller.destroyed || startedPlaying) return;
-      // Solo se da por bueno si hay datos de frames FUTUROS (>=3): un stream
-      // atascado puede alcanzar HAVE_CURRENT_DATA (2) sin reproducir jamás.
-      if (videoEl.readyState >= 3) return;
-      fallbackToHls('startup timeout');
-    }, STARTUP_TIMEOUT_MS);
+    startupWatchdog = livenessWatch(MPEGTS_STALL_MS, () =>
+      fallbackToHls('no playback advance')
+    );
   }
   function armFallbackWatchdog() {
-    if (!videoEl || controller.destroyed) return;
-    listenPlayingOnce();
-    fallbackWatchdog = setTimeout(() => {
-      fallbackWatchdog = null;
-      if (controller.destroyed || startedPlaying) return;
-      if (videoEl.readyState >= 3) return; // ya hay frames decodificados
-      // El fallback HLS tampoco arrancó: salir de "Cargando" infinito.
+    fallbackWatchdog = livenessWatch(HLS_STALL_MS, () => {
+      // El fallback HLS tampoco avanza: salir de "Cargando" infinito.
       if (typeof opts.onError === 'function') opts.onError(new Error('hls fallback stalled'));
-    }, FALLBACK_STALL_MS);
+    });
   }
 
   function startHls() {
@@ -567,6 +574,8 @@ export function attachTs(videoEl, url, opts = {}) {
       if (typeof opts.onError === 'function' && !controller.destroyed) opts.onError(new Error('no hls fallback'));
       return;
     }
+    // eslint-disable-next-line no-console
+    console.info('[attachTs] HLS fallback url=%s', hlsUrl);
     controller.hls = attachHls(videoEl, hlsUrl, opts);
   }
 
@@ -608,6 +617,8 @@ export function attachTs(videoEl, url, opts = {}) {
     // avanza continuo, sin saltos; la latencia queda en lo que el buffer
     // natural acumule (típicamente pocos segundos, y el stash está acotado).
     const isLive = opts.isLive !== false;
+    // eslint-disable-next-line no-console
+    console.info('[attachTs] mpegts start (isLive=%s) url=%s', isLive, srcUrl);
     const player = mpegts.createPlayer(
       { type: 'mpegts', isLive, url: srcUrl, cors: true },
       isLive
@@ -656,8 +667,9 @@ export function attachTs(videoEl, url, opts = {}) {
     player.on(mpegts.Events.ERROR, () => fallbackToHls('mpegts ERROR'));
     player.load();
     player.play();
-    // Vigila el arranque: si en STARTUP_TIMEOUT_MS no hubo frames (playing /
-    // readyState>=3), conmuta a HLS (ver armStartupWatchdog).
+    // Vigila la reproducción de forma continua: si currentTime no avanza en
+    // MPEGTS_STALL_MS (no llegan frames o se queda en "slideshow" sin
+    // reproducir), conmuta a HLS.
     armStartupWatchdog();
   }
 
@@ -669,9 +681,8 @@ export function attachTs(videoEl, url, opts = {}) {
       controller.hls = null;
     }
     // Reset del flag para que un reloadUrl/reintento pueda volver a caer a HLS
-    // y los watchdogs de arranque/fallback vuelvan a vigilar desde cero.
+    // y los watchdogs de liveness vuelvan a vigilar desde cero.
     controller.fellBack = false;
-    startedPlaying = false;
     clearWatchdogs();
     teardownMpegts();
     wipeElement();

@@ -194,23 +194,27 @@ que el panel cuente cada fragmento como una conexión nueva. En su lugar:
     `stashInitialSize` de 128KB, sin chasing, para arranque rápido y estable.
 - **Fallback a HLS**: si `mpegts.js` no está soportado (no hay MSE live), emite
   un **error fatal** al adjuntar/decodificar el TS (p. ej. error de MSE/decode),
-  **o no arranca en el tiempo de espera** (algunos canales se CONECTAN en el
-  panel y descargan sin parar pero mpegts nunca alcanza un keyframe decodificable
-  y no emite error — la app se quedaría en "Cargando…" para siempre): un
-  **watchdog de arranque** (`armStartupWatchdog`, 10s) hace teardown del
-  reproductor mpegts (cierra la conexión continua) y conmuta automáticamente el
-  mismo canal a su URL `.m3u8` (`tsToHlsUrl` → `attachHls`). El fallback HLS usa
-  la **config tolerante pre-migración** (`maxBufferLength: 10`, `liveSyncDurationCount: 3`,
-  `fragLoadingMaxRetry: 6`): la config estricta de mono-conexión (2 segmentos de
-  sincronía, 3s de búfer) hacía que canales con segmentos grandes y CDN lenta
-  (p. ej. 3.3MB por segmento descargado en 8-10s) nunca alcanzaran el borde vivo
-  → HLS.js abortaba el fragmento lento y recargaba el playlist en bucle →
-  "Cargando" infinito aunque el panel mostrara la conexión. Un **segundo
-  watchdog** (`armFallbackWatchdog`, 40s) vigila ese fallback: si el HLS tampoco
-  arranca (contenido realmente no decodificable, p. ej. HEVC sin soporte), se
-  reporta el error real para que la UI salga de "Cargando" infinito con pantalla
-  de error/Reintentar en vez de quedarse colgada. El error solo se muestra si el
-  fallback HLS también falla.
+  **o el video no avanza** — algunos canales se CONECTAN en el panel y descargan
+  sin parar, pero mpegts no produce frames o renderiza un "slideshow" (solo
+  llegan keyframes: la imagen cambia cada GOP ~10s mientras `currentTime` está
+  congelado y `readyState` queda alto porque MSE sigue recibiendo datos, así que
+  comprobar readyState no basta). Un **watchdog de liveness** (`livenessWatch`)
+  muestrea `currentTime` cada 2s y, si no avanza ≥0.5s durante **15s** (tanto en
+  el arranque como a mitad de reproducción; una pausa intencional no cuenta),
+  hace teardown del reproductor mpegts (cierra la conexión continua) y conmuta
+  automáticamente el mismo canal a su URL `.m3u8` (`tsToHlsUrl` → `attachHls`).
+  El fallback HLS usa la **config tolerante pre-migración** (`maxBufferLength: 10`,
+  `liveSyncDurationCount: 3`, `fragLoadingMaxRetry: 6`): la config estricta de
+  mono-conexión (2 segmentos de sincronía, 3s de búfer) hacía que canales con
+  segmentos grandes y CDN lenta (p. ej. 3.3MB por segmento descargado en 8-10s)
+  nunca alcanzaran el borde vivo → HLS.js abortaba el fragmento lento y recargaba
+  el playlist en bucle → "Cargando" infinito aunque el panel mostrara la
+  conexión. Un **segundo watchdog de liveness** (40s) vigila ese fallback: si el
+  HLS tampoco avanza (contenido realmente no decodificable, p. ej. HEVC sin
+  soporte), se reporta el error real para que la UI salga de "Cargando" infinito
+  con pantalla de error/Reintentar. Para depurar, `attachTs` registra en consola
+  la ruta activa (`mpegts start` / `HLS fallback` / `fallback a HLS: <motivo>`).
+  El error solo se muestra si el fallback HLS también falla.
 - **VOD / series / catchup / Exclusivos siguen en HLS**: el modo continuo se
   aplica solo a `type=live`. El catchup usa `start`/`end` (horario), por lo que
   el proxy lo trata como NO continuo.
