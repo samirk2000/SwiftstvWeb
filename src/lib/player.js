@@ -78,38 +78,39 @@ export function proxyMediaUrl(url, opts = {}) {
 
 // Determine the HLS.js config (extraOrigin applies dynamic Referer/Origin).
 function hlsConfigFor(url, opts) {
-  // El único camino HLS para live es el FALLBACK de attachTs (canales cuyo .ts
-  // continuo mpegts.js no puede reproducir). Para esos canales el buffer
-  // estricto (maxBufferLength 3 / liveSyncDurationCount 2) era contraproducente:
-  // con segmentos grandes y CDN lenta (3.3MB por segmento, 8-10s de descarga)
-  // HLS.js nunca alcanzaba el borde vivo, abortaba el fragmento lento y
-  // recargaba el playlist en bucle → "Cargando" para siempre mientras el panel
-  // sí contaba la conexión. Volvemos a la config tolerante pre-migración (la
-  // que reproducía estos canales): sigue acotando a ~1-2 segmentos en vuelo
-  // (máx. 10s por delante) para no abrir 3+ conexiones al panel, pero con
-  // margen para arrancar y mantener el búfer. VOD/catchup usan la misma.
+  // VOD/catchup: buffer normal (10s por delante) para evitar rebuffering.
+  // LIVE FALLBACK (isLiveFallback): es el único camino HLS para live y suelen
+  // ser canales que mpegts no pudo reproducir y cuyo CDN HLS es LENTO (p. ej.
+  // segmentos de 3.3MB que bajan en 8-10s, casi a la velocidad de reproducción).
+  // La config "normal" abortaba el fragmento lento y recargaba el playlist en
+  // bucle. Para estos canales damos margen: NO abortar fragmentos (timeout 60s),
+  // más reintentos y algo más de buffer por delante, manteniendo la sincronía en
+  // vivo de 3 segmentos (la que reproducía estos canales antes de la migración
+  // a TS). Abre ~2-3 conexiones al panel, pero es el fallback de canales que de
+  // otro modo no se ven; el panel ya las tolera (era el modo pre-migración).
+  const isLiveFallback = Boolean(opts?.isLiveFallback);
   const cfg = {
     // Evita workers que disparen fetches en hilos paralelos no controlados.
     enableWorker: false,
-    backBufferLength: 30,
+    backBufferLength: isLiveFallback ? 20 : 30,
     // Live: se sincroniza 3 segmentos detrás del en vivo (máx 5).
-    liveSyncDurationCount: 3,
-    liveMaxLatencyDurationCount: 5,
+    liveSyncDurationCount: isLiveFallback ? 3 : 3,
+    liveMaxLatencyDurationCount: isLiveFallback ? 5 : 5,
     lowLatencyMode: false,
-    // Búfer de datos: máx. 10s pedidos por adelantado (pico 15s), 30MB en RAM.
-    // Reduce la carga paralela agresiva que abriría varias conexiones al panel.
-    maxBufferLength: 10,
-    maxMaxBufferLength: 15,
+    // Búfer de datos por delante (pico), 30MB en RAM.
+    maxBufferLength: isLiveFallback ? 15 : 10,
+    maxMaxBufferLength: isLiveFallback ? 30 : 15,
     maxBufferSize: 30 * 1024 * 1024,
-    // No cortar la carga de un fragmento prematuramente (segmentos de varios MB).
-    fragLoadingTimeOut: 30000,
-    fragLoadingMaxRetry: 6,
-    // Manifests .m3u8 vía proxy lento: timeout 10s y 3 reintentos para no
+    // No cortar la carga de un fragmento prematuramente (segmentos de varios MB
+    // en CDN lentas pueden tardar 20-40s; 60s de margen).
+    fragLoadingTimeOut: isLiveFallback ? 60000 : 30000,
+    fragLoadingMaxRetry: isLiveFallback ? 10 : 6,
+    // Manifests .m3u8 vía proxy lento: timeout 10s y reintentos para no
     // saturar con peticiones de playlist consecutivas.
     manifestLoadingTimeOut: 10000,
-    manifestLoadingMaxRetry: 3,
-    levelLoadingTimeOut: 15000,
-    levelLoadingMaxRetry: 4,
+    manifestLoadingMaxRetry: isLiveFallback ? 6 : 3,
+    levelLoadingTimeOut: 20000,
+    levelLoadingMaxRetry: isLiveFallback ? 6 : 4,
     // Cache-busting of the manifest so DVR buffers don't go stale after stalls.
     progressive: true,
   };
@@ -520,7 +521,6 @@ export function attachTs(videoEl, url, opts = {}) {
   const LIVENESS_SAMPLE_MS = 2000;
   const LIVENESS_ADVANCE_DELTA = 0.5; // avance mínimo por muestra para "vivo"
   const MPEGTS_STALL_MS = 12000; // sin avance durante 12s con mpegts → HLS
-  const HLS_STALL_MS = 60000; // sin avance durante 60s con HLS → error real
   // Pausa entre el teardown del TS continuo y el arranque del HLS .m3u8: el
   // worker de mpegts deja el elemento en estado transitorio (los errores
   // "Worker MediaSource attachment is closing" de la consola) y el panel
@@ -528,7 +528,7 @@ export function attachTs(videoEl, url, opts = {}) {
   // llega mientras el panel aún cuenta esa sesión, los segmentos bajan
   // limitados (3.3MB en 8-10s) y hls.js nunca alcanza el borde en vivo:
   // aborta el fragmento lento, recarga el playlist en bucle y no reproduce.
-  const HLS_START_DELAY_MS = 2000;
+  const HLS_START_DELAY_MS = 3000;
   let startupWatchdog = null;
   let fallbackWatchdog = null;
   let hlsDelayTimer = null;
@@ -574,11 +574,38 @@ export function attachTs(videoEl, url, opts = {}) {
       fallbackToHls('no playback advance')
     );
   }
+  // Fases del fallback HLS: el arranque en CDN lenta es LEGÍTIMO y puede tardar
+  // 30-50s (acumular buffer de 3 segmentos bajando casi a velocidad 1:1). Por
+  // eso no cortamos pronto: fase 1 vigila HLS_FIRST_RETRY_MS y si no avanzó hace
+  // UN reintento limpio (destruye el Hls anterior, limpia el elemento y vuelve a
+  // adjuntar); fase 2 vigila HLS_STALL_MS y si sigue sin avanzar reporta el
+  // error real con diagnóstico. En total hasta ~90s antes de dar el fallo.
+  const HLS_FIRST_RETRY_MS = 45000;
+  const HLS_STALL_MS = 45000;
+  let hlsRetryCount = 0;
   function armFallbackWatchdog() {
-    fallbackWatchdog = livenessWatch(HLS_STALL_MS, () => {
-      // El fallback HLS tampoco avanza: salir de "Cargando" infinito.
-      if (typeof opts.onError === 'function') opts.onError(new Error('hls fallback stalled'));
-    });
+    if (hlsRetryCount === 0) {
+      fallbackWatchdog = livenessWatch(HLS_FIRST_RETRY_MS, () => {
+        hlsRetryCount += 1;
+        retryHls();
+        armFallbackWatchdog();
+      });
+    } else {
+      fallbackWatchdog = livenessWatch(HLS_STALL_MS, () => {
+        // Diagnóstico: distinguir "no llegan datos" de "llegan pero no decodifica".
+        // eslint-disable-next-line no-console
+        console.warn('[attachTs] fallback HLS estancado', {
+          readyState: videoEl?.readyState,
+          paused: videoEl?.paused,
+          currentTime: videoEl?.currentTime,
+          bufferedRanges: videoEl?.buffered ? videoEl.buffered.length : 0,
+          videoError: videoEl?.error
+            ? { code: videoEl.error.code, message: videoEl.error.message }
+            : null,
+        });
+        if (typeof opts.onError === 'function') opts.onError(new Error('hls fallback stalled'));
+      });
+    }
   }
 
   function startHls() {
@@ -589,7 +616,24 @@ export function attachTs(videoEl, url, opts = {}) {
     }
     // eslint-disable-next-line no-console
     console.info('[attachTs] HLS fallback url=%s', hlsUrl);
-    controller.hls = attachHls(videoEl, hlsUrl, opts);
+    controller.hls = attachHls(videoEl, hlsUrl, { ...opts, isLiveFallback: true });
+  }
+
+  // Reintento limpio del HLS: un attach fresco suele pasar de un primer intento
+  // que dejó el elemento/manifiesto en mal estado (transición desde el worker
+  // de mpegts, primer playlist incompleto, CDN aún calentando).
+  function retryHls() {
+    if (controller.destroyed) return;
+    if (controller.hls) {
+      try {
+        controller.hls.destroy();
+      } catch {}
+      controller.hls = null;
+    }
+    wipeElement();
+    // eslint-disable-next-line no-console
+    console.warn('[attachTs] reintento HLS #%d', hlsRetryCount);
+    startHls();
   }
 
   // Conmutar del TS continuo al HLS .m3u8. Se usa para: error fatal de mpegts,
@@ -699,9 +743,10 @@ export function attachTs(videoEl, url, opts = {}) {
       } catch {}
       controller.hls = null;
     }
-    // Reset del flag para que un reloadUrl/reintento pueda volver a caer a HLS
-    // y los watchdogs de liveness vuelvan a vigilar desde cero.
+    // Reset del flag y del contador de reintentos HLS para que un
+    // reloadUrl/reintento vuelva a caer a HLS desde cero si hace falta.
     controller.fellBack = false;
+    hlsRetryCount = 0;
     clearWatchdogs();
     teardownMpegts();
     wipeElement();
