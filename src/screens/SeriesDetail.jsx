@@ -60,9 +60,18 @@ export default function SeriesDetail() {
     // the series-level one if present, else 'mp4'.
     const container = ep?.container_extension || info?.container_extension || 'mp4';
     const url = seriesStreamUrl(server, container, ep, activeSeason, id);
+    // Continue-watching is keyed by (type, id): pass the EPISODE id (not the
+    // series id) so each episode keeps its own resume position, and pass a
+    // meaningful title (episode title, else "Series · T# · E#").
+    const epNum = ep?.episode_num ? `E${ep.episode_num}` : '';
+    const title =
+      ep?.title ||
+      [meta?.name, `T${activeSeason}`, epNum].filter(Boolean).join(' · ') ||
+      meta?.name ||
+      String(ep?.id || '');
     navigate(
-      `/player?type=series&id=${id}&url=${encodeURIComponent(url)}&title=${encodeURIComponent(
-        ep.title || ''
+      `/player?type=series&id=${ep?.id}&url=${encodeURIComponent(url)}&title=${encodeURIComponent(
+        title
       )}`
     );
   };
