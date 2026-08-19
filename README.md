@@ -238,13 +238,26 @@ que el panel cuente cada fragmento como una conexión nueva. En su lugar:
   **Parche diferenciado (live HLS fallback = mono-conexión):** a diferencia de
   VOD, el fallback HLS en vivo NO prueba los 4 candidatos de proxy.
   `mediaCandidates(liveFallback)` devuelve **un único proxy** (el VPS `/stream`)
-  y el config limita los reintentos (`fragLoadingMaxRetry: 2`,
+  y el config limita los reintentos (`fragLoadingMaxRetry: 3`,
   `manifestLoadingMaxRetry: 3`, `levelLoadingMaxRetry: 2`). Esto evita que un
   canal cuyo `.m3u8` el CDN sirve mal/404 se convierta en una **tormenta de
   peticiones** y en **múltiples conexiones simultáneas** al panel (el síntoma del
   canal 5: el panel mostrando ~3 conexiones y el network tab lleno). Un único
   reintento + el watchdog por fases + el botón "Reintentar" bastan; no se fuerza
   un bucle multi-proxy.
+  **Parche diferenciado (live-edge alcanzable para canales HLS-only):** el canal
+  5 (`95422`, "CANAL 5") sirve segmentos que bajan a **~0.6-0.9x la velocidad de
+  reproducción** (un EXTINF de ~6-7s baja en ~9.3s vía proxy). Con `liveSyncDurationCount: 3`
+  hls.js exige ~20s de buffer de margen que un canal a <1x jamás llena: decodifica
+  el primer keyframe (se "ve" un frame) pero se queda **congelado en "Cargando"**
+  recargando el playlist en bucle (→ muchas peticiones). Para los canales ya
+  marcados **HLS-only** (memoria `hlsOnlyChannels`, donde mpegts no reproduce en
+  ese navegador y el HLS es la ÚNICA vía), el fallback usa **`liveSyncCount: 1`**
+  (un segmento de margen, ~7s) y buffer más corto (`maxBufferLength: 10`): se alcanza
+  el borde en vivo aun a 0.7x, y el canal entra a reproducir aunque sea con buffer
+  bajo. Los canales que caen al fallback por un fallo puntual (no HLS-only)
+  conservan sync 3. Verificado en navegador: antes se congelaba en ~14s, ahora
+  avanza de forma continua (30s, 47s… con `bufferedEnd` al día).
   Para depurar, `attachTs` registra en consola la ruta activa (`mpegts start` /
   `HLS fallback` / `fallback a HLS: <motivo>` / `reintento HLS #N`). El error
   solo se muestra si el fallback HLS también falla.

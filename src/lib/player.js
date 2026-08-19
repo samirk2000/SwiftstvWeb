@@ -92,29 +92,40 @@ function hlsConfigFor(url, opts) {
   // bucle. Para estos canales damos margen: NO abortar fragmentos (timeout 60s),
   // algo más de buffer por delante, manteniendo la sincronía en vivo de 3
   // segmentos. Pero es una ruta MONO-CONEXIÓN (mediaCandidates devuelve un solo
-  // proxy), así que limitamos los reintentos por fragmento/manifiesto: cuando un
-  // canal lento se traba, más reintentos solo abren más sockets al panel/CDN y
-  // disparan la oleada de peticiones (panel mostrando 3 conexiones simultáneas).
-  // Un reintento moderado + la conmutación por el watchdog de liveness (y el
-  // botón Reintentar) bastan; no convierten un canal con CDN rota en una tormenta.
+  // proxy), así que limitamos los reintentos por fragmento/manifiesto.
+  //
+  //  LIVE-EDGE ALCANZABLE (`liveSyncCount` bajo): algunos canales sirven
+  //  segmentos a ~0.6-0.9x la velocidad de reproducción (p. ej. 95422 / "Canal 5":
+  //  un segmento EXTINF de ~6-7s baja en ~9.3s). Con sync 3, hls.js exige ~20s de
+  //  buffer de margen que un canal a <1x jamás llena: decodifica el primer
+  //  keyframe (se "ve" un frame) pero se queda congelado en "Cargando" para
+  //  siempre, recargando el playlist en bucle (→ muchas peticiones y el panel
+  //  marcando varias conexiones). Con sync 1 solo pide ~1 segmento de margen
+  //  (~7s), que SÍ se alcanza a 0.7x: el canal entra al borde en vivo aunque sea
+  //  con buffer corto. Es un parche diferenciado: se aplica solo donde el caller
+  //  pase `liveSyncCount` (p. ej. canales marcados HLS-only del fallback).
   const isLiveFallback = Boolean(opts?.isLiveFallback);
+  const liveSync = Number.isFinite(opts?.liveSyncCount)
+    ? Math.min(Math.max(1, opts.liveSyncCount), 4)
+    : 3;
+  const shortEdge = liveSync <= 1;
   const cfg = {
     // Evita workers que disparen fetches en hilos paralelos no controlados.
     enableWorker: false,
-    backBufferLength: isLiveFallback ? 20 : 30,
-    // Live: se sincroniza 3 segmentos detrás del en vivo (máx 5).
-    liveSyncDurationCount: isLiveFallback ? 3 : 3,
-    liveMaxLatencyDurationCount: isLiveFallback ? 5 : 5,
+    backBufferLength: isLiveFallback ? (shortEdge ? 12 : 20) : 30,
+    // Live: se sincroniza `liveSync` segmentos detrás del en vivo (máx 5).
+    liveSyncDurationCount: liveSync,
+    liveMaxLatencyDurationCount: Math.max(3, liveSync * 2),
     lowLatencyMode: false,
     // Búfer de datos por delante (pico), 30MB en RAM.
-    maxBufferLength: isLiveFallback ? 15 : 10,
-    maxMaxBufferLength: isLiveFallback ? 30 : 15,
+    maxBufferLength: shortEdge ? 10 : (isLiveFallback ? 15 : 10),
+    maxMaxBufferLength: shortEdge ? 15 : (isLiveFallback ? 30 : 15),
     maxBufferSize: 30 * 1024 * 1024,
     // No cortar la carga de un fragmento prematuramente (segmentos de varios MB
     // en CDN lentas pueden tardar 20-40s; 60s de margen).
     fragLoadingTimeOut: isLiveFallback ? 60000 : 30000,
-    // Live fallback = un solo reintento de fragmento; VOD conserva los suyos.
-    fragLoadingMaxRetry: isLiveFallback ? 2 : 6,
+    // Live fallback = reintentos fragmento moderados; VOD conserva los suyos.
+    fragLoadingMaxRetry: isLiveFallback ? 3 : 6,
     // Manifests .m3u8 vía proxy lento: timeout 10s y reintentos moderados.
     manifestLoadingTimeOut: 10000,
     manifestLoadingMaxRetry: isLiveFallback ? 3 : 3,
@@ -647,7 +658,18 @@ export function attachTs(videoEl, url, opts = {}) {
     }
     // eslint-disable-next-line no-console
     console.info('[attachTs] HLS fallback url=%s', hlsUrl);
-    controller.hls = attachHls(videoEl, hlsUrl, { ...opts, isLiveFallback: true });
+    // Parche diferenciado por tipo de canal: si este canal ya cayó HLS-only
+    // (mpegts no lo reproduce en este navegador), el HLS es la ÚNICA vía y su
+    // CDN suele tardar >1x en bajar segmentos (p. ej. Canal 5). Con sync 3 (3
+    // segmentos de margen) un canal a <1x jamás alcanza el borde y queda
+    // congelado en "Cargando"; forzamos sync 1 (un segmento de margen, ~7s)
+    // para ese caso, que SÍ es alcanzable. Los canales que caen al fallback por
+    // un fallo puntual (no HLS-only) conservan sync 3.
+    controller.hls = attachHls(videoEl, hlsUrl, {
+      ...opts,
+      isLiveFallback: true,
+      liveSyncCount: opts.preferHls ? 1 : 3,
+    });
   }
 
   // Reintento limpio del HLS: un attach fresco suele pasar de un primer intento
