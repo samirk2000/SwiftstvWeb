@@ -519,10 +519,19 @@ export function attachTs(videoEl, url, opts = {}) {
   // intencional del usuario no cuenta como atasco.
   const LIVENESS_SAMPLE_MS = 2000;
   const LIVENESS_ADVANCE_DELTA = 0.5; // avance mínimo por muestra para "vivo"
-  const MPEGTS_STALL_MS = 15000; // sin avance durante 15s con mpegts → HLS
-  const HLS_STALL_MS = 40000; // sin avance durante 40s con HLS → error real
+  const MPEGTS_STALL_MS = 12000; // sin avance durante 12s con mpegts → HLS
+  const HLS_STALL_MS = 60000; // sin avance durante 60s con HLS → error real
+  // Pausa entre el teardown del TS continuo y el arranque del HLS .m3u8: el
+  // worker de mpegts deja el elemento en estado transitorio (los errores
+  // "Worker MediaSource attachment is closing" de la consola) y el panel
+  // tarda unos segundos en LIBERAR la conexión continua del .ts. Si el .m3u8
+  // llega mientras el panel aún cuenta esa sesión, los segmentos bajan
+  // limitados (3.3MB en 8-10s) y hls.js nunca alcanza el borde en vivo:
+  // aborta el fragmento lento, recarga el playlist en bucle y no reproduce.
+  const HLS_START_DELAY_MS = 2000;
   let startupWatchdog = null;
   let fallbackWatchdog = null;
+  let hlsDelayTimer = null;
   function clearWatchdogs() {
     if (startupWatchdog) {
       clearInterval(startupWatchdog);
@@ -531,6 +540,10 @@ export function attachTs(videoEl, url, opts = {}) {
     if (fallbackWatchdog) {
       clearInterval(fallbackWatchdog);
       fallbackWatchdog = null;
+    }
+    if (hlsDelayTimer) {
+      clearTimeout(hlsDelayTimer);
+      hlsDelayTimer = null;
     }
   }
   // Vigila que currentTime avance de forma continua. Si no avanza durante
@@ -580,9 +593,11 @@ export function attachTs(videoEl, url, opts = {}) {
   }
 
   // Conmutar del TS continuo al HLS .m3u8. Se usa para: error fatal de mpegts,
-  // MSE no soportado, o watchdog de arranque (canal que conecta en el panel
-  // pero mpegts no produce frames). Desarma el watchdog, libera el reproductor
-  // mpegts y el elemento ANTES de asignar la URL HLS.
+  // MSE no soportado, o watchdog de liveness (canal que conecta en el panel
+  // pero mpegts no produce playback). Libera el reproductor mpegts y el
+  // elemento ANTES de asignar la URL HLS, y espera HLS_START_DELAY_MS para que
+  // el panel libere la conexión continua y el elemento termine de desprenderse
+  // del MediaSource del worker (ver comentario de la constante).
   function fallbackToHls(reason) {
     if (controller.destroyed || controller.fellBack) return;
     controller.fellBack = true;
@@ -591,8 +606,12 @@ export function attachTs(videoEl, url, opts = {}) {
     console.warn('[attachTs] fallback a HLS:', reason || 'error mpegts');
     teardownMpegts();
     wipeElement();
-    startHls();
-    armFallbackWatchdog();
+    hlsDelayTimer = setTimeout(() => {
+      hlsDelayTimer = null;
+      if (controller.destroyed) return;
+      startHls();
+      armFallbackWatchdog();
+    }, HLS_START_DELAY_MS);
   }
 
   function startTs() {
