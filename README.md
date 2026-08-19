@@ -158,9 +158,10 @@ El VOD arranca en cuanto el navegador tiene el primer frame decodificado:
   primeros KB sin esperar a llenar el buffer. Un rechazo con `AbortError` se
   ignora (significa que un reintento/candidato reemplazó la carga), no se trata
   como error.
-- **Buffer de arranque mínimo en mpegts.js** (live, `attachTs`): stash de 128KB
-  para VOD/archivo y `lazyLoad: false` / `deferLoadAfterSourceOpen: false` para
-  empezar en cuanto llegan los primeros bytes del `.ts` continuo.
+- **Buffer de arranque mínimo en mpegts.js** (`attachTs`): stash de 128KB tanto
+  para live (detectar el primer keyframe H.264 SPS/PPS) como para VOD/archivo, y
+  `lazyLoad: false` / `deferLoadAfterSourceOpen: false` para empezar en cuanto
+  llegan los primeros bytes del `.ts` continuo.
 
 ## Live en MPEG-TS continuo (1 conexión por canal)
 
@@ -179,13 +180,16 @@ que el panel cuente cada fragmento como una conexión nueva. En su lugar:
 - **Frontend (`src/lib/player.js#attachTs`)**: decodifica el `.ts` continuo con
   **mpegts.js** (`type: 'mpegts', cors: true`) sobre MSE. El config distingue
   **LIVE vs VOD** (`opts.isLive`):
-  - **Live (`isLive:true`)** — baja latencia + mono-conexión estricta:
-    `enableStashBuffer: false` (los bytes van directo a MSE, sin stash masivo),
-    `liveBufferLatencyChasing: true` con `liveBufferLatencyMaxLatency: 5` /
-    `liveBufferLatencyMinRemain: 2` (auto-ajusta la latencia dentro del buffer,
-    **sin reabrir** el socket hacia el proxy/panel), `autoCleanupSourceBuffer:
-    true` (limpia memoria sin reconectar), `enableWorker:true` y
-    `lazyLoad:false` / `deferLoadAfterSourceOpen:false`.
+  - **Live (`isLive:true`)** — baja latencia + mono-conexión estricta con
+    **stash mínimo**: `enableStashBuffer: true` con `stashInitialSize` de 128KB
+    (desactivarlo del todo deja a mpegts.js sin poder retener bytes hasta el
+    primer keyframe H.264 SPS/PPS y el demuxer no arranca en MSE → pantalla
+    congelada en "Cargando…" aunque la red descargue). `liveBufferLatencyChasing:
+    true` con `liveBufferLatencyMaxLatency: 4` / `liveBufferLatencyMinRemain: 1`
+    (auto-ajusta la latencia dentro del buffer, **sin reabrir** el socket hacia
+    el proxy/panel), `autoCleanupSourceBuffer: true` (limpia memoria sin
+    reconectar), `enableWorker:true` y `lazyLoad:false` /
+    `deferLoadAfterSourceOpen:false`.
   - **VOD/archivo (`isLive:false`)** — `enableStashBuffer: true` con
     `stashInitialSize` de 128KB, sin chasing, para arranque rápido y estable.
 - **Fallback a HLS**: si `mpegts.js` no está soportado (no hay MSE live) o emite

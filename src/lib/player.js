@@ -511,10 +511,12 @@ export function attachTs(videoEl, url, opts = {}) {
 
     // LIVE (TV en vivo) vs VOD/archivo: la configuración del motor cambia por
     // completo. Para live usamos baja latencia + mono-conexión estricta (el
-    // panel de Xtream corta la sesión si ve >N conexiones simultáneas): sin
-    // stash masivo (los bytes van directo al MSE), chasing de latencia activo
-    // que ajusta dentro del buffer sin reabrir el socket hacia el proxy, y
-    // limpieza de buffer sin reconectar.
+    // panel de Xtream corta la sesión si ve >N conexiones simultáneas), pero
+    // con un stash mínimo: si el stash se desactiva del todo, mpegts.js no
+    // retiene los bytes hasta encontrar el primer keyframe H.264 (SPS/PPS) y el
+    // demuxer nunca arranca en MSE — la pantalla se queda en "Cargando…" aunque
+    // la red siga descargando. 128KB bastan para detectar ese primer keyframe
+    // y despacharlo a MSE casi de inmediato.
     const isLive = opts.isLive !== false;
     const player = mpegts.createPlayer(
       { type: 'mpegts', isLive, url: srcUrl, cors: true },
@@ -524,15 +526,16 @@ export function attachTs(videoEl, url, opts = {}) {
             enableWorker: true,
             enableWorkerForMSE: true,
             isLive: true,
-            // Desactivar stash masivo para Live: latencia mínima, el chunk que
-            // llega se despacha a MSE de inmediato.
-            enableStashBuffer: false,
+            // Stash mínimo (no desactivado): retiene hasta encontrar el primer
+            // keyframe H.264 (SPS/PPS) y arranca el demuxer en MSE.
+            enableStashBuffer: true,
+            stashInitialSize: 128 * 1024,
             // Auto-ajustar latencia sin reabrir conexiones: si el buffer se
-            // atrasa >5s, salta dentro del rango ya descargado para volver a
-            // quedar con 2s de margen. Nunca re-consulta la URL.
+            // atrasa >4s, salta dentro del rango ya descargado para volver a
+            // quedar con 1s de margen. Nunca re-consulta la URL.
             liveBufferLatencyChasing: true,
-            liveBufferLatencyMaxLatency: 5,
-            liveBufferLatencyMinRemain: 2,
+            liveBufferLatencyMaxLatency: 4,
+            liveBufferLatencyMinRemain: 1,
             // Limpia la memoria del buffer consumido sin reconectar.
             autoCleanupSourceBuffer: true,
             autoCleanupMaxBackwardDuration: 30,
