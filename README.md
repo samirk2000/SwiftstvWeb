@@ -269,7 +269,8 @@ que el panel cuente cada fragmento como una conexión nueva. En su lugar:
   nunca** (memoria `swiftstv.hlsOnlyChannels.v1` en localStorage, clave
   `live:<id>`), el reproductor se **reinicia automáticamente con un `<video>`
   NUEVO** (`key={restart}`) e irá **directo a HLS** (`.m3u8`) la primera vez y en
-  todos los zaps siguientes — sin esperar los 12s del watchdog ni arriesgar el
+  todos los zaps siguientes — sin esperar el watchdog del arranque
+  (`MPEGTS_STALL_MS`=30s) ni arriesgar el
   elemento usado. La memoria se **auto-cura**: si el HLS directo también falla,
   se borra y un Reintentar vuelve a probar mpegts. Si el canal estaba
   reproduciendo y se trabó a mitad (no es un problema de arranque), NO se marca
@@ -280,6 +281,18 @@ que el panel cuente cada fragmento como una conexión nueva. En su lugar:
   trataría como canal muerto). `safePlay` detecta `NotAllowedError` y **reintenta
   en modo muted** (permitido en todas partes), mostrando un hint
   "Pulsa para activar el sonido" que desmuteará cuando el usuario pulse.
+  En la ruta de **TS continuo (mpegts)** esto causaba el bug del canal 5 en Edge:
+  mpegts descodifica el TS perfectamente pero su `play()` interno lanza
+  `NotAllowedError` (autoplay bloqueado), el video nunca arranca y el watchdog de
+  arranque lo marcaba "sin avance" y caía en **falso a HLS** (lento/frágil en ese
+  canal) — de ahí "se ve pero no reproduce", restarts y conexiones extra en el
+  panel. Ahora `startTs` captura esa excepción y **reintenta muted** (play nativo
+  del elemento + re-arme del watchdog con margen completo), de modo que el canal
+  arranca por TS continuo estable sin el ciclo de fallback. Para el arranque por
+  autoplay, `MPEGTS_STALL_MS` pasó de 12s a **30s** (el setup del MSE tras el
+  bloqueo puede tardar 15-25s); solo aplaza la detección de canales realmente
+  rotos por TS — los que se congelan a mitad siguen siendo alcanzados por los
+  watchdogs del fallback HLS y la liveness continua.
 - **VOD / series / catchup / Exclusivos siguen en HLS**: el modo continuo se
   aplica solo a `type=live`. El catchup usa `start`/`end` (horario), por lo que
   el proxy lo trata como NO continuo.

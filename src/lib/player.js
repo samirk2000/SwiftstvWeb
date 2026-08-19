@@ -542,7 +542,20 @@ export function attachTs(videoEl, url, opts = {}) {
   // intencional del usuario no cuenta como atasco.
   const LIVENESS_SAMPLE_MS = 2000;
   const LIVENESS_ADVANCE_DELTA = 0.5; // avance mínimo por muestra para "vivo"
-  const MPEGTS_STALL_MS = 12000; // sin avance durante 12s con mpegts → HLS
+  // Margen de arranque del TS continuo (sin avance de currentTime). 12s era
+  // demasiado corto en navegadores con autoplay estricto (webOS/Tizen/Samsung,
+  // o abrir el /player como enlace directo en Edge/Chrome): ahí mpegts demora
+  // en arrancar porque su play() es bloqueado y hay que reintentar MUTED
+  // (autoplay-muted sí se permite), y el setup del MediaSource (onSourceOpen +
+  // demux + init) tras el bloqueo puede tardar 15-25s. Con 12s, mpegts descodifica
+  // el TS perfectamente pero el watchdog cortaba ANTES de reproducir y caía en
+  // FALSO a HLS (canal 5/95422), del que el usuario veía "se ve pero no
+  // reproduce" + varios restarts (3 conexiones y un montón de peticiones en el
+  // panel). Con margen de 30s el arranque por autoplay-muted completa. Solo
+  // aplaza la detección de canales realmente rotos por TS a 30s; los canales que
+  // se congelan a MITAD siguen siendo alcanzados por los watchdogs del fallback
+  // HLS y la liveness continua.
+  const MPEGTS_STALL_MS = 30000; // sin avance durante 30s con mpegts → HLS
   // Pausa entre el teardown del TS continuo y el arranque del HLS .m3u8: el
   // worker de mpegts deja el elemento en estado transitorio (los errores
   // "Worker MediaSource attachment is closing" de la consola) y el panel
@@ -605,6 +618,10 @@ export function attachTs(videoEl, url, opts = {}) {
     }, LIVENESS_SAMPLE_MS);
   }
   function armStartupWatchdog() {
+    if (startupWatchdog) {
+      clearInterval(startupWatchdog);
+      startupWatchdog = null;
+    }
     startupWatchdog = livenessWatch(MPEGTS_STALL_MS, () =>
       fallbackToHls('no playback advance')
     );
@@ -803,11 +820,42 @@ export function attachTs(videoEl, url, opts = {}) {
     player.attachMediaElement(videoEl);
     player.on(mpegts.Events.ERROR, () => fallbackToHls('mpegts ERROR'));
     player.load();
-    player.play();
+    // Autoplay-with-sound can be blocked by strict browsers/TV webviews when the
+    // channel is opened as a direct /player link (or before the user interacts).
+    // mpegts's internal play() throws NotAllowedError, the video never starts,
+    // currentTime stays at 0 and the 12s startup watchdog then treats it as a
+    // dead stream and falls back to HLS — even though mpegts decoded the TS
+    // perfectly. Catch that rejection and retry MUTED once (autoplay-muted is
+    // allowed everywhere); unmute happens on the user's first interaction, like
+    // Player.jsx's safePlay does for the native path.
+    const playMpegts = () => {
+      if (controller.destroyed) return;
+      try {
+        const p = player.play();
+        if (p && typeof p.catch === 'function') {
+          p.catch((err) => {
+            if (!err || err.name !== 'NotAllowedError') return;
+            if (controller.destroyed || !videoEl) return;
+            // Bloqueado por autoplay (navegación directa / TV): arranca muted con
+            // el play nativo del elemento (mpegts puede seguir demuxando hacia su
+            // MediaSource). Re-armamos el watchdog del arranque desde cero para
+            // que el setup del MSE tras el bloqueo (onSourceOpen + demux + init)
+            // cuente con un periodo completo de margen antes de dar por roto el
+            // canal — sin esto, el arranque muted por autoplay se malgastaba y el
+            // canal caía en falso a HLS (restart + conexiones extra en el panel).
+            try { videoEl.muted = true; } catch {}
+            const p2 = videoEl.play();
+            armStartupWatchdog();
+            if (p2 && typeof p2.catch === 'function') p2.catch(() => {});
+          });
+        }
+      } catch {}
+    };
     // Vigila la reproducción de forma continua: si currentTime no avanza en
     // MPEGTS_STALL_MS (no llegan frames o se queda en "slideshow" sin
     // reproducir), conmuta a HLS.
     armStartupWatchdog();
+    playMpegts();
   }
 
   function doStartPlayback() {
