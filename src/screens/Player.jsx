@@ -137,14 +137,20 @@ export default function Player() {
     };
     // Live uses continuous MPEG-TS (mpegts.js + the proxy's shared .ts fan-out)
     // so the panel sees ONE endless connection per channel; VOD/series/catchup
-    // and Exclusivos keep the HLS/native path.
-    const useTs = type === 'live' && !isExclusive;
+    // and Exclusivos keep the HLS/native path. `isLive` diferencia la config del
+    // motor: live usa baja latencia + mono-conexión estricta (mpegts con
+    // enableStashBuffer:false y chasing activo; HLS con buffer mínimo), mientras
+    // VOD usa buffer estable y arranque rápido.
+    const isLivePlayback = type === 'live';
+    const useTs = isLivePlayback && !isExclusive;
     player = useTs
       ? attachTs(video, url, {
+          isLive: true,
           isExclusive,
           onError: onPlaybackError,
         })
       : attachHls(video, url, {
+          isLive: isLivePlayback,
           startPosition,
           extraOrigin: isExclusive,
           isExclusive,

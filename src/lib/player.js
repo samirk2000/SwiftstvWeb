@@ -78,22 +78,26 @@ export function proxyMediaUrl(url, opts = {}) {
 
 // Determine the HLS.js config (extraOrigin applies dynamic Referer/Origin).
 function hlsConfigFor(url, opts) {
+  // LIVE (o su fallback HLS): buffer mínimo para que hls.js descargue 1-2
+  // segmentos a la vez y NUNCA abra 3+ peticiones paralelas al panel — eso es
+  // lo que hace que Xtream detecte varias conexiones y corte la transmisión.
+  // VOD/catchup conservan buffer normal (10s) para evitar rebuffering.
+  const isLive = Boolean(opts?.isLive);
   const cfg = {
     // Evita workers que disparen fetches en hilos paralelos no controlados.
     enableWorker: false,
-    backBufferLength: 30,
-    // Live: se sincroniza 3 segmentos detrás del en vivo y se permite hasta 5.
-    liveSyncDurationCount: 3,
-    liveMaxLatencyDurationCount: 5,
+    backBufferLength: isLive ? 5 : 30,
+    // Live: se sincroniza 2 segmentos detrás del en vivo (máx 4).
+    liveSyncDurationCount: isLive ? 2 : 3,
+    liveMaxLatencyDurationCount: isLive ? 4 : 5,
     lowLatencyMode: false,
-    // Búfer de datos: máx. 10s pedidos por adelantado (pico 15s), 30MB en RAM.
-    // Reduce la carga paralela agresiva que abriría varias conexiones al panel.
-    maxBufferLength: 10,
-    maxMaxBufferLength: 15,
+    // Búfer de datos: live 3s por delante (1 segmento) / VOD 10s (pico 15s).
+    maxBufferLength: isLive ? 3 : 10,
+    maxMaxBufferLength: isLive ? 6 : 15,
     maxBufferSize: 30 * 1024 * 1024,
     // No cortar la carga de un fragmento prematuramente (segmentos de varios MB).
     fragLoadingTimeOut: 30000,
-    fragLoadingMaxRetry: 6,
+    fragLoadingMaxRetry: isLive ? 3 : 6,
     // Manifests .m3u8 vía proxy lento: timeout 10s y 3 reintentos para no
     // saturar con peticiones de playlist consecutivas.
     manifestLoadingTimeOut: 10000,
@@ -505,31 +509,52 @@ export function attachTs(videoEl, url, opts = {}) {
       return;
     }
 
+    // LIVE (TV en vivo) vs VOD/archivo: la configuración del motor cambia por
+    // completo. Para live usamos baja latencia + mono-conexión estricta (el
+    // panel de Xtream corta la sesión si ve >N conexiones simultáneas): sin
+    // stash masivo (los bytes van directo al MSE), chasing de latencia activo
+    // que ajusta dentro del buffer sin reabrir el socket hacia el proxy, y
+    // limpieza de buffer sin reconectar.
+    const isLive = opts.isLive !== false;
     const player = mpegts.createPlayer(
-      { type: 'mpegts', isLive: true, url: srcUrl },
-      {
-        // Demux de MPEG-TS en thread secundario para no congelar la UI.
-        enableWorker: true,
-        enableWorkerForMSE: true,
-        isLive: true,
-        // Arranque rápido: stash inicial de 128KB (en vez de 1MB) para empezar
-        // a reproducir en cuanto llegan los primeros bytes, sin esperar a
-        // llenar varios megabytes de buffer.
-        enableStashBuffer: true,
-        stashInitialSize: 128 * 1024,
-        // Sin prefetch agresivo por delante del borde en vivo: pide el chunk
-        // actual cuando hace falta y carga el source apenas se abre la MSE.
-        lazyLoad: false,
-        deferLoadAfterSourceOpen: false,
-        // Sin chasing agresivo. Margen amplio de buffer: máx 12s, mínimo 3s.
-        liveBufferLatencyChasing: false,
-        liveBufferLatencyMaxLatency: 12,
-        liveBufferLatencyMinRemain: 3,
-        // Limpia el buffer ya consumido para liberar memoria.
-        autoCleanupSourceBuffer: true,
-        autoCleanupMaxBackwardDuration: 30,
-        autoCleanupMinBackwardDuration: 10,
-      }
+      { type: 'mpegts', isLive, url: srcUrl, cors: true },
+      isLive
+        ? {
+            // Demux en thread secundario para no congelar la UI.
+            enableWorker: true,
+            enableWorkerForMSE: true,
+            isLive: true,
+            // Desactivar stash masivo para Live: latencia mínima, el chunk que
+            // llega se despacha a MSE de inmediato.
+            enableStashBuffer: false,
+            // Auto-ajustar latencia sin reabrir conexiones: si el buffer se
+            // atrasa >5s, salta dentro del rango ya descargado para volver a
+            // quedar con 2s de margen. Nunca re-consulta la URL.
+            liveBufferLatencyChasing: true,
+            liveBufferLatencyMaxLatency: 5,
+            liveBufferLatencyMinRemain: 2,
+            // Limpia la memoria del buffer consumido sin reconectar.
+            autoCleanupSourceBuffer: true,
+            autoCleanupMaxBackwardDuration: 30,
+            autoCleanupMinBackwardDuration: 10,
+            // Sin prefetch por delante del borde en vivo.
+            lazyLoad: false,
+            deferLoadAfterSourceOpen: false,
+          }
+        : {
+            // VOD / archivo: stash pequeño para arranque rápido y sin chasing.
+            enableWorker: true,
+            enableWorkerForMSE: true,
+            isLive: false,
+            enableStashBuffer: true,
+            stashInitialSize: 128 * 1024,
+            liveBufferLatencyChasing: false,
+            lazyLoad: false,
+            deferLoadAfterSourceOpen: false,
+            autoCleanupSourceBuffer: true,
+            autoCleanupMaxBackwardDuration: 30,
+            autoCleanupMinBackwardDuration: 10,
+          }
     );
     controller.player = player;
 

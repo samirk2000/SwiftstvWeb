@@ -158,9 +158,9 @@ El VOD arranca en cuanto el navegador tiene el primer frame decodificado:
   primeros KB sin esperar a llenar el buffer. Un rechazo con `AbortError` se
   ignora (significa que un reintento/candidato reemplazó la carga), no se trata
   como error.
-- **Buffer de arranque mínimo en mpegts.js** (live, `attachTs`): `stashInitialSize`
-  de 128KB (antes 1MB), `lazyLoad: false` y `deferLoadAfterSourceOpen: false`
-  para empezar en cuanto llegan los primeros bytes del `.ts` continuo.
+- **Buffer de arranque mínimo en mpegts.js** (live, `attachTs`): stash de 128KB
+  para VOD/archivo y `lazyLoad: false` / `deferLoadAfterSourceOpen: false` para
+  empezar en cuanto llegan los primeros bytes del `.ts` continuo.
 
 ## Live en MPEG-TS continuo (1 conexión por canal)
 
@@ -177,14 +177,26 @@ que el panel cuente cada fragmento como una conexión nueva. En su lugar:
   se cierra el upstream y se elimina la entrada (teardown-on-idle); un solo
   espectador que sale **nunca** mata el stream compartido.
 - **Frontend (`src/lib/player.js#attachTs`)**: decodifica el `.ts` continuo con
-  **mpegts.js** (`type: 'mpegts', isLive: true`) sobre MSE, con
-  `enableWorker:true`/`enableWorkerForMSE:true`, stash de arranque de 128KB,
-  `lazyLoad:false` y `autoCleanupSourceBuffer` para no pedir de más.
+  **mpegts.js** (`type: 'mpegts', cors: true`) sobre MSE. El config distingue
+  **LIVE vs VOD** (`opts.isLive`):
+  - **Live (`isLive:true`)** — baja latencia + mono-conexión estricta:
+    `enableStashBuffer: false` (los bytes van directo a MSE, sin stash masivo),
+    `liveBufferLatencyChasing: true` con `liveBufferLatencyMaxLatency: 5` /
+    `liveBufferLatencyMinRemain: 2` (auto-ajusta la latencia dentro del buffer,
+    **sin reabrir** el socket hacia el proxy/panel), `autoCleanupSourceBuffer:
+    true` (limpia memoria sin reconectar), `enableWorker:true` y
+    `lazyLoad:false` / `deferLoadAfterSourceOpen:false`.
+  - **VOD/archivo (`isLive:false`)** — `enableStashBuffer: true` con
+    `stashInitialSize` de 128KB, sin chasing, para arranque rápido y estable.
 - **Fallback a HLS**: si `mpegts.js` no está soportado (no hay MSE live) o emite
   un **error fatal** al adjuntar/decodificar el TS (p. ej. error de MSE/decode),
   el reproductor conmuta automáticamente el mismo canal a su URL `.m3u8`
   (`tsToHlsUrl` → `attachHls`). El error solo se muestra si el fallback HLS
-  también falla.
+  también falla. Para no repetir el patrón de 3+ conexiones del panel, el
+  **fallback HLS en live usa buffer mínimo** (`hlsConfigFor` con `isLive`):
+  `maxBufferLength: 3` / `maxMaxBufferLength: 6`, `liveSyncDurationCount: 2` /
+  `liveMaxLatencyDurationCount: 4` → descarga 1-2 segmentos a la vez, nunca la
+  ráfaga paralela que corta la sesión en Xtream.
 - **VOD / series / catchup / Exclusivos siguen en HLS**: el modo continuo se
   aplica solo a `type=live`. El catchup usa `start`/`end` (horario), por lo que
   el proxy lo trata como NO continuo.
