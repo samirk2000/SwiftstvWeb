@@ -55,6 +55,8 @@ export default function SeriesDetail() {
     : Object.values(info?.episodes || {}).flat();
   const activeSeason = season || (seasonsList.length ? String(seasonsList[0].season_number) : null);
 
+  const meta = info?.info || {};
+
   const play = (ep) => {
     // The container extension lives on each episode (e.g. "mp4"); fall back to
     // the series-level one if present, else 'mp4'.
@@ -75,8 +77,6 @@ export default function SeriesDetail() {
       )}`
     );
   };
-
-  const meta = info?.info || {};
 
   return (
     <div>
