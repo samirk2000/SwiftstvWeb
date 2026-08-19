@@ -364,16 +364,30 @@ export function liveCatchupUrl(server, streamId, { startEpoch, endEpoch, ts = fa
   return `${base}?${qs.toString()}`;
 }
 
+// VOD/series panels sometimes report a `container_extension` that makes the
+// panel transmux/encode a live-ish session instead of serving the stored file
+// — "ts"/"m3u8"/"m3u" on a movie entry causes the slow start and constant
+// session resets the user sees, and TV browsers can't decode raw TS either.
+// The stored file is served as-is regardless of the extension in the URL, so
+// map those triggers to `.mp4` (natively playable). Mirrors Android
+// `XtreamUrls.normalizeExt` plus the ts→mp4 rule.
+const TRANSMUX_EXTENSIONS = ['ts', 'm3u8', 'm3u', 'm3u9'];
+export function vodPlayableExtension(ext) {
+  const e = String(ext || '').trim().toLowerCase().replace(/^\./, '');
+  if (!e || TRANSMUX_EXTENSIONS.includes(e)) return 'mp4';
+  return e;
+}
+
 export function vodStreamUrl(server, vodId, extension) {
-  return `${normalizeBaseUrl(server.baseUrl)}/movie/${server.username}/${server.password}/${vodId}.${
-    extension || 'mp4'
-  }`;
+  return `${normalizeBaseUrl(server.baseUrl)}/movie/${server.username}/${server.password}/${vodId}.${vodPlayableExtension(
+    extension
+  )}`;
 }
 
 export function seriesStreamUrl(server, containerExt, episode, season, seriesId) {
   // Xtream series direct URL: /series/U/P/EpisodeID.extension
   const id = episode ? episode.id : seriesId;
-  return `${normalizeBaseUrl(server.baseUrl)}/series/${server.username}/${server.password}/${id}.${
-    containerExt || 'mp4'
-  }`;
+  return `${normalizeBaseUrl(server.baseUrl)}/series/${server.username}/${server.password}/${id}.${vodPlayableExtension(
+    containerExt
+  )}`;
 }

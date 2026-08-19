@@ -157,12 +157,26 @@ export default function Player() {
     // VOD that the player is retrying doesn't look frozen.
     const onPlaying = () => setStarted(true);
     video.addEventListener('playing', onPlaying);
-    // A 'stalled'/'waiting' after we already started is normal buffering.
-    // If play() rejects (autoplay blocked / no source), tear the player down
-    // like any playback error instead of leaving the watchdog running.
-    video.play()
-      .then(() => {})
-      .catch(onPlaybackError);
+    // Fast start: force play() as soon as the browser has decoded the first
+    // frame (canplay / loadedmetadata), instead of waiting for several MB of
+    // buffer before autoplay kicks in. Calling it again while already playing
+    // is a harmless resolved promise.
+    // An AbortError means this play() was superseded by a wipe/new-src during a
+    // sequential candidate retry — NOT a real failure, so it must not tear the
+    // player down. Any other rejection is treated like a playback error.
+    const safePlay = () => {
+      const p = video.play();
+      if (p && typeof p.catch === 'function') {
+        p.catch((err) => {
+          if (err && err.name === 'AbortError') return;
+          onPlaybackError(err);
+        });
+      }
+    };
+    const onCanPlay = () => safePlay();
+    video.addEventListener('canplay', onCanPlay);
+    video.addEventListener('loadedmetadata', onCanPlay);
+    safePlay();
 
     const wake = wakeLockController();
     wake.request();
@@ -230,6 +244,8 @@ export default function Player() {
       video.removeEventListener('stalled', onStall);
       video.removeEventListener('playing', onPlaying);
       video.removeEventListener('pause', onPause);
+      video.removeEventListener('canplay', onCanPlay);
+      video.removeEventListener('loadedmetadata', onCanPlay);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [url, restart]);

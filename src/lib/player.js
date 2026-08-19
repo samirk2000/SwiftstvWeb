@@ -508,15 +508,19 @@ export function attachTs(videoEl, url, opts = {}) {
     const player = mpegts.createPlayer(
       { type: 'mpegts', isLive: true, url: srcUrl },
       {
-        // FHD/60fps: la demuxación de MPEG-TS corre en un thread secundario
-        // para no congelar la UI, con stash y buffer amplios para sostener
-        // canales pesados sin descartar frames ni reconectar.
+        // Demux de MPEG-TS en thread secundario para no congelar la UI.
         enableWorker: true,
         enableWorkerForMSE: true,
         isLive: true,
-        // Buffering en memoria para absorber picos; inicial 1 MB.
+        // Arranque rápido: stash inicial de 128KB (en vez de 1MB) para empezar
+        // a reproducir en cuanto llegan los primeros bytes, sin esperar a
+        // llenar varios megabytes de buffer.
         enableStashBuffer: true,
-        stashInitialSize: 1024 * 1024,
+        stashInitialSize: 128 * 1024,
+        // Sin prefetch agresivo por delante del borde en vivo: pide el chunk
+        // actual cuando hace falta y carga el source apenas se abre la MSE.
+        lazyLoad: false,
+        deferLoadAfterSourceOpen: false,
         // Sin chasing agresivo. Margen amplio de buffer: máx 12s, mínimo 3s.
         liveBufferLatencyChasing: false,
         liveBufferLatencyMaxLatency: 12,
@@ -525,10 +529,6 @@ export function attachTs(videoEl, url, opts = {}) {
         autoCleanupSourceBuffer: true,
         autoCleanupMaxBackwardDuration: 30,
         autoCleanupMinBackwardDuration: 10,
-        // Conexión hacia el proxy/panel: pedir más por adelantado (20s) para
-        // mantener la única .ts compartida abierta y estable.
-        lazyLoad: true,
-        lazyLoadMaxDuration: 20,
       }
     );
     controller.player = player;

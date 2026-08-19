@@ -123,6 +123,14 @@ buffer HLS con fragmentos incompletos y congelaría el reproductor):
 Algunos episodios/películas "funcionan en otras apps" pero no cargan aquí. Tres
 causas y su mitigación:
 
+- **Extensión que dispara transmux en vivo**: si el panel reporta
+  `container_extension` `ts`/`m3u8`/`m3u` en una película, la URL `.ts` hace que
+  el panel arranque una sesión de encode en vivo (lento, y la sesión se reajusta
+  constantemente). `vodPlayableExtension` (`src/lib/xtream.js`) normaliza esos
+  triggers a `.mp4` — el archivo almacenado se sirve igual sin importar la
+  extensión — de modo que el VOD/serie llega como mp4 nativo y reproducible.
+  Los `.mkv`/`.avi` se dejan intactos para que el fallback `mp4Variant` del
+  player siga activo.
 - **Contenedor no soportado por el navegador del TV** (`.mkv`, `.avi`, `.flv`,
   `.wmv`, …): las apps IPTV usan ExoPlayer/VLC que sí los demuxan; el `<video>`
   del navegador no. Swiftstv intenta la MISMA id como `.mp4` como candidato de
@@ -140,6 +148,20 @@ causas y su mitigación:
   subió de 10s a `UPSTREAM_TIMEOUT_MS || 45000` (`vps-proxy/proxy.js`) para no
   matar archivos grandes que tardan en responder el primer byte.
 
+## Arranque rápido del reproductor
+
+El VOD arranca en cuanto el navegador tiene el primer frame decodificado:
+
+- **Play en `canplay`/`loadedmetadata`** (`src/screens/Player.jsx`): además del
+  `play()` inmediato, se vuelve a llamar `video.play()` al dispararse cualquiera
+  de esos eventos, de modo que el `<video>` nativo reproduce en cuanto llegan los
+  primeros KB sin esperar a llenar el buffer. Un rechazo con `AbortError` se
+  ignora (significa que un reintento/candidato reemplazó la carga), no se trata
+  como error.
+- **Buffer de arranque mínimo en mpegts.js** (live, `attachTs`): `stashInitialSize`
+  de 128KB (antes 1MB), `lazyLoad: false` y `deferLoadAfterSourceOpen: false`
+  para empezar en cuanto llegan los primeros bytes del `.ts` continuo.
+
 ## Live en MPEG-TS continuo (1 conexión por canal)
 
 Para **live** el reproductor ya no usa HLS segmentado (`.m3u8` + `.ts`), que hace
@@ -156,8 +178,8 @@ que el panel cuente cada fragmento como una conexión nueva. En su lugar:
   espectador que sale **nunca** mata el stream compartido.
 - **Frontend (`src/lib/player.js#attachTs`)**: decodifica el `.ts` continuo con
   **mpegts.js** (`type: 'mpegts', isLive: true`) sobre MSE, con
-  `enableWorker:false`, buffer pequeño y `autoCleanupSourceBuffer` para no pedir
-  de más.
+  `enableWorker:true`/`enableWorkerForMSE:true`, stash de arranque de 128KB,
+  `lazyLoad:false` y `autoCleanupSourceBuffer` para no pedir de más.
 - **Fallback a HLS**: si `mpegts.js` no está soportado (no hay MSE live) o emite
   un **error fatal** al adjuntar/decodificar el TS (p. ej. error de MSE/decode),
   el reproductor conmuta automáticamente el mismo canal a su URL `.m3u8`
