@@ -158,7 +158,7 @@ El VOD arranca en cuanto el navegador tiene el primer frame decodificado:
   primeros KB sin esperar a llenar el buffer. Un rechazo con `AbortError` se
   ignora (significa que un reintento/candidato reemplazó la carga), no se trata
   como error.
-- **Buffer de arranque mínimo en mpegts.js** (`attachTs`): stash de 384KB para
+- **Buffer de arranque mínimo en mpegts.js** (`attachTs`): stash de 512KB para
   live (arranque fluido y margen de estabilidad) y 128KB para VOD/archivo, y
   `lazyLoad: false` / `deferLoadAfterSourceOpen: false` para empezar en cuanto
   llegan los primeros bytes del `.ts` continuo.
@@ -182,14 +182,14 @@ que el panel cuente cada fragmento como una conexión nueva. En su lugar:
   **LIVE vs VOD** (`opts.isLive`):
   - **Live (`isLive:true`)** — baja latencia + mono-conexión estricta con
     **stash holgado**: `enableStashBuffer: true` con `stashInitialSize` de
-    384KB para un arranque fluido (un stash mínimo + chasing agresivo deja el
-    buffer en seco y produce stuttering cada 3-4s). `liveBufferLatencyChasing:
-    true` con `liveBufferLatencyMaxLatency: 8` / `liveBufferLatencyMinRemain: 3`
-    (permite hasta 8s de margen en vivo y mantiene SIEMPRE 3s de buffer mínimo,
-    auto-ajustando dentro del rango descargado **sin reabrir** el socket hacia
-    el proxy/panel), `autoCleanupSourceBuffer: true` (limpia memoria sin
-    reconectar), `enableWorker:true` y `lazyLoad:false` /
-    `deferLoadAfterSourceOpen:false`.
+    512KB para un arranque fluido, y **chasing de latencia DESACTIVADO**
+    (`liveBufferLatencyChasing: false`): el chaser de mpegts.js hace un
+    direct-seek en el `<video>` cada vez que el buffer adelantado supera el
+    umbral; como el proxy entrega más rápido que el tiempo real, eso provocaba
+    un trabo periódico cada ~10s. Sin chasing el video avanza continuo sin
+    saltos y el buffer natural queda acotado por el stash. Se mantienen
+    `autoCleanupSourceBuffer: true` (limpia memoria sin reconectar),
+    `enableWorker:true` y `lazyLoad:false` / `deferLoadAfterSourceOpen:false`.
   - **VOD/archivo (`isLive:false`)** — `enableStashBuffer: true` con
     `stashInitialSize` de 128KB, sin chasing, para arranque rápido y estable.
 - **Fallback a HLS**: si `mpegts.js` no está soportado (no hay MSE live) o emite
