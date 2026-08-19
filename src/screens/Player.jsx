@@ -46,6 +46,10 @@ export default function Player() {
   const [restart, setRestart] = useState(0);
   // Mirrors `started` for use inside effect closures (avoid stale state).
   const startedRef = useRef(false);
+  // Coalesces the "mpegts TS reproduces this channel" signal so we clear the
+  // HLS-only memory exactly once per mount (called from both `playing` and, as a
+  // fallback for webviews that never fire `playing`, from `timeupdate`).
+  const hlsClearedRef = useRef(false);
 
   // Live channel memory: once a channel fell back to HLS (mpegts can't play its
   // .ts on this browser), remember it so the next zap goes straight to HLS —
@@ -116,6 +120,7 @@ export default function Player() {
     }
     setMutedHint(false);
     startedRef.current = false;
+    hlsClearedRef.current = false;
 
     // Strict serialization: only one live request load. Abort any previous
     // controller BEFORE starting this stream so the previous socket closes.
@@ -203,11 +208,26 @@ export default function Player() {
         });
     playerRef.current = player;
 
+    // Once mpegts TS demonstrably reproduces this channel (currentTime advancing),
+    // forget any "HLS-only" memory from an earlier session. That flag forces the
+    // channel onto the HLS fallback, which for slow panels opens MANY upstream
+    // connections (manifest reloads + per-segment fetches → the panel shows 3+
+    // connections and the network tab floods). mpegts .ts is a SINGLE endless
+    // connection, so once it works the channel must go back to TS on the next
+    // zap. Only live+TS (non-Exclusivos) does this; VOD/HLS/Exclusivos keep
+    // their memory untouched.
+    const rememberTsWorks = () => {
+      if (useTs && !hlsClearedRef.current) {
+        hlsClearedRef.current = true;
+        clearHlsOnlyChannel(channelKey);
+      }
+    };
     // Show a "Cargando…" overlay until the first real frames arrive, so slow
     // VOD that the player is retrying doesn't look frozen.
     const onPlaying = () => {
       startedRef.current = true;
       setStarted(true);
+      rememberTsWorks();
     };
     video.addEventListener('playing', onPlaying);
     // Fast start: force play() as soon as the browser has decoded the first
@@ -255,6 +275,9 @@ export default function Player() {
       if (video.currentTime >= 1) {
         startedRef.current = true;
         setStarted(true);
+        // Also coalesced into rememberTsWorks (idempotent via hlsClearedRef) so
+        // webviews that never fire `playing` still clear the HLS-only memory.
+        rememberTsWorks();
       }
       if (video.duration > 0) {
         // Best-effort continue-watching: persist position periodically.

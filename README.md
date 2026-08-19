@@ -274,7 +274,22 @@ que el panel cuente cada fragmento como una conexión nueva. En su lugar:
   elemento usado. La memoria se **auto-cura**: si el HLS directo también falla,
   se borra y un Reintentar vuelve a probar mpegts. Si el canal estaba
   reproduciendo y se trabó a mitad (no es un problema de arranque), NO se marca
-  y el fallback en sitio se mantiene como antes.
+  y el fallback en sitio se mantiene como antes. Adicionalmente, la memoria es
+  **auto-limpiable en el sentido inverso**: si el canal reproduce por TS continuo
+  (mpegts arranca y `currentTime` avanza), se borra el flag — así un canal que una
+  vez cayó a HLS (por el bug de autoplay o un fallo puntual) vuelve al TS continuo
+  en el siguiente zap y deja de abrir las múltiples conexiones del path HLS.
+- **Menos conexiones al arrancar**: el path de **HLS fallback** es "ruidoso" para el
+  panel — hls.js recarga el manifest `.m3u8` y baja segmentos de forma continua,
+  y cada request al proxy se traduce en una conexión upstream al panel (el panel
+  xui muestra 3+ conexiones y el network tab se llena). El **TS continuo (mpegts)**
+  abre UNA sola conexión end-to-end. Dos ajustes refuerzan eso:
+  1. `main.jsx` **no usa `<React.StrictMode>`**: en desarrollo React monta/desmonta/
+     re-monta cada componente, disparando dos veces el efecto del Player y abriendo
+     dos streams seguidos (la primera conexión tarda un instante en cerrarse en el
+     proxy, así que el panel cuenta 2-3 "simultáneas"). Quitarlo reduce el arranque
+     a una sola conexión (no afecta producción).
+  2. Se limpia la memoria HLS-only en cuanto el TS reproduce (ver viñeta anterior).
 - **Autoplay con sonido bloqueado**: los enlaces directos a `/player` (o
   navegadores con política estricta de autoplay) cargan datos pero dejan el
   video **pausado** (readyState alto, `currentTime` congelado → el watchdog lo
