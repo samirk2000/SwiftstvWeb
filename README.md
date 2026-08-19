@@ -236,6 +236,25 @@ que el panel cuente cada fragmento como una conexión nueva. En su lugar:
   Para depurar, `attachTs` registra en consola la ruta activa (`mpegts start` /
   `HLS fallback` / `fallback a HLS: <motivo>` / `reintento HLS #N`). El error
   solo se muestra si el fallback HLS también falla.
+- **Memoria "HLS-only" por canal**: en algunos navegadores hay canales cuyo `.ts`
+  continuo se descarga sin parar pero mpegts jamás produce reproducción, y la
+  transición mpegts→HLS sobre el MISMO elemento puede dejar el MSE en un estado
+  donde HLS descarga segmentos pero tampoco arranca. Para que no se repita el
+  ciclo en cada zap: cuando un canal cae al fallback HLS por **no haber arrancado
+  nunca** (memoria `swiftstv.hlsOnlyChannels.v1` en localStorage, clave
+  `live:<id>`), el reproductor se **reinicia automáticamente con un `<video>`
+  NUEVO** (`key={restart}`) e irá **directo a HLS** (`.m3u8`) la primera vez y en
+  todos los zaps siguientes — sin esperar los 12s del watchdog ni arriesgar el
+  elemento usado. La memoria se **auto-cura**: si el HLS directo también falla,
+  se borra y un Reintentar vuelve a probar mpegts. Si el canal estaba
+  reproduciendo y se trabó a mitad (no es un problema de arranque), NO se marca
+  y el fallback en sitio se mantiene como antes.
+- **Autoplay con sonido bloqueado**: los enlaces directos a `/player` (o
+  navegadores con política estricta de autoplay) cargan datos pero dejan el
+  video **pausado** (readyState alto, `currentTime` congelado → el watchdog lo
+  trataría como canal muerto). `safePlay` detecta `NotAllowedError` y **reintenta
+  en modo muted** (permitido en todas partes), mostrando un hint
+  "Pulsa para activar el sonido" que desmuteará cuando el usuario pulse.
 - **VOD / series / catchup / Exclusivos siguen en HLS**: el modo continuo se
   aplica solo a `type=live`. El catchup usa `start`/`end` (horario), por lo que
   el proxy lo trata como NO continuo.

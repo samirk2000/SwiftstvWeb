@@ -59,6 +59,7 @@ export const STRINGS = {
       formatError: 'Este archivo (formato o códec) no es compatible con el navegador de este TV.',
       back: 'Atrás',
       buffering: 'Cargando, espera...',
+      unmute: 'Pulsa para activar el sonido',
     },
     exclusivos: {
       title: 'Canales Exclusivos',
@@ -151,6 +152,7 @@ export const STRINGS = {
       formatError: 'This file (format or codec) is not supported by this TV browser.',
       back: 'Back',
       buffering: 'Loading, please wait...',
+      unmute: 'Press to enable sound',
     },
     exclusivos: {
       title: 'Exclusive Channels',

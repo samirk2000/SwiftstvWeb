@@ -6,6 +6,7 @@ const KEYS = {
   continueWatching: 'swiftstv.continueWatching.v1',
   favorites: 'swiftstv.favorites.v1',
   language: 'swiftstv.language.v1',
+  hlsOnly: 'swiftstv.hlsOnlyChannels.v1',
 };
 
 function read(key, fallback) {
@@ -109,4 +110,36 @@ export function getLanguage() {
 
 export function saveLanguage(lang) {
   write(KEYS.language, lang === 'en' ? 'en' : 'es');
+}
+
+// ---- "HLS-only" channel memory -------------------------------------------
+// Some live channels CONNECT on the panel and download endlessly via the
+// continuous .ts, but mpegts.js never produces playback on certain browsers
+// (and the dirty MSE teardown can leave the HLS fallback unable to attach on
+// the same element). Once a channel falls back to HLS, remember it so the next
+// zap goes DIRECTLY to HLS (the route that historically played those channels),
+// skipping the 12s mpegts wait and the broken transition. The memory is cleared
+// when the HLS fallback itself fails (so a Retry re-tries mpegts).
+function getHlsOnlySet() {
+  const raw = read(KEYS.hlsOnly, null);
+  return Array.isArray(raw) ? new Set(raw) : new Set();
+}
+
+export function isHlsOnlyChannel(key) {
+  if (!key) return false;
+  return getHlsOnlySet().has(String(key));
+}
+
+export function markHlsOnlyChannel(key) {
+  if (!key) return;
+  const set = getHlsOnlySet();
+  set.add(String(key));
+  write(KEYS.hlsOnly, [...set]);
+}
+
+export function clearHlsOnlyChannel(key) {
+  if (!key) return;
+  const set = getHlsOnlySet();
+  if (!set.delete(String(key))) return;
+  write(KEYS.hlsOnly, [...set]);
 }

@@ -3,7 +3,12 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import { t } from '../lib/i18n.js';
 import { attachHls, attachTs, isUnsupportedContainer, mp4Variant, togglePip, wakeLockController } from '../lib/player.js';
 import { needsOriginHeaders } from '../lib/exclusivos.js';
-import { updateContinueWatching } from '../lib/session.js';
+import {
+  updateContinueWatching,
+  isHlsOnlyChannel,
+  markHlsOnlyChannel,
+  clearHlsOnlyChannel,
+} from '../lib/session.js';
 
 export default function Player() {
   const location = useLocation();
@@ -30,9 +35,24 @@ export default function Player() {
   // MEDIA_ERR_* code when playback failed (4 = src not supported / codec).
   const [errorCode, setErrorCode] = useState(null);
   const [started, setStarted] = useState(false);
+  // True when autoplay-with-sound was blocked and we fell back to muted playback
+  // (direct link / strict browser policy). Shows an unmute hint.
+  const [mutedHint, setMutedHint] = useState(false);
   // Bumped by the manual Retry button so the [url] effect re-runs and rebuilds
-  // the player from scratch (destroying any previous controller first).
+  // the player from scratch (destroying any previous controller first). Also
+  // used as the <video> `key`, so a rebuild mounts a FRESH media element — the
+  // mpegts→HLS fallback on a used element can leave the MSE in a broken state
+  // on some browsers (segments download but playback never starts).
   const [restart, setRestart] = useState(0);
+  // Mirrors `started` for use inside effect closures (avoid stale state).
+  const startedRef = useRef(false);
+
+  // Live channel memory: once a channel fell back to HLS (mpegts can't play its
+  // .ts on this browser), remember it so the next zap goes straight to HLS —
+  // skipping the 12s mpegts watchdog and the dirty MSE teardown. Cleared if the
+  // HLS fallback itself fails (a Retry then re-tries mpegts).
+  const channelKey = type === 'live' ? `live:${id}` : '';
+  const preferHls = type === 'live' && isHlsOnlyChannel(channelKey);
 
   // For VOD/series entries stored as .mkv/.avi/... the TV browser cannot demux
   // them. Try the SAME id as .mp4 as a trailing candidate (many Xtream panels
@@ -94,6 +114,8 @@ export default function Player() {
       setError(true);
       return undefined;
     }
+    setMutedHint(false);
+    startedRef.current = false;
 
     // Strict serialization: only one live request load. Abort any previous
     // controller BEFORE starting this stream so the previous socket closes.
@@ -106,6 +128,11 @@ export default function Player() {
     const isExclusive = needsOriginHeaders(url);
     let player = null;
     const onPlaybackError = (err) => {
+      // If this channel was playing via its HLS-only preference and even that
+      // failed, forget the preference so a Retry re-tries mpegts (self-heal in
+      // both directions — the memory must never lock a channel into a broken
+      // route).
+      if (preferHls) clearHlsOnlyChannel(channelKey);
       // Capture the MEDIA_ERR_* code (2 network / 3 decode / 4 src-not-supported)
       // so the error screen can explain a codec/container limitation.
       const code =
@@ -147,6 +174,23 @@ export default function Player() {
       ? attachTs(video, url, {
           isLive: true,
           isExclusive,
+          preferHls,
+          onHlsFallback: () => {
+            markHlsOnlyChannel(channelKey);
+            // mpegts no pudo reproducir este canal. Si nunca llegó a arrancar
+            // (empezando), reinicia el reproductor con un <video> NUEVO (key de
+            // restart cambia) e irá DIRECTO a HLS — la vía que sí reproduce este
+            // canal en navegadores donde mpegts falla. Si el canal YA estaba
+            // reproduciendo y se trabó a mitad, no reinicia (evita bucle).
+            if (!preferHls && !startedRef.current) {
+              setError(false);
+              setErrorCode(null);
+              setStarted(false);
+              startedRef.current = false;
+              setRestart((x) => x + 1);
+            }
+          },
+          onHlsFail: () => clearHlsOnlyChannel(channelKey),
           onError: onPlaybackError,
         })
       : attachHls(video, url, {
@@ -161,7 +205,10 @@ export default function Player() {
 
     // Show a "Cargando…" overlay until the first real frames arrive, so slow
     // VOD that the player is retrying doesn't look frozen.
-    const onPlaying = () => setStarted(true);
+    const onPlaying = () => {
+      startedRef.current = true;
+      setStarted(true);
+    };
     video.addEventListener('playing', onPlaying);
     // Fast start: force play() as soon as the browser has decoded the first
     // frame (canplay / loadedmetadata), instead of waiting for several MB of
@@ -175,6 +222,17 @@ export default function Player() {
       if (p && typeof p.catch === 'function') {
         p.catch((err) => {
           if (err && err.name === 'AbortError') return;
+          if (err && err.name === 'NotAllowedError') {
+            // Autoplay with sound blocked (direct link to /player, strict
+            // browser policy, or transient activation expired by the async
+            // stream setup). Retry MUTED — autoplay muted is allowed
+            // everywhere — and surface an unmute hint.
+            video.muted = true;
+            setMutedHint(true);
+            const p2 = video.play();
+            if (p2 && typeof p2.catch === 'function') p2.catch(() => {});
+            return;
+          }
           onPlaybackError(err);
         });
       }
@@ -194,7 +252,10 @@ export default function Player() {
       // `playing` event for MSE (hls.js/mpegts), leaving the spinner stuck over
       // an already-playing stream; an advancing currentTime is the reliable
       // signal. Guarded to >=1s so a still/black first frame doesn't clear it.
-      if (video.currentTime >= 1) setStarted(true);
+      if (video.currentTime >= 1) {
+        startedRef.current = true;
+        setStarted(true);
+      }
       if (video.duration > 0) {
         // Best-effort continue-watching: persist position periodically.
         updateContinueWatching({
@@ -248,6 +309,7 @@ export default function Player() {
         try { abortRef.current.abort(); } catch {}
         abortRef.current = null;
       }
+      startedRef.current = false;
       try { video.pause(); } catch {}
       video.removeAttribute('src');
       video.src = '';
@@ -291,6 +353,7 @@ export default function Player() {
               setError(false);
               setErrorCode(null);
               setStarted(false);
+              startedRef.current = false;
               setRestart((x) => x + 1);
             }}
           >
@@ -317,6 +380,7 @@ export default function Player() {
       }}
     >
       <video
+        key={restart}
         ref={videoRef}
         autoPlay
         playsInline
@@ -331,12 +395,34 @@ export default function Player() {
             className="btn-ghost"
             onClick={() => {
               setStarted(false);
+              startedRef.current = false;
               if (playerRef.current) playerRef.current.reloadUrl();
             }}
           >
             {t('common.retry')}
           </button>
         </div>
+      )}
+      {mutedHint && started && (
+        <button
+          className="unmute-hint"
+          onClick={() => {
+            const v = videoRef.current;
+            if (!v) return;
+            v.muted = false;
+            setMutedHint(false);
+            const p = v.play();
+            if (p && typeof p.catch === 'function') {
+              p.catch(() => {
+                // Unmute was also blocked: stay muted and keep the hint.
+                v.muted = true;
+                setMutedHint(true);
+              });
+            }
+          }}
+        >
+          🔊 {t('player.unmute')}
+        </button>
       )}
       {controlsVisible && (
         <div className="player-controls">

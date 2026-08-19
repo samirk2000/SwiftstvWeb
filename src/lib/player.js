@@ -603,6 +603,13 @@ export function attachTs(videoEl, url, opts = {}) {
             ? { code: videoEl.error.code, message: videoEl.error.message }
             : null,
         });
+        // Si ni siquiera HLS reproduce este canal, olvida la preferencia HLS
+        // para que un Reintentar vuelva a probar mpegts (auto-curación).
+        if (typeof opts.onHlsFail === 'function') {
+          try {
+            opts.onHlsFail();
+          } catch {}
+        }
         if (typeof opts.onError === 'function') opts.onError(new Error('hls fallback stalled'));
       });
     }
@@ -648,6 +655,13 @@ export function attachTs(videoEl, url, opts = {}) {
     clearWatchdogs();
     // eslint-disable-next-line no-console
     console.warn('[attachTs] fallback a HLS:', reason || 'error mpegts');
+    // Recuerda el canal como "HLS-only" para que el próximo zap vaya directo a
+    // HLS (mpegts no puede reproducir este canal en este navegador).
+    if (typeof opts.onHlsFallback === 'function') {
+      try {
+        opts.onHlsFallback();
+      } catch {}
+    }
     teardownMpegts();
     wipeElement();
     hlsDelayTimer = setTimeout(() => {
@@ -660,6 +674,15 @@ export function attachTs(videoEl, url, opts = {}) {
 
   function startTs() {
     if (controller.destroyed) return;
+    // Preferencia persistida del canal (memoria "HLS-only"): si un canal ya cayó
+    // al fallback HLS en un navegador donde mpegts nunca reproduce el .ts, la
+    // próxima vez vamos DIRECTOS a HLS — sin esperar el watchdog de 12s ni
+    // arriesgar una transición MSE sucia (que dejaba el fallback sin reproducir).
+    if (opts.preferHls) {
+      startHls();
+      armFallbackWatchdog();
+      return;
+    }
     // No MSE for TS on this device -> HLS segmented fallback.
     if (!mpegts.isSupported() || !mpegts.getFeatureList().mseLivePlayback) {
       startHls();

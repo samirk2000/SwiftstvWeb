@@ -632,6 +632,27 @@ input:focus-visible {
   z-index: 3;
 }
 
+.unmute-hint {
+  position: absolute;
+  bottom: 84px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 5;
+  padding: 10px 18px;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.75);
+  color: #fff;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.unmute-hint:hover,
+.unmute-hint:focus {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
 .player-controls {
   position: absolute;
   bottom: 0;
