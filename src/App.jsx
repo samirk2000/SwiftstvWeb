@@ -1,5 +1,5 @@
 import { BrowserRouter, Navigate, Route, Routes, useNavigate, useLocation } from 'react-router-dom';
-import { useEffect } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { SessionProvider, useSession } from './context/SessionContext.jsx';
 import {
   FocusRoot,
@@ -9,8 +9,10 @@ import {
   useFocusable,
   openIme,
   resolveEditable,
+  setFocused,
 } from './components/Focusable.jsx';
 import { getSession } from './lib/session.js';
+import { t } from './lib/i18n.js';
 import Login from './screens/Login.jsx';
 import Home from './screens/Home.jsx';
 import LiveGuide from './screens/LiveGuide.jsx';
@@ -82,16 +84,104 @@ function RequireSession({ children }) {
   return children;
 }
 
+function exitApp() {
+  try {
+    if (window.webOS && typeof window.webOS.platformBack === 'function') {
+      window.webOS.platformBack();
+      return;
+    }
+  } catch {
+    /* ignore */
+  }
+  try {
+    if (window.PalmSystem && typeof window.PalmSystem.platformBack === 'function') {
+      window.PalmSystem.platformBack();
+      return;
+    }
+  } catch {
+    /* ignore */
+  }
+  try {
+    window.close();
+  } catch {
+    /* ignore */
+  }
+}
+
+/** Root-level confirm before leaving the app (accidental Back on Home/Login). */
+function ExitConfirm({ open, onCancel, onConfirm }) {
+  const cancelRef = useFocusable('exit-cancel');
+  const confirmRef = useFocusable('exit-confirm');
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const t = window.setTimeout(() => {
+      // Default to "No" so a double-Back doesn't instantly quit.
+      setFocused(cancelRef.ref.current, { native: false });
+    }, 40);
+    return () => window.clearTimeout(t);
+  }, [open, cancelRef.ref]);
+
+  if (!open) return null;
+
+  return (
+    <div className="exit-overlay" role="dialog" aria-modal="true" aria-labelledby="exit-title">
+      <FocusScope trap autoFocus className="exit-dialog">
+        <h2 id="exit-title">{t('exit.title')}</h2>
+        <p>{t('exit.message')}</p>
+        <div className="exit-actions">
+          <button
+            ref={cancelRef.ref}
+            tabIndex={0}
+            className="btn-primary"
+            data-focusable="true"
+            onClick={onCancel}
+          >
+            {t('exit.cancel')}
+          </button>
+          <button
+            ref={confirmRef.ref}
+            tabIndex={0}
+            className="btn-ghost"
+            data-focusable="true"
+            onClick={onConfirm}
+          >
+            {t('exit.confirm')}
+          </button>
+        </div>
+      </FocusScope>
+    </div>
+  );
+}
+
 function AppShell() {
   const navigate = useNavigate();
   const location = useLocation();
+  const [exitOpen, setExitOpen] = useState(false);
+
+  const isRootRoute =
+    location.pathname === '/' ||
+    location.pathname === '/login' ||
+    location.pathname === '';
+
+  const closeExit = useCallback(() => {
+    setExitOpen(false);
+  }, []);
 
   // Reclaim / move focus whenever the route changes (Settings, Live, modals-as-pages…).
-  useAutoFocus([location.pathname, location.search], '.app-shell');
+  useAutoFocus([location.pathname, location.search, exitOpen], '.app-shell');
 
   useGlobalTvKeys({
     onEscape: () => {
-      if (window.location.pathname === '/login') return;
+      if (exitOpen) {
+        closeExit();
+        return;
+      }
+      // Accidental Back on Home/Login → ask before quitting the app.
+      if (isRootRoute) {
+        setExitOpen(true);
+        return;
+      }
       navigate(-1);
     },
     onEnter: () => {
@@ -200,6 +290,8 @@ function AppShell() {
           </Routes>
         </FocusScope>
       </main>
+
+      <ExitConfirm open={exitOpen} onCancel={closeExit} onConfirm={exitApp} />
     </div>
   );
 }

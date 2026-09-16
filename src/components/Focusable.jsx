@@ -620,10 +620,8 @@ export function useGlobalTvKeys({ onEscape, onEnter } = {}) {
           } catch {
             /* ignore */
           }
-          // Prefer the same login field (or #login-user) — never leave 2 rings.
-          const loginUser = document.getElementById('login-user');
-          const restore = loginUser || active;
-          setFocused(restore, { native: false });
+          // Stay on the same field that had the IME — never yank to #login-user.
+          setFocused(active, { native: false });
           return;
         }
         if (typeof onEscapeRef.current === 'function') {

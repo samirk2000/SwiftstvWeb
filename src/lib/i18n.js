@@ -82,6 +82,14 @@ export const STRINGS = {
       error: 'Algo salió mal',
       favorite: 'Favorito',
       unfavorite: 'Quitar favorito',
+      yes: 'Sí',
+      no: 'No',
+    },
+    exit: {
+      title: '¿Salir de Swiftstv?',
+      message: '¿Seguro que quieres cerrar la aplicación?',
+      confirm: 'Sí, salir',
+      cancel: 'No, quedarme',
     },
     parental: {
       hint: 'Configura categorías bloqueadas por PIN. Por defecto todo está abierto (sin PIN).',
@@ -196,6 +204,14 @@ export const STRINGS = {
       error: 'Something went wrong',
       favorite: 'Favorite',
       unfavorite: 'Remove favorite',
+      yes: 'Yes',
+      no: 'No',
+    },
+    exit: {
+      title: 'Exit Swiftstv?',
+      message: 'Are you sure you want to close the app?',
+      confirm: 'Yes, exit',
+      cancel: 'No, stay',
     },
     parental: {
       hint: 'Block categories via PIN. Everything is open by default (no PIN).',

@@ -24,46 +24,74 @@ export default function Login() {
   const submitRef = useRef(null);
   const blurTimer = useRef(null);
   const imeOpenRef = useRef(false);
+  // When true, ignore pending blur restores (D-pad already moved the ring).
+  const navLockRef = useRef(false);
 
   const fieldOrder = () =>
     [userRef.current, passRef.current, submitRef.current].filter(Boolean);
 
+  const clearBlurTimer = () => {
+    if (blurTimer.current) {
+      window.clearTimeout(blurTimer.current);
+      blurTimer.current = null;
+    }
+  };
+
   const openFieldIme = (el) => {
     if (!el || el.disabled) return;
+    navLockRef.current = false;
     imeOpenRef.current = true;
     setFocused(el, { native: false });
     openIme(el);
   };
 
-  // After IME hide / blur: single virtual ring on the same (or newly focused) field.
+  // After IME hide / blur: restore virtual ring ONLY if we didn't already move away.
   const onFieldBlur = (el) => {
-    if (blurTimer.current) window.clearTimeout(blurTimer.current);
+    clearBlurTimer();
     blurTimer.current = window.setTimeout(() => {
+      blurTimer.current = null;
+      imeOpenRef.current = false;
+      if (navLockRef.current) return;
+      // D-pad already parked the ring on another control — don't snap back.
+      const painted = getTvFocus();
+      if (painted && painted !== el) return;
       const active = document.activeElement;
       const stillInForm =
         active &&
         (active === userRef.current ||
           active === passRef.current ||
           active === submitRef.current);
-      imeOpenRef.current = false;
       if (stillInForm) {
         setFocused(active, { native: false });
         return;
       }
-      if (el && el.isConnected) {
-        try {
-          el.blur();
-        } catch {
-          /* ignore */
-        }
-        setFocused(el, { native: false });
-      }
+      if (el && el.isConnected) setFocused(el, { native: false });
     }, 80);
   };
 
   const onFieldFocus = (el) => {
-    if (blurTimer.current) window.clearTimeout(blurTimer.current);
+    clearBlurTimer();
+    navLockRef.current = false;
     setFocused(el, { native: false });
+  };
+
+  const moveTo = (next) => {
+    if (!next) return;
+    navLockRef.current = true;
+    clearBlurTimer();
+    imeOpenRef.current = false;
+    if (document.activeElement && isLoginInput(document.activeElement)) {
+      try {
+        document.activeElement.blur();
+      } catch {
+        /* ignore */
+      }
+    }
+    setFocused(next, { native: false });
+    // Keep lock briefly so a late blur from IME/Back can't yank the ring up.
+    window.setTimeout(() => {
+      navLockRef.current = false;
+    }, 200);
   };
 
   const onFieldKeyDown = (e, index) => {
@@ -76,7 +104,12 @@ export default function Login() {
       e.key === 'Accept' ||
       code === 13 ||
       code === 23;
-    const back = e.key === 'Escape' || e.key === 'Backspace' || code === 461 || code === 27 || code === 8;
+    const back =
+      e.key === 'Escape' ||
+      e.key === 'Backspace' ||
+      code === 461 ||
+      code === 27 ||
+      code === 8;
 
     const fields = fieldOrder();
     const current = fields[index];
@@ -84,13 +117,19 @@ export default function Login() {
     if (back && isLoginInput(current)) {
       e.preventDefault();
       e.stopPropagation();
+      // Close IME and keep ring on THIS field (not always Usuario).
+      clearBlurTimer();
+      navLockRef.current = true;
       imeOpenRef.current = false;
       try {
         current.blur();
       } catch {
         /* ignore */
       }
-      setFocused(userRef.current || current, { native: false });
+      setFocused(current, { native: false });
+      window.setTimeout(() => {
+        navLockRef.current = false;
+      }, 200);
       return;
     }
 
@@ -110,22 +149,10 @@ export default function Login() {
     const nextIndex = down
       ? Math.min(index + 1, fields.length - 1)
       : Math.max(index - 1, 0);
-    const next = fields[nextIndex];
-    if (!next) return;
-
-    imeOpenRef.current = false;
-    if (document.activeElement && isLoginInput(document.activeElement)) {
-      try {
-        document.activeElement.blur();
-      } catch {
-        /* ignore */
-      }
-    }
-    setFocused(next, { native: false });
+    moveTo(fields[nextIndex]);
   };
 
   useEffect(() => {
-    // Force exactly one cyan ring on Usuario at mount.
     const kick = () => setFocused(userRef.current, { native: false });
     const t1 = window.setTimeout(kick, 40);
     const t2 = window.setTimeout(() => {
@@ -134,7 +161,7 @@ export default function Login() {
     return () => {
       window.clearTimeout(t1);
       window.clearTimeout(t2);
-      if (blurTimer.current) window.clearTimeout(blurTimer.current);
+      clearBlurTimer();
     };
   }, []);
 
