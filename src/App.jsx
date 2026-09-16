@@ -7,6 +7,8 @@ import {
   useGlobalTvKeys,
   useAutoFocus,
   useFocusable,
+  openIme,
+  resolveEditable,
 } from './components/Focusable.jsx';
 import { getSession } from './lib/session.js';
 import Login from './screens/Login.jsx';
@@ -96,7 +98,13 @@ function AppShell() {
       const el =
         document.querySelector('.tv-focused') ||
         document.activeElement;
-      if (el && typeof el.click === 'function') el.click();
+      if (!el) return;
+      const editable = resolveEditable(el);
+      if (editable) {
+        openIme(editable);
+        return;
+      }
+      if (typeof el.click === 'function') el.click();
     },
   });
 

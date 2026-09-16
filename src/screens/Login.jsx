@@ -5,11 +5,11 @@ import { tryRestoreSession } from '../lib/xtream.js';
 import { t, getLang } from '../lib/i18n.js';
 import { useSession } from '../context/SessionContext.jsx';
 import { serverInfoLabel } from '../lib/accountText.js';
-import { setTvFocus, getTvFocus } from '../components/Focusable.jsx';
+import { setTvFocus, getTvFocus, openIme } from '../components/Focusable.jsx';
 
 // Login field chain for webOS D-pad: Usuario → Contraseña → Iniciar sesión.
-// When the IME closes it blurs the input and drops native focus; we restore the
-// VIRTUAL ring (without calling .focus() again, or the keyboard reopens).
+// Virtual cyan ring moves with arrows; OK calls openIme() so webOS shows the
+// native keyboard. On IME dismiss (blur) we restore virtual focus only.
 
 export default function Login() {
   const navigate = useNavigate();
@@ -24,6 +24,8 @@ export default function Login() {
   const passRef = useRef(null);
   const submitRef = useRef(null);
   const blurTimer = useRef(null);
+  // True while we intentionally opened the IME — blur then restores virtual ring.
+  const imeOpenRef = useRef(false);
 
   const fieldOrder = () =>
     [userRef.current, passRef.current, submitRef.current].filter(Boolean);
@@ -33,8 +35,13 @@ export default function Login() {
     setTvFocus(el, { native });
   };
 
-  // After IME hide / blur: if focus fell to body, keep cyan on the same field
-  // (or the next one if the user already moved). Never re-focus() natively here.
+  const openFieldIme = (el) => {
+    if (!el || el.disabled) return;
+    imeOpenRef.current = true;
+    openIme(el);
+  };
+
+  // After IME hide / blur: keep cyan on the same field (virtual only).
   const onFieldBlur = (el) => {
     if (blurTimer.current) window.clearTimeout(blurTimer.current);
     blurTimer.current = window.setTimeout(() => {
@@ -45,28 +52,54 @@ export default function Login() {
           active === passRef.current ||
           active === submitRef.current);
       if (stillInForm) {
-        // Another login control took native focus — mirror virtual ring.
+        imeOpenRef.current = false;
         paintField(active, { native: false });
         return;
       }
       // IME closed → body/html. Restore virtual selection on the blurred field.
-      if (el && el.isConnected) paintField(el, { native: false });
+      imeOpenRef.current = false;
+      if (el && el.isConnected) {
+        try {
+          el.blur();
+        } catch {
+          /* ignore */
+        }
+        paintField(el, { native: false });
+      }
     }, 80);
   };
 
   const onFieldFocus = (el) => {
     if (blurTimer.current) window.clearTimeout(blurTimer.current);
+    // Mirror ring; if focus came from OK/openIme keep imeOpen flag.
     paintField(el, { native: false });
   };
 
-  // Explicit Up/Down chain so Login never depends on spatial geometry alone.
+  // Up/Down: field chain. Enter/OK on inputs: open IME.
   const onFieldKeyDown = (e, index) => {
     const code = e.keyCode || e.which || 0;
     const down = e.key === 'ArrowDown' || e.key === 'Down' || code === 40;
     const up = e.key === 'ArrowUp' || e.key === 'Up' || code === 38;
-    if (!down && !up) return;
+    const enter =
+      e.key === 'Enter' ||
+      e.key === 'Select' ||
+      e.key === 'Accept' ||
+      code === 13 ||
+      code === 23;
 
     const fields = fieldOrder();
+    const current = fields[index];
+
+    if (enter && current && isLoginInput(current)) {
+      // If IME already has native focus, let the key type / confirm.
+      if (document.activeElement === current && imeOpenRef.current) return;
+      e.preventDefault();
+      e.stopPropagation();
+      openFieldIme(current);
+      return;
+    }
+
+    if (!down && !up) return;
     if (!fields.length) return;
     e.preventDefault();
     e.stopPropagation();
@@ -77,7 +110,7 @@ export default function Login() {
     const next = fields[nextIndex];
     if (!next) return;
 
-    // Leaving an input: blur so IME stays closed, then paint virtual ring.
+    imeOpenRef.current = false;
     if (document.activeElement && isLoginInput(document.activeElement)) {
       try {
         document.activeElement.blur();
@@ -89,7 +122,6 @@ export default function Login() {
   };
 
   useEffect(() => {
-    // Initial cyan ring on Usuario (virtual only — don't pop IME on mount).
     const t1 = window.setTimeout(() => paintField(userRef.current, { native: false }), 60);
     const t2 = window.setTimeout(() => {
       if (!getTvFocus()) paintField(userRef.current, { native: false });
@@ -102,7 +134,6 @@ export default function Login() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Auto-restore a saved session on mount; go straight to Home when valid.
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -126,7 +157,7 @@ export default function Login() {
     if (!u || !p) {
       setStatus({ text: t('login.empty'), kind: 'err' });
       const target = u ? passRef.current : userRef.current;
-      paintField(target, { native: true });
+      openFieldIme(target);
       return;
     }
     setBusy(true);
@@ -134,7 +165,7 @@ export default function Login() {
     const my = ++attemptRef.current;
     const result = await loginWithFailover(u, p);
 
-    if (my !== attemptRef.current) return; // superseded
+    if (my !== attemptRef.current) return;
     setBusy(false);
 
     if (result.ok) {
@@ -171,12 +202,17 @@ export default function Login() {
         <h1>{t('appName')}</h1>
         <p className="login-hint">{t('login.typeHint')}</p>
 
-        <label>
+        <label htmlFor="login-user">
           {t('login.username')}
           <input
+            id="login-user"
             ref={userRef}
+            type="text"
+            inputMode="text"
+            enterKeyHint="next"
             tabIndex={0}
             data-focusable="true"
+            data-input="true"
             data-login-field="user"
             value={username}
             onChange={(e) => setUsername(e.target.value)}
@@ -184,28 +220,41 @@ export default function Login() {
             onBlur={() => onFieldBlur(userRef.current)}
             onKeyDown={(e) => onFieldKeyDown(e, 0)}
             autoComplete="username"
-            autoFocus
+            autoCapitalize="none"
+            autoCorrect="off"
+            spellCheck={false}
+            readOnly={false}
             placeholder={t('login.pressOkType')}
             disabled={busy}
+            style={{ pointerEvents: 'auto' }}
           />
         </label>
 
-        <label>
+        <label htmlFor="login-pass">
           {t('login.password')}
           <input
+            id="login-pass"
             ref={passRef}
+            type="password"
+            inputMode="text"
+            enterKeyHint="done"
             tabIndex={0}
             data-focusable="true"
+            data-input="true"
             data-login-field="pass"
-            type="password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             onFocus={() => onFieldFocus(passRef.current)}
             onBlur={() => onFieldBlur(passRef.current)}
             onKeyDown={(e) => onFieldKeyDown(e, 1)}
             autoComplete="current-password"
+            autoCapitalize="none"
+            autoCorrect="off"
+            spellCheck={false}
+            readOnly={false}
             placeholder={t('login.pressOkType')}
             disabled={busy}
+            style={{ pointerEvents: 'auto' }}
           />
         </label>
 

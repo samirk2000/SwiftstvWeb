@@ -423,12 +423,82 @@ function arrowDirection(e) {
   return null;
 }
 
+/** Resolve the real editable control (input itself or nested input). */
+export function resolveEditable(el) {
+  if (!el) return null;
+  if (el.matches?.('input, textarea, select') || el.isContentEditable) return el;
+  if (el.dataset?.input === 'true' || el.getAttribute?.('data-input') === 'true') {
+    return el.querySelector?.('input, textarea') || el;
+  }
+  return el.querySelector?.('input:not([type="hidden"]), textarea') || null;
+}
+
+/**
+ * Open the platform IME on an input. webOS needs a real DOM focus() (and often
+ * a synthetic click); virtual tv-focused alone is not enough.
+ */
+export function openIme(el) {
+  const realInput = resolveEditable(el) || (isTypingTarget(el) ? el : null);
+  if (!realInput || realInput.disabled || realInput.readOnly) return false;
+
+  // Keep cyan ring on the editable while opening the keyboard.
+  setTvFocus(realInput, { native: false });
+
+  try {
+    realInput.focus();
+  } catch {
+    try {
+      realInput.focus({ preventScroll: false });
+    } catch {
+      /* continue with click / webOS API */
+    }
+  }
+
+  try {
+    if (typeof realInput.click === 'function') realInput.click();
+  } catch {
+    /* ignore */
+  }
+
+  try {
+    realInput.dispatchEvent(
+      new MouseEvent('click', { bubbles: true, cancelable: true, view: window })
+    );
+  } catch {
+    /* ignore */
+  }
+
+  // webOS TV keyboard API (present on device / simulator with webOS.js).
+  try {
+    const kb = window.webOS && window.webOS.keyboard;
+    if (kb && typeof kb.show === 'function') kb.show();
+  } catch {
+    /* ignore */
+  }
+  try {
+    // Legacy PalmSystem fallback some webOS builds still expose.
+    if (window.PalmSystem && typeof window.PalmSystem.keyboardShow === 'function') {
+      window.PalmSystem.keyboardShow(1);
+    }
+  } catch {
+    /* ignore */
+  }
+
+  return document.activeElement === realInput || realInput === getTvFocus();
+}
+
 function activate(el, onEnterRef) {
   const target = el || getTvFocus();
   if (!target) return;
-  if (isTypingTarget(target)) return;
+
+  // OK on an input / data-input host → open native IME (do not skip / click past it).
+  const editable = resolveEditable(target) || (isTypingTarget(target) ? target : null);
+  if (editable) {
+    openIme(editable);
+    return;
+  }
+
   if (typeof onEnterRef.current === 'function') {
-    // Prefer clicking the virtual target explicitly.
     if (typeof target.click === 'function') {
       target.click();
       return;
@@ -505,6 +575,7 @@ export function useGlobalTvKeys({ onEscape, onEnter } = {}) {
       }
 
       if (isEnterKey(e)) {
+        // Already typing in the IME — let the key reach the input / form.
         if (isTypingTarget(active) && document.activeElement === active) return;
         e.preventDefault();
         e.stopPropagation();

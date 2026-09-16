@@ -258,6 +258,9 @@ article.tile,
   color: var(--text);
   font-size: 18px;
   padding: 14px 16px;
+  pointer-events: auto;
+  -webkit-user-select: text;
+  user-select: text;
 }
 
 .login-card input:focus {
