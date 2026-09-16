@@ -6,7 +6,7 @@ import { usePanelList } from '../hooks/usePanelList.js';
 import { usePersistedCategory } from '../hooks/usePersistedCategory.js';
 import { isCategoryLocked } from '../lib/parental.js';
 import { isFavorite, toggleFavorite } from '../lib/session.js';
-import { useFocusable } from '../components/Focusable.jsx';
+import { useFocusable, FocusScope } from '../components/Focusable.jsx';
 import { formatEpgTime, currentProgramme, epochAtLocal, shortDayLabel } from '../lib/time.js';
 
 // Days offered by the catch-up manual selector (today + N days back).
@@ -46,6 +46,7 @@ function ChannelRow({ channel, index, active, onPlay, onCatchup, fav, onToggleFa
       <span className="channel-num">{index + 1}</span>
       <span className="channel-name">{channel.name}</span>
       <button
+        tabIndex={0}
         className={fav ? 'fav-btn fa' : 'fav-btn'}
         onClick={(e) => {
           e.stopPropagation();
@@ -57,6 +58,7 @@ function ChannelRow({ channel, index, active, onPlay, onCatchup, fav, onToggleFa
       </button>
       {channel.tv_archive === '1' && (
         <button
+          tabIndex={0}
           className="btn-ghost btn-xs"
           onClick={(e) => {
             e.stopPropagation();
@@ -175,11 +177,11 @@ function CatchupPanel({ channel, server, onPlayCatchup, onClose }) {
   };
 
   return (
-    <div className="catchup-panel">
+    <FocusScope trap autoFocus className="catchup-panel">
       <div className="catchup-head">
         <strong>{channel.name}</strong>
         <span className="hint">{t('live.catchupHint')}</span>
-        <button className="btn-ghost btn-xs" onClick={onClose}>
+        <button tabIndex={0} className="btn-ghost btn-xs" onClick={onClose}>
           ✕ {t('common.back')}
         </button>
       </div>
@@ -213,7 +215,7 @@ function CatchupPanel({ channel, server, onPlayCatchup, onClose }) {
             ))}
           </div>
         </div>
-        <button className="btn-primary btn-xs" onClick={playManual}>
+        <button tabIndex={0} className="btn-primary btn-xs" onClick={playManual}>
           ▶ {t('live.catchupAt')}
         </button>
       </div>
@@ -229,6 +231,7 @@ function CatchupPanel({ channel, server, onPlayCatchup, onClose }) {
           {(epg || []).map((p) => (
             <button
               key={`${p.id || p.stream_id}-${p.start}`}
+              tabIndex={0}
               className="epg-row"
               onClick={() => play(p)}
             >
@@ -238,7 +241,7 @@ function CatchupPanel({ channel, server, onPlayCatchup, onClose }) {
           ))}
         </div>
       )}
-    </div>
+    </FocusScope>
   );
 }
 
@@ -310,6 +313,7 @@ export default function LiveGuide() {
       </div>
 
       <input
+        tabIndex={0}
         className="search-box"
         placeholder={t('live.search')}
         value={query}
@@ -319,6 +323,7 @@ export default function LiveGuide() {
       {visibleCats && visibleCats.length > 0 && (
         <div className="cat-bar">
           <button
+            tabIndex={0}
             className={`cat-chip ${catId === '' ? 'selected' : ''}`}
             onClick={() => setCatId('')}
           >
@@ -327,6 +332,7 @@ export default function LiveGuide() {
           {visibleCats.map((cat) => (
             <button
               key={cat.category_id}
+              tabIndex={0}
               className={`cat-chip ${String(catId) === String(cat.category_id) ? 'selected' : ''}`}
               onClick={() => setCatId(String(cat.category_id))}
             >

@@ -45,7 +45,7 @@ export default function VodDetail() {
   return (
     <div>
       <div className="page-head">
-        <button className="back-btn" onClick={() => navigate(-1)}>
+        <button tabIndex={0} className="back-btn" onClick={() => navigate(-1)}>
           ← {t('common.back')}
         </button>
         <h1>{t('vod.info')}</h1>
@@ -70,10 +70,11 @@ export default function VodDetail() {
             <p>{meta?.plot || meta?.description || ''}</p>
             {meta?.genre ? <p className="badge">{meta.genre}</p> : null}
             <div className="detail-actions">
-              <button className="btn-primary" onClick={play}>
+              <button tabIndex={0} className="btn-primary" onClick={play}>
                 ▶ {t('vod.play')}
               </button>
               <button
+                tabIndex={0}
                 className={fav ? 'btn-ghost fav-on' : 'btn-ghost'}
                 onClick={() => {
                   const added = toggleFavorite({

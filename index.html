@@ -4,7 +4,16 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <meta name="theme-color" content="#0b0f16" />
+    <!-- webOS / Smart TV: keep focus visible for D-pad spatial navigation -->
+    <meta name="format-detection" content="telephone=no" />
     <title>Swiftstv</title>
+    <style>
+      /* Early focus ring before the bundle CSS loads (simulator / cold start). */
+      :focus, .tv-focused, .focused {
+        outline: 3px solid #00d1ff !important;
+        outline-offset: 3px;
+      }
+    </style>
   </head>
   <body>
     <div id="root"></div>

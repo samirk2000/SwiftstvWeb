@@ -107,7 +107,7 @@ export default function Exclusivos() {
     <div>
       <div className="page-head">
         <h1>{t('exclusivos.title')}</h1>
-        <button className="btn-ghost" onClick={() => load(true)}>
+        <button tabIndex={0} className="btn-ghost" onClick={() => load(true)}>
           ↻ {t('exclusivos.refresh')}
         </button>
       </div>

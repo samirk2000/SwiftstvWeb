@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { t } from '../lib/i18n.js';
 import { getContinueWatching, getFavorites, getSession, toggleFavorite } from '../lib/session.js';
@@ -25,9 +25,13 @@ function MenuItem({ to, icon, label, onNavigate, focus = false }) {
 export default function Home() {
   const navigate = useNavigate();
   const { session, langTick } = useSession();
-  // Bumped when we re-enter Home so continue-watching / favorites reflect the
-  // position/state saved by the player and detail screens.
+  // Bumped on mount / when returning so continue-watching / favorites refresh
+  // without stealing focus on every focus event (that broke D-pad nav).
   const [tick, setTick] = useState(0);
+
+  useEffect(() => {
+    setTick((x) => x + 1);
+  }, []);
 
   const continueRow = useMemo(() => {
     const list = getContinueWatching();
@@ -66,7 +70,7 @@ export default function Home() {
   };
 
   return (
-    <div onFocus={() => setTick((x) => x + 1)}>
+    <div>
       <div className="menu-grid">
         <MenuItem focus to="live" icon="📺" label={t('home.live')} onNavigate={() => go('/live')} />
         <MenuItem to="movies" icon="🎬" label={t('home.movies')} onNavigate={() => go('/vod')} />
@@ -83,8 +87,18 @@ export default function Home() {
           itemKey={(c) => `${c.type}-${c.id}`}
           renderItem={(c) => (
             <div className="cw-tile" key={`${c.type}-${c.id}`}>
-              <Tile title={c.title} poster={c.image} aspect="16/9" onActivate={() => openContinue(c)} />
-              <button className="btn-ghost btn-xs btn-resume" onClick={() => openContinue(c)}>
+              <Tile
+                focusKey={`cw-${c.type}-${c.id}`}
+                title={c.title}
+                poster={c.image}
+                aspect="16/9"
+                onActivate={() => openContinue(c)}
+              />
+              <button
+                tabIndex={0}
+                className="btn-ghost btn-xs btn-resume"
+                onClick={() => openContinue(c)}
+              >
                 ▶ {t('home.resume')}
               </button>
             </div>
@@ -100,12 +114,14 @@ export default function Home() {
           renderItem={(f) => (
             <div className="fav-tile" key={`${f.type}-${f.id}`}>
               <Tile
+                focusKey={`fav-${f.type}-${f.id}`}
                 title={f.title}
                 poster={f.image}
                 aspect="2/3"
                 onActivate={() => toFavorite(f)}
               />
               <button
+                tabIndex={0}
                 className="btn-ghost btn-xs fav-btn fa tile-fav"
                 onClick={(e) => {
                   e.stopPropagation();

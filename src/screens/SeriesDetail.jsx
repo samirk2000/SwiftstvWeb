@@ -81,7 +81,7 @@ export default function SeriesDetail() {
   return (
     <div>
       <div className="page-head">
-        <button className="back-btn" onClick={() => navigate(-1)}>
+        <button tabIndex={0} className="back-btn" onClick={() => navigate(-1)}>
           ← {t('common.back')}
         </button>
         <h1>{t('series.info')}</h1>
@@ -102,6 +102,7 @@ export default function SeriesDetail() {
               {meta.plot && <p>{meta.plot}</p>}
               <div className="detail-actions">
                 <button
+                  tabIndex={0}
                   className={fav ? 'btn-ghost fav-on' : 'btn-ghost'}
                   onClick={() => {
                     const added = toggleFavorite({
@@ -125,6 +126,7 @@ export default function SeriesDetail() {
             {seasonsList.map((s) => (
               <button
                 key={s.season_number}
+                tabIndex={0}
                 className={`cat-chip ${String(activeSeason) === String(s.season_number) ? 'selected' : ''}`}
                 onClick={() => setSeason(String(s.season_number))}
               >

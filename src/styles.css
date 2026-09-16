@@ -60,28 +60,80 @@ a {
   text-decoration: none;
 }
 
-/* ---------- Focus / keyboard ---------- */
-:focus {
-  outline: none;
+/* ---------- Focus / keyboard (webOS D-pad) ---------- */
+/* Cyan ring for native :focus AND virtual .tv-focused (webOS often refuses
+   programmatic focus() until a mouse click — virtual class fixes that). */
+:focus,
+.tv-focused,
+.focused {
+  outline: 3px solid var(--accent) !important;
+  outline-offset: 3px;
 }
 
-[tabindex]:focus-visible,
-.focused,
 button:focus,
+button.tv-focused,
+a:focus,
+a.tv-focused,
+input:focus,
+input.tv-focused,
+select:focus,
+textarea:focus,
+[tabindex]:focus,
+[tabindex].tv-focused,
+[data-focusable]:focus,
+.tile:focus,
+.tile.tv-focused,
+.tile.focused,
 article.tile:focus,
-.tile.focused {
-  outline: none;
+article.tile.tv-focused,
+.menu-item:focus,
+.menu-item.tv-focused,
+.cat-chip:focus,
+.cat-chip.tv-focused,
+.channel:focus,
+.channel.tv-focused,
+.episode:focus,
+.episode.tv-focused,
+.back-btn:focus,
+.back-btn.tv-focused,
+.lang-toggle:focus,
+.lang-toggle.tv-focused,
+.brand:focus,
+.brand.tv-focused,
+.fav-btn:focus,
+.fav-btn.tv-focused,
+.btn-primary:focus,
+.btn-primary.tv-focused,
+.btn-ghost:focus,
+.btn-ghost.tv-focused,
+.search-box:focus,
+.search-box.tv-focused,
+.unmute-hint:focus,
+.epg-row:focus,
+.epg-row.tv-focused {
+  outline: 3px solid var(--accent) !important;
+  outline-offset: 3px;
+  box-shadow: var(--focus-ring);
+  border-color: var(--accent);
 }
 
 article.tile:focus,
+article.tile.tv-focused,
 article.tile.focused,
-.row-scroll .tile:focus {
+.row-scroll .tile:focus,
+.row-scroll .tile.tv-focused,
+.tile:focus,
+.tile.tv-focused,
+.menu-item.tv-focused,
+.menu-item:focus {
   box-shadow: var(--focus-ring);
   border-color: var(--accent);
   transform: scale(1.04);
+  z-index: 2;
 }
 
-article.tile {
+article.tile,
+.tile {
   transition:
     transform 0.12s ease,
     box-shadow 0.12s ease,
@@ -93,10 +145,19 @@ article.tile {
   scroll-snap-align: start;
 }
 
-button:focus,
-.menu-item:focus,
-input:focus-visible {
-  box-shadow: var(--focus-ring);
+.screen-scope {
+  min-height: 0;
+}
+
+.focus-root {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+  flex: 1;
+}
+
+.brand {
+  cursor: pointer;
 }
 
 /* ---------- App shell ---------- */

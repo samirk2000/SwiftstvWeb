@@ -51,6 +51,7 @@ export default function VodGrid() {
       </div>
 
       <input
+        tabIndex={0}
         className="search-box"
         placeholder={t('vod.search')}
         value={query}
@@ -59,12 +60,13 @@ export default function VodGrid() {
 
       {visibleCats && visibleCats.length > 0 && (
         <div className="cat-bar">
-          <button className={`cat-chip ${catId === '' ? 'selected' : ''}`} onClick={() => setCatId('')}>
+          <button tabIndex={0} className={`cat-chip ${catId === '' ? 'selected' : ''}`} onClick={() => setCatId('')}>
             {t('live.all')}
           </button>
           {visibleCats.map((cat) => (
             <button
               key={cat.category_id}
+              tabIndex={0}
               className={`cat-chip ${String(catId) === String(cat.category_id) ? 'selected' : ''}`}
               onClick={() => setCatId(String(cat.category_id))}
             >

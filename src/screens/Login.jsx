@@ -92,9 +92,11 @@ export default function Login() {
           {t('login.username')}
           <input
             ref={userRef}
+            tabIndex={0}
             value={username}
             onChange={(e) => setUsername(e.target.value)}
             autoComplete="username"
+            autoFocus
             placeholder={t('login.pressOkType')}
             disabled={busy}
           />
@@ -104,6 +106,7 @@ export default function Login() {
           {t('login.password')}
           <input
             ref={passRef}
+            tabIndex={0}
             type="password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
@@ -114,7 +117,7 @@ export default function Login() {
         </label>
 
         <div className="login-actions">
-          <button ref={submitRef} type="submit" className="btn-primary" disabled={busy}>
+          <button ref={submitRef} tabIndex={0} type="submit" className="btn-primary" disabled={busy}>
             {t('login.signIn')}
           </button>
         </div>

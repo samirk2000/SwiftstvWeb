@@ -347,15 +347,20 @@ export default function Player() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [url, restart]);
 
-  // Auto-hide controls after inactivity.
+  // Auto-hide controls after inactivity. Any remote key reveals them again.
   useEffect(() => {
     const show = () => {
       setControlsVisible(true);
       clearTimeout(hideTimer.current);
-      hideTimer.current = setTimeout(() => setControlsVisible(false), 3000);
+      hideTimer.current = setTimeout(() => setControlsVisible(false), 4000);
     };
     show();
-    return () => clearTimeout(hideTimer.current);
+    const onKey = () => show();
+    window.addEventListener('keydown', onKey, true);
+    return () => {
+      clearTimeout(hideTimer.current);
+      window.removeEventListener('keydown', onKey, true);
+    };
   }, []);
 
   if (error || !url) {
@@ -367,6 +372,7 @@ export default function Player() {
         </div>
         {error && (
           <button
+            tabIndex={0}
             className="btn-ghost"
             style={{ position: 'absolute', bottom: 96, left: '50%', transform: 'translateX(-50%)' }}
             onClick={() => {
@@ -384,6 +390,7 @@ export default function Player() {
           </button>
         )}
         <button
+          tabIndex={0}
           className="btn-ghost"
           style={{ position: 'absolute', top: 24, left: 24 }}
           onClick={() => navigate(-1)}
@@ -415,6 +422,7 @@ export default function Player() {
           <div className="spinner" />
           <span>{t('player.buffering')}</span>
           <button
+            tabIndex={0}
             className="btn-ghost"
             onClick={() => {
               setStarted(false);
@@ -428,6 +436,7 @@ export default function Player() {
       )}
       {mutedHint && started && (
         <button
+          tabIndex={0}
           className="unmute-hint"
           onClick={() => {
             const v = videoRef.current;
@@ -449,11 +458,11 @@ export default function Player() {
       )}
       {controlsVisible && (
         <div className="player-controls">
-          <button className="back-btn" onClick={() => navigate(-1)}>
+          <button tabIndex={0} className="back-btn" onClick={() => navigate(-1)}>
             ← {t('common.back')}
           </button>
           <span className="player-title">{title}</span>
-          <button className="btn-ghost" onClick={() => togglePip(videoRef.current)}>
+          <button tabIndex={0} className="btn-ghost" onClick={() => togglePip(videoRef.current)}>
             PiP
           </button>
         </div>

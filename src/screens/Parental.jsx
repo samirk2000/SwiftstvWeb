@@ -15,10 +15,12 @@ import { useFocusable } from '../components/Focusable.jsx';
 
 // A focusable toggle chip that adds/removes a category id from the blocked set.
 function BlockChip({ cat, blocked, onToggle }) {
-  const { ref, tabIndex } = useFocusable(`par-cat-${cat.category_id}-${blocked}`, false);
+  const { ref, tabIndex } = useFocusable(`par-cat-${cat.category_id}`);
   const on = blocked.has(String(cat.category_id));
   return (
     <button
+      ref={ref}
+      tabIndex={tabIndex}
       className={`cat-chip ${on ? 'selected' : ''}`}
       onClick={() => onToggle(cat)}
     >
@@ -129,7 +131,7 @@ export default function Parental() {
   return (
     <div>
       <div className="page-head">
-        <button className="back-btn" onClick={() => navigate(-1)}>
+        <button tabIndex={0} className="back-btn" onClick={() => navigate(-1)}>
           ← {t('common.back')}
         </button>
         <h1>{t('home.parental')}</h1>
@@ -139,7 +141,7 @@ export default function Parental() {
 
       {!activeProfile && !showForm ? (
         <div className="parental-card">
-          <button className="btn-primary" onClick={() => setShowForm(true)}>
+          <button tabIndex={0} className="btn-primary" onClick={() => setShowForm(true)}>
             {t('parental.setPin')}
           </button>
         </div>
@@ -151,6 +153,7 @@ export default function Parental() {
             {t('parental.profile')}: <strong>{activeProfile.name}</strong>
           </p>
           <input
+            tabIndex={0}
             className="search-box pin-input"
             type="password"
             inputMode="numeric"
@@ -158,10 +161,11 @@ export default function Parental() {
             value={unlockKey}
             onChange={(e) => setUnlockKey(e.target.value)}
           />
-          <button className="btn-ghost" onClick={verifyUnlock}>
+          <button tabIndex={0} className="btn-ghost" onClick={verifyUnlock}>
             {t('parental.edit')}
           </button>
           <button
+            tabIndex={0}
             className="btn-ghost"
             onClick={() => {
               setActiveProfile('');
@@ -176,6 +180,7 @@ export default function Parental() {
       {showForm && (
         <div className="parental-card">
           <input
+            tabIndex={0}
             className="search-box pin-input"
             type="password"
             inputMode="numeric"
@@ -184,6 +189,7 @@ export default function Parental() {
             onChange={(e) => setPin(e.target.value)}
           />
           <input
+            tabIndex={0}
             className="search-box pin-input"
             type="password"
             inputMode="numeric"
@@ -192,15 +198,16 @@ export default function Parental() {
             onChange={(e) => setConfirmPin(e.target.value)}
           />
           <div className="detail-actions">
-            <button className="btn-primary" onClick={savePin}>
+            <button tabIndex={0} className="btn-primary" onClick={savePin}>
               {t('parental.save')}
             </button>
-            <button className="btn-ghost" onClick={() => setShowForm(false)}>
+            <button tabIndex={0} className="btn-ghost" onClick={() => setShowForm(false)}>
               {t('common.back')}
             </button>
           </div>
           {activeProfile && (
             <button
+              tabIndex={0}
               className="btn-ghost"
               onClick={() => {
                 if (activeProfile) deleteProfile(activeProfile.id);
@@ -221,7 +228,7 @@ export default function Parental() {
       {activeProfile && showForm && (
         <>
           <h2 className="row-title">{t('parental.blockedCategories')}</h2>
-          <button className="btn-ghost" onClick={unlockAll}>
+          <button tabIndex={0} className="btn-ghost" onClick={unlockAll}>
             {t('parental.unlockAll')}
           </button>
           <div className="cat-bar wrap">

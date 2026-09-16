@@ -19,8 +19,9 @@ export function Poster({ src, title, style }) {
 }
 
 // A navigation target for cards. Renders an article with onclick + spatial focus.
+// NOTE: never name a prop `key` — React strips it. Use `focusKey` instead.
 export function Tile({
-  key,
+  focusKey,
   title,
   poster,
   meta,
@@ -29,7 +30,7 @@ export function Tile({
   style,
   aspect = '16/9',
 }) {
-  const { ref, tabIndex } = useFocusable(key);
+  const { ref, tabIndex } = useFocusable(focusKey || title || 'tile');
   return (
     <article
       ref={ref}
@@ -39,6 +40,12 @@ export function Tile({
       onMouseEnter={() => ref.current && ref.current.focus()}
       onFocus={onFocus}
       onClick={onActivate}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' && onActivate) {
+          e.preventDefault();
+          onActivate();
+        }
+      }}
     >
       <div className="tile-art">
         <Poster src={poster} title={title} />

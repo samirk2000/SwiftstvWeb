@@ -1,108 +1,336 @@
-// Lightweight TV focus model without any dependency.
+// Global TV remote / D-pad focus for webOS / Tizen / Android TV / Vidaa.
 //
-// We use real DOM focus targets + spatial navigation. A single app-level
-// handler (useGlobalTvKeys) drives arrow-key / D-pad movement between
-// registered nodes and Enter / OK activation. Robust across LG/Samsung/Sony/
-// HISENSE browser engines. Text inputs are excluded from spatial nav while
-// focused so typing works on Login.
+// webOS often IGNORES programmatic element.focus() until the page has had a
+// mouse click. So we drive a VIRTUAL focus ring (class "tv-focused") that does
+// not depend on document.activeElement. Arrow keys move that ring; OK clicks it.
+// Native .focus() is still attempted as a best-effort for inputs / a11y.
 
 import {
-  Fragment,
   createContext,
   useCallback,
   useContext,
   useEffect,
+  useId,
   useMemo,
   useRef,
-  useState,
 } from 'react';
+
+/** LG webOS Back button */
+export const LG_BACK_KEYCODE = 461;
+/** Android TV / some remotes DPAD_CENTER */
+const DPAD_CENTER = 23;
+
+const TV_FOCUSED = 'tv-focused';
+
+const FOCUSABLE_SELECTOR = [
+  'button:not([disabled])',
+  'a[href]',
+  'input:not([disabled]):not([type="hidden"])',
+  'select:not([disabled])',
+  'textarea:not([disabled])',
+  '[tabindex]:not([tabindex="-1"])',
+  '[data-focusable="true"]',
+  'article.tile',
+  '.tile',
+  '.channel',
+  '.episode',
+  '.menu-item',
+  '.cat-chip',
+  '.brand[role="button"]',
+].join(',');
+
+const STAMP_SELECTOR =
+  'button, a[href], input:not([type="hidden"]), select, textarea, article.tile, .tile, .channel, .episode, .menu-item, .cat-chip, .back-btn, .fav-btn, .brand[role="button"], [role="button"]';
 
 const FocusCtx = createContext(null);
 
-export function FocusRoot({ children }) {
-  const nodes = useRef(new Map());
-  const [enabled, setEnabled] = useState(true);
+/** Module-level virtual cursor — survives React re-renders, works without native focus. */
+let virtualEl = null;
 
-  const register = useCallback((key, el) => {
-    nodes.current.set(key, el);
-  }, []);
-  const unregister = useCallback((key) => {
-    nodes.current.delete(key);
-  }, []);
-
-  const ctx = useMemo(
-    () => ({ nodes: nodes.current, enabled }),
-    [enabled]
-  );
-
-  return <FocusCtx.Provider value={ctx}>{children}</FocusCtx.Provider>;
+function isVisible(el) {
+  if (!el || !el.isConnected) return false;
+  if (el.getAttribute('aria-hidden') === 'true') return false;
+  if (el.disabled) return false;
+  const style = window.getComputedStyle(el);
+  if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) {
+    return false;
+  }
+  const r = el.getBoundingClientRect();
+  return r.width > 0 && r.height > 0;
 }
 
-export function useFocusContext() {
-  return useContext(FocusCtx);
-}
-
-function isTypingTarget(el) {
+export function isTypingTarget(el) {
+  if (!el) return false;
+  const tag = el.tagName;
   return (
-    el &&
-    (el.tagName === 'INPUT' ||
-      el.tagName === 'TEXTAREA' ||
-      el.tagName === 'SELECT' ||
-      el.isContentEditable)
+    tag === 'INPUT' ||
+    tag === 'TEXTAREA' ||
+    tag === 'SELECT' ||
+    el.isContentEditable === true
   );
 }
 
-// Spatial navigation: find the best candidate in the requested direction.
-function nearest(dx, dy, fromRect, candidateEls) {
+export function queryFocusables(root) {
+  const scope = root && root.querySelectorAll ? root : document;
+  const list = Array.from(scope.querySelectorAll(FOCUSABLE_SELECTOR));
+  const seen = new Set();
+  const out = [];
+  for (const el of list) {
+    if (seen.has(el)) continue;
+    seen.add(el);
+    if (!isVisible(el)) continue;
+    out.push(el);
+  }
+  return out;
+}
+
+function clearVirtualClass() {
+  document.querySelectorAll(`.${TV_FOCUSED}`).forEach((n) => {
+    n.classList.remove(TV_FOCUSED);
+    n.classList.remove('focused');
+  });
+}
+
+/** Set the virtual (and best-effort native) focus. Always paints the cyan ring. */
+export function setTvFocus(el) {
+  if (!el || !el.isConnected) return false;
+  clearVirtualClass();
+  virtualEl = el;
+  el.classList.add(TV_FOCUSED);
+  el.classList.add('focused');
+  try {
+    el.focus({ preventScroll: true });
+  } catch {
+    try {
+      el.focus();
+    } catch {
+      /* webOS may refuse — virtual ring still works */
+    }
+  }
+  if (typeof el.scrollIntoView === 'function') {
+    try {
+      el.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
+    } catch {
+      try {
+        el.scrollIntoView(false);
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+  return true;
+}
+
+export function getTvFocus() {
+  if (virtualEl && virtualEl.isConnected) return virtualEl;
+  const painted = document.querySelector(`.${TV_FOCUSED}`);
+  if (painted) {
+    virtualEl = painted;
+    return painted;
+  }
+  const active = document.activeElement;
+  if (active && active !== document.body && active !== document.documentElement) {
+    return active;
+  }
+  return null;
+}
+
+export function focusElement(el) {
+  return setTvFocus(el);
+}
+
+/** Prefer main content controls over the topbar brand on first paint. */
+export function focusFirst(root) {
+  const scope = root && root.querySelectorAll ? root : document;
+  const preferred =
+    scope.querySelector?.('.menu-item') ||
+    scope.querySelector?.('.content button, .content [tabindex="0"], .content input') ||
+    null;
+  if (preferred && isVisible(preferred)) {
+    setTvFocus(preferred);
+    return preferred;
+  }
+  const list = queryFocusables(scope);
+  if (!list.length) return null;
+  setTvFocus(list[0]);
+  return list[0];
+}
+
+function stampTabIndex(root) {
+  const scope = root && root.querySelectorAll ? root : document.body;
+  if (!scope) return;
+  scope.querySelectorAll(STAMP_SELECTOR).forEach((el) => {
+    if (el.hasAttribute('tabindex')) return;
+    if (el.disabled) return;
+    el.setAttribute('tabindex', '0');
+  });
+}
+
+function centerOf(rect) {
+  return {
+    x: rect.left + rect.width / 2,
+    y: rect.top + rect.height / 2,
+  };
+}
+
+export function nearest(dx, dy, fromRect, candidates) {
+  const from = centerOf(fromRect);
   let best = null;
   let bestScore = Infinity;
-  for (const el of candidateEls) {
+
+  for (const el of candidates) {
     if (!el) continue;
     const r = el.getBoundingClientRect();
-    const fromCx = fromRect.left + fromRect.width / 2;
-    const fromCy = fromRect.top + fromRect.height / 2;
-    const cdx = r.left + r.width / 2 - fromCx;
-    const cdy = r.top + r.height / 2 - fromCy;
+    if (r.width <= 0 || r.height <= 0) continue;
+    const c = centerOf(r);
+    const cdx = c.x - from.x;
+    const cdy = c.y - from.y;
 
-    if (dx === 1 && cdx <= 0) continue;
-    if (dx === -1 && cdx >= 0) continue;
-    if (dy === 1 && cdy <= 0) continue;
-    if (dy === -1 && cdy >= 0) continue;
+    if (dx === 1 && r.left < fromRect.right - 4 && cdx <= 0) continue;
+    if (dx === -1 && r.right > fromRect.left + 4 && cdx >= 0) continue;
+    if (dy === 1 && r.top < fromRect.bottom - 4 && cdy <= 0) continue;
+    if (dy === -1 && r.bottom > fromRect.top + 4 && cdy >= 0) continue;
 
-    const perpendicular =
-      dx !== 0 ? Math.abs(r.top + r.height / 2 - fromCy) : Math.abs(r.left + r.width / 2 - fromCx);
-    const dist = Math.hypot(cdx, cdy) + perpendicular * 2;
-    if (dist < bestScore) {
-      bestScore = dist;
+    if (dx !== 0 && Math.abs(cdx) < 2) continue;
+    if (dy !== 0 && Math.abs(cdy) < 2) continue;
+
+    const primary = dx !== 0 ? Math.abs(cdx) : Math.abs(cdy);
+    const secondary = dx !== 0 ? Math.abs(cdy) : Math.abs(cdx);
+    const score = primary + secondary * 2.5;
+    if (score < bestScore) {
+      bestScore = score;
       best = el;
     }
   }
   return best;
 }
 
-// Register an element as a nav target. A single disabled element prevents auto
-// focus while typing but stays out of the movement ring.
+function getActiveScope(stackRef) {
+  const stack = stackRef?.current;
+  if (stack && stack.length) {
+    for (let i = stack.length - 1; i >= 0; i -= 1) {
+      const entry = stack[i];
+      if (entry?.trap && entry.el?.isConnected) return entry.el;
+    }
+  }
+  return (
+    document.querySelector('.app-shell') ||
+    document.querySelector('.content') ||
+    document.getElementById('root') ||
+    document.body
+  );
+}
+
+export function FocusRoot({ children }) {
+  const nodes = useRef(new Map());
+  const scopeStack = useRef([]);
+  const rootRef = useRef(null);
+
+  const register = useCallback((key, el) => {
+    if (key && el) nodes.current.set(key, el);
+  }, []);
+  const unregister = useCallback((key) => {
+    if (key) nodes.current.delete(key);
+  }, []);
+
+  const pushScope = useCallback((el, trap = false) => {
+    if (!el) return;
+    scopeStack.current = scopeStack.current.filter((n) => n.el && n.el.isConnected);
+    scopeStack.current.push({ el, trap: Boolean(trap) });
+  }, []);
+  const popScope = useCallback((el) => {
+    scopeStack.current = scopeStack.current.filter((n) => n.el !== el && n.el && n.el.isConnected);
+  }, []);
+
+  useEffect(() => {
+    const root = rootRef.current || document.getElementById('root') || document.body;
+    stampTabIndex(root);
+
+    // Paint a default selection ASAP (and retry — login restore remounts late).
+    const tryFocus = () => {
+      const cur = getTvFocus();
+      if (cur && isVisible(cur)) return;
+      focusFirst(document.querySelector('.content') || root);
+    };
+    const timers = [0, 80, 250, 600, 1200].map((ms) => window.setTimeout(tryFocus, ms));
+
+    const mo = new MutationObserver(() => {
+      stampTabIndex(root);
+      // If virtual target was unmounted, pick a new one.
+      if (!getTvFocus()) tryFocus();
+    });
+    mo.observe(root, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['class', 'disabled', 'hidden'],
+    });
+
+    // Keep virtual ring in sync when mouse / touch focuses something.
+    const onFocusIn = (e) => {
+      const t = e.target;
+      if (t && t !== document.body && t !== document.documentElement) {
+        if (t.matches?.(FOCUSABLE_SELECTOR) || t.closest?.('[tabindex]')) {
+          clearVirtualClass();
+          virtualEl = t;
+          t.classList.add(TV_FOCUSED);
+          t.classList.add('focused');
+        }
+      }
+    };
+    document.addEventListener('focusin', onFocusIn, true);
+
+    return () => {
+      timers.forEach((id) => window.clearTimeout(id));
+      mo.disconnect();
+      document.removeEventListener('focusin', onFocusIn, true);
+    };
+  }, []);
+
+  const ctx = useMemo(
+    () => ({
+      nodes,
+      register,
+      unregister,
+      pushScope,
+      popScope,
+      scopeStack,
+    }),
+    [register, unregister, pushScope, popScope]
+  );
+
+  return (
+    <FocusCtx.Provider value={ctx}>
+      <div ref={rootRef} className="focus-root">
+        {children}
+      </div>
+    </FocusCtx.Provider>
+  );
+}
+
+export function useFocusContext() {
+  return useContext(FocusCtx);
+}
+
 export function useFocusable(key, enabled = true) {
-  // Guard against a missing FocusCtx provider so a bare hook invocation fails
-  // predictably instead of peeling a cryptic "t is not a function" out of the
-  // minified bundle.
   const focusCtx = useFocusContext();
-  const register = focusCtx ? focusCtx.register : undefined;
-  const unregister = focusCtx ? focusCtx.unregister : undefined;
-  const ringEnabled = focusCtx ? focusCtx.enabled : true;
+  const register = focusCtx?.register;
+  const unregister = focusCtx?.unregister;
   const ref = useRef(null);
+  const reactId = useId();
+  const focusKey = key || reactId;
 
   useEffect(() => {
     if (!enabled) return undefined;
     const el = ref.current;
     if (!el) return undefined;
-    const k = key || el.id || null;
-    if (!k) return undefined;
-    if (!register) return undefined; // no FocusRoot provider
-    el.dataset.focusKey = k;
-    register(k, el);
-    return () => { if (unregister) unregister(k); };
-  }, [key, enabled, register, unregister, ringEnabled]);
+    if (el.tabIndex < 0) el.tabIndex = 0;
+    el.dataset.focusKey = String(focusKey);
+    if (register) register(String(focusKey), el);
+    return () => {
+      if (unregister) unregister(String(focusKey));
+    };
+  }, [focusKey, enabled, register, unregister]);
 
   return {
     ref,
@@ -110,9 +338,104 @@ export function useFocusable(key, enabled = true) {
   };
 }
 
-// Global key handling for arrows + Enter + Escape. Attach once at the app root.
-export function useGlobalTvKeys({ onEscape, onEnter }) {
-  const { nodes } = useFocusContext();
+export function FocusScope({ children, trap = true, autoFocus = true, className, as: Comp = 'div' }) {
+  const ref = useRef(null);
+  const ctx = useFocusContext();
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el || !ctx) return undefined;
+    ctx.pushScope(el, trap);
+    let timer;
+    if (autoFocus) {
+      timer = window.setTimeout(() => focusFirst(el), 40);
+    }
+    return () => {
+      if (timer) window.clearTimeout(timer);
+      ctx.popScope(el);
+    };
+  }, [ctx, autoFocus, trap]);
+
+  return (
+    <Comp ref={ref} className={className} data-focus-scope={trap ? 'trap' : 'soft'}>
+      {children}
+    </Comp>
+  );
+}
+
+export function useAutoFocus(deps = [], rootSelector) {
+  useEffect(() => {
+    let cancelled = false;
+    const run = () => {
+      if (cancelled) return;
+      const root = rootSelector
+        ? document.querySelector(rootSelector)
+        : document.querySelector('.content') || document.getElementById('root');
+      // Always re-assert virtual focus on route change (prefer content, not topbar).
+      const content = document.querySelector('.content') || root;
+      focusFirst(content || root || document);
+    };
+    const timers = [30, 120, 400].map((ms) => window.setTimeout(run, ms));
+    return () => {
+      cancelled = true;
+      timers.forEach((id) => window.clearTimeout(id));
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, deps);
+}
+
+function isBackKey(e) {
+  const code = e.keyCode || e.which || 0;
+  return (
+    e.key === 'Escape' ||
+    e.key === 'Backspace' ||
+    e.key === 'BrowserBack' ||
+    e.key === 'GoBack' ||
+    code === LG_BACK_KEYCODE ||
+    code === 27 ||
+    code === 8
+  );
+}
+
+function isEnterKey(e) {
+  const code = e.keyCode || e.which || 0;
+  return (
+    e.key === 'Enter' ||
+    e.key === 'Select' ||
+    e.key === 'Accept' ||
+    code === 13 ||
+    code === DPAD_CENTER
+  );
+}
+
+function arrowDirection(e) {
+  const code = e.keyCode || e.which || 0;
+  // Arrow keys + webOS / legacy keyCodes + some Tizen variants
+  if (e.key === 'ArrowUp' || e.key === 'Up' || code === 38) return { dx: 0, dy: -1 };
+  if (e.key === 'ArrowDown' || e.key === 'Down' || code === 40) return { dx: 0, dy: 1 };
+  if (e.key === 'ArrowLeft' || e.key === 'Left' || code === 37) return { dx: -1, dy: 0 };
+  if (e.key === 'ArrowRight' || e.key === 'Right' || code === 39) return { dx: 1, dy: 0 };
+  return null;
+}
+
+function activate(el, onEnterRef) {
+  const target = el || getTvFocus();
+  if (!target) return;
+  if (isTypingTarget(target)) return;
+  if (typeof onEnterRef.current === 'function') {
+    // Prefer clicking the virtual target explicitly.
+    if (typeof target.click === 'function') {
+      target.click();
+      return;
+    }
+    onEnterRef.current();
+    return;
+  }
+  if (typeof target.click === 'function') target.click();
+}
+
+export function useGlobalTvKeys({ onEscape, onEnter } = {}) {
+  const ctx = useFocusContext();
   const onEscapeRef = useRef(onEscape);
   const onEnterRef = useRef(onEnter);
 
@@ -121,78 +444,80 @@ export function useGlobalTvKeys({ onEscape, onEnter }) {
     onEnterRef.current = onEnter;
   }, [onEscape, onEnter]);
 
-  const moveRef = useRef({ dx: 0, dy: 0 });
-  moveRef.current = { dx: 0, dy: 0 };
-
-  const navigate = useCallback(
-    (dx, dy) => {
-      const from = document.activeElement;
-      if (!from) return;
-      if (isTypingTarget(from)) return; // let text fields keep their arrows
-      const rect = from.getBoundingClientRect();
-      const target = nearest(dx, dy, rect, nodes.current.values());
-      if (!target) return;
-      target.focus();
-      target.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' });
-    },
-    [nodes]
-  );
-
-  const activate = useCallback(() => {
-    const el = document.activeElement;
-    if (el && !isTypingTarget(el) && typeof el.click === 'function') {
-      el.click();
-    } else if (typeof onEnterRef.current === 'function') {
-      onEnterRef.current();
-    }
-  }, []);
-
   useEffect(() => {
-    const handler = (e) => {
-      const target = document.activeElement;
-      switch (e.key) {
-        case 'ArrowUp':
+    const handle = (e) => {
+      // Only react once per physical key (keydown). Ignore repeats from keyup
+      // listeners or bubbled duplicates.
+      if (e.type !== 'keydown') return;
+      if (e._tvNavHandled) return;
+      e._tvNavHandled = true;
+
+      if ((e.ctrlKey || e.metaKey || e.altKey) && !isBackKey(e)) return;
+
+      const scope = getActiveScope(ctx?.scopeStack);
+      const list = queryFocusables(scope);
+      let active = getTvFocus();
+
+      // No painted selection yet → put one on the first control BEFORE moving.
+      if (!active || !list.includes(active)) {
+        const seed =
+          list.find((el) => el.classList?.contains('menu-item')) ||
+          list[0] ||
+          null;
+        if (seed) {
+          setTvFocus(seed);
+          active = seed;
+        }
+      }
+
+      const dir = arrowDirection(e);
+      if (dir) {
+        if (isTypingTarget(active) && document.activeElement === active) {
+          return; // caret in input
+        }
+        e.preventDefault();
+        e.stopPropagation();
+        if (!active) {
+          focusFirst(scope);
+          return;
+        }
+        // First arrow with no prior neighbour move: if we JUST seeded focus on
+        // this same event, stay on seed (so user sees the ring) unless they
+        // already had a selection.
+        const fromRect = active.getBoundingClientRect();
+        const candidates = list.filter((el) => el !== active);
+        const target = nearest(dir.dx, dir.dy, fromRect, candidates);
+        if (target) setTvFocus(target);
+        return;
+      }
+
+      if (isEnterKey(e)) {
+        if (isTypingTarget(active) && document.activeElement === active) return;
+        e.preventDefault();
+        e.stopPropagation();
+        activate(active, onEnterRef);
+        return;
+      }
+
+      if (isBackKey(e)) {
+        if (isTypingTarget(active) && document.activeElement === active) {
+          active.blur();
           e.preventDefault();
-          navigate(0, -1);
-          break;
-        case 'ArrowDown':
+          e.stopPropagation();
+          focusFirst(scope);
+          return;
+        }
+        if (typeof onEscapeRef.current === 'function') {
           e.preventDefault();
-          navigate(0, 1);
-          break;
-        case 'ArrowLeft':
-          e.preventDefault();
-          navigate(-1, 0);
-          break;
-        case 'ArrowRight':
-          e.preventDefault();
-          navigate(1, 0);
-          break;
-        case 'Enter':
-          if (isTypingTarget(target)) return; // native form submit
-          e.preventDefault();
-          if (typeof onEnterRef.current === 'function') {
-            onEnterRef.current();
-          } else {
-            activate();
-          }
-          break;
-        case 'Escape':
-        case 'Backspace':
-          if (isTypingTarget(target)) {
-            target.blur();
-            e.preventDefault();
-          } else if (typeof onEscapeRef.current === 'function') {
-            e.preventDefault();
-            onEscapeRef.current();
-          }
-          break;
-        default:
-          break;
+          e.stopPropagation();
+          onEscapeRef.current();
+        }
       }
     };
-    window.addEventListener('keydown', handler);
-    return () => window.removeEventListener('keydown', handler);
-  }, [navigate, activate]);
 
-  return { navigate, activate };
+    window.addEventListener('keydown', handle, true);
+    return () => {
+      window.removeEventListener('keydown', handle, true);
+    };
+  }, [ctx]);
 }

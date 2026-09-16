@@ -1,7 +1,13 @@
 import { BrowserRouter, Navigate, Route, Routes, useNavigate, useLocation } from 'react-router-dom';
 import { useEffect } from 'react';
 import { SessionProvider, useSession } from './context/SessionContext.jsx';
-import { FocusRoot, useGlobalTvKeys } from './components/Focusable.jsx';
+import {
+  FocusRoot,
+  FocusScope,
+  useGlobalTvKeys,
+  useAutoFocus,
+  useFocusable,
+} from './components/Focusable.jsx';
 import { getSession } from './lib/session.js';
 import Login from './screens/Login.jsx';
 import Home from './screens/Home.jsx';
@@ -20,18 +26,38 @@ function TopBar() {
   const navigate = useNavigate();
   const location = useLocation();
   const isPlayer = location.pathname === '/player';
+  const brand = useFocusable('top-brand');
+  const langBtn = useFocusable('top-lang');
+  const logoutBtn = useFocusable('top-logout');
+
   if (isPlayer) return null;
 
   return (
     <header className="topbar">
-      <div className="brand" onClick={() => navigate('/')}>
+      <div
+        ref={brand.ref}
+        tabIndex={brand.tabIndex}
+        role="button"
+        className="brand"
+        onClick={() => navigate('/')}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') navigate('/');
+        }}
+      >
         Swift<em>tv</em>
       </div>
       <div className="topbar-actions">
-        <button className="lang-toggle" onClick={toggleLanguage}>
+        <button
+          ref={langBtn.ref}
+          tabIndex={langBtn.tabIndex}
+          className="lang-toggle"
+          onClick={toggleLanguage}
+        >
           {lang === 'es' ? 'ES' : 'EN'}
         </button>
         <button
+          ref={logoutBtn.ref}
+          tabIndex={logoutBtn.tabIndex}
           className="btn-ghost"
           onClick={() => {
             logout();
@@ -45,7 +71,6 @@ function TopBar() {
   );
 }
 
-// Only allow access to inner screens with an active/live-saved session.
 function RequireSession({ children }) {
   const { session } = useSession();
   const saved = getSession();
@@ -57,14 +82,20 @@ function RequireSession({ children }) {
 
 function AppShell() {
   const navigate = useNavigate();
+  const location = useLocation();
 
-  // Global TV keys. Escape/Back pops history; Enter activates focus.
+  // Reclaim / move focus whenever the route changes (Settings, Live, modals-as-pages…).
+  useAutoFocus([location.pathname, location.search], '.app-shell');
+
   useGlobalTvKeys({
     onEscape: () => {
-      if (window.location.pathname !== '/login') navigate(-1);
+      if (window.location.pathname === '/login') return;
+      navigate(-1);
     },
     onEnter: () => {
-      const el = document.activeElement;
+      const el =
+        document.querySelector('.tv-focused') ||
+        document.activeElement;
       if (el && typeof el.click === 'function') el.click();
     },
   });
@@ -73,90 +104,92 @@ function AppShell() {
     <div className="app-shell">
       <TopBar />
       <main className="content">
-        <Routes>
-          <Route path="/login" element={<Login />} />
-          <Route
-            path="/"
-            element={
-              <RequireSession>
-                <Home />
-              </RequireSession>
-            }
-          />
-          <Route
-            path="/live"
-            element={
-              <RequireSession>
-                <LiveGuide />
-              </RequireSession>
-            }
-          />
-          <Route
-            path="/vod"
-            element={
-              <RequireSession>
-                <VodGrid />
-              </RequireSession>
-            }
-          />
-          <Route
-            path="/vod/:id"
-            element={
-              <RequireSession>
-                <VodDetail />
-              </RequireSession>
-            }
-          />
-          <Route
-            path="/series"
-            element={
-              <RequireSession>
-                <SeriesList />
-              </RequireSession>
-            }
-          />
-          <Route
-            path="/series/:id"
-            element={
-              <RequireSession>
-                <SeriesDetail />
-              </RequireSession>
-            }
-          />
-          <Route
-            path="/player"
-            element={
-              <RequireSession>
-                <Player />
-              </RequireSession>
-            }
-          />
-          <Route
-            path="/exclusivos"
-            element={
-              <RequireSession>
-                <Exclusivos />
-              </RequireSession>
-            }
-          />
-          <Route
-            path="/parental"
-            element={
-              <RequireSession>
-                <Parental />
-              </RequireSession>
-            }
-          />
-          <Route
-            path="/settings"
-            element={
-              <RequireSession>
-                <Settings />
-              </RequireSession>
-            }
-          />
-          <Route path="*" element={<Navigate to="/" replace />} />
-        </Routes>
+        <FocusScope key={location.pathname} trap={false} autoFocus className="screen-scope">
+          <Routes>
+            <Route path="/login" element={<Login />} />
+            <Route
+              path="/"
+              element={
+                <RequireSession>
+                  <Home />
+                </RequireSession>
+              }
+            />
+            <Route
+              path="/live"
+              element={
+                <RequireSession>
+                  <LiveGuide />
+                </RequireSession>
+              }
+            />
+            <Route
+              path="/vod"
+              element={
+                <RequireSession>
+                  <VodGrid />
+                </RequireSession>
+              }
+            />
+            <Route
+              path="/vod/:id"
+              element={
+                <RequireSession>
+                  <VodDetail />
+                </RequireSession>
+              }
+            />
+            <Route
+              path="/series"
+              element={
+                <RequireSession>
+                  <SeriesList />
+                </RequireSession>
+              }
+            />
+            <Route
+              path="/series/:id"
+              element={
+                <RequireSession>
+                  <SeriesDetail />
+                </RequireSession>
+              }
+            />
+            <Route
+              path="/player"
+              element={
+                <RequireSession>
+                  <Player />
+                </RequireSession>
+              }
+            />
+            <Route
+              path="/exclusivos"
+              element={
+                <RequireSession>
+                  <Exclusivos />
+                </RequireSession>
+              }
+            />
+            <Route
+              path="/parental"
+              element={
+                <RequireSession>
+                  <Parental />
+                </RequireSession>
+              }
+            />
+            <Route
+              path="/settings"
+              element={
+                <RequireSession>
+                  <Settings />
+                </RequireSession>
+              }
+            />
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+        </FocusScope>
       </main>
     </div>
   );
