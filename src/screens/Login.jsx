@@ -5,11 +5,10 @@ import { tryRestoreSession } from '../lib/xtream.js';
 import { t, getLang } from '../lib/i18n.js';
 import { useSession } from '../context/SessionContext.jsx';
 import { serverInfoLabel } from '../lib/accountText.js';
-import { setTvFocus, getTvFocus, openIme } from '../components/Focusable.jsx';
+import { setFocused, getTvFocus, openIme } from '../components/Focusable.jsx';
 
 // Login field chain for webOS D-pad: Usuario → Contraseña → Iniciar sesión.
-// Virtual cyan ring moves with arrows; OK calls openIme() so webOS shows the
-// native keyboard. On IME dismiss (blur) we restore virtual focus only.
+// ALL cyan rings go through setFocused() so only one field is marked at a time.
 
 export default function Login() {
   const navigate = useNavigate();
@@ -24,24 +23,19 @@ export default function Login() {
   const passRef = useRef(null);
   const submitRef = useRef(null);
   const blurTimer = useRef(null);
-  // True while we intentionally opened the IME — blur then restores virtual ring.
   const imeOpenRef = useRef(false);
 
   const fieldOrder = () =>
     [userRef.current, passRef.current, submitRef.current].filter(Boolean);
 
-  const paintField = (el, { native = false } = {}) => {
-    if (!el) return;
-    setTvFocus(el, { native });
-  };
-
   const openFieldIme = (el) => {
     if (!el || el.disabled) return;
     imeOpenRef.current = true;
+    setFocused(el, { native: false });
     openIme(el);
   };
 
-  // After IME hide / blur: keep cyan on the same field (virtual only).
+  // After IME hide / blur: single virtual ring on the same (or newly focused) field.
   const onFieldBlur = (el) => {
     if (blurTimer.current) window.clearTimeout(blurTimer.current);
     blurTimer.current = window.setTimeout(() => {
@@ -51,31 +45,27 @@ export default function Login() {
         (active === userRef.current ||
           active === passRef.current ||
           active === submitRef.current);
+      imeOpenRef.current = false;
       if (stillInForm) {
-        imeOpenRef.current = false;
-        paintField(active, { native: false });
+        setFocused(active, { native: false });
         return;
       }
-      // IME closed → body/html. Restore virtual selection on the blurred field.
-      imeOpenRef.current = false;
       if (el && el.isConnected) {
         try {
           el.blur();
         } catch {
           /* ignore */
         }
-        paintField(el, { native: false });
+        setFocused(el, { native: false });
       }
     }, 80);
   };
 
   const onFieldFocus = (el) => {
     if (blurTimer.current) window.clearTimeout(blurTimer.current);
-    // Mirror ring; if focus came from OK/openIme keep imeOpen flag.
-    paintField(el, { native: false });
+    setFocused(el, { native: false });
   };
 
-  // Up/Down: field chain. Enter/OK on inputs: open IME.
   const onFieldKeyDown = (e, index) => {
     const code = e.keyCode || e.which || 0;
     const down = e.key === 'ArrowDown' || e.key === 'Down' || code === 40;
@@ -86,12 +76,25 @@ export default function Login() {
       e.key === 'Accept' ||
       code === 13 ||
       code === 23;
+    const back = e.key === 'Escape' || e.key === 'Backspace' || code === 461 || code === 27 || code === 8;
 
     const fields = fieldOrder();
     const current = fields[index];
 
+    if (back && isLoginInput(current)) {
+      e.preventDefault();
+      e.stopPropagation();
+      imeOpenRef.current = false;
+      try {
+        current.blur();
+      } catch {
+        /* ignore */
+      }
+      setFocused(userRef.current || current, { native: false });
+      return;
+    }
+
     if (enter && current && isLoginInput(current)) {
-      // If IME already has native focus, let the key type / confirm.
       if (document.activeElement === current && imeOpenRef.current) return;
       e.preventDefault();
       e.stopPropagation();
@@ -118,20 +121,21 @@ export default function Login() {
         /* ignore */
       }
     }
-    paintField(next, { native: false });
+    setFocused(next, { native: false });
   };
 
   useEffect(() => {
-    const t1 = window.setTimeout(() => paintField(userRef.current, { native: false }), 60);
+    // Force exactly one cyan ring on Usuario at mount.
+    const kick = () => setFocused(userRef.current, { native: false });
+    const t1 = window.setTimeout(kick, 40);
     const t2 = window.setTimeout(() => {
-      if (!getTvFocus()) paintField(userRef.current, { native: false });
-    }, 300);
+      if (!getTvFocus() || getTvFocus() !== userRef.current) kick();
+    }, 250);
     return () => {
       window.clearTimeout(t1);
       window.clearTimeout(t2);
       if (blurTimer.current) window.clearTimeout(blurTimer.current);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -185,7 +189,7 @@ export default function Login() {
           ? t('login.blocked')
           : t('login.failed');
       setStatus({ text, kind: 'err' });
-      paintField(submitRef.current, { native: false });
+      setFocused(submitRef.current, { native: false });
     }
   };
 

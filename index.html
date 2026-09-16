@@ -8,10 +8,13 @@
     <meta name="format-detection" content="telephone=no" />
     <title>Swiftstv</title>
     <style>
-      /* Early focus ring before the bundle CSS loads (simulator / cold start). */
-      :focus, .tv-focused, .focused {
+      /* Early virtual-focus ring before the bundle CSS loads. */
+      .tv-focused, [data-tv-focused="true"], .focused {
         outline: 3px solid #00d1ff !important;
         outline-offset: 3px;
+      }
+      :focus:not(.tv-focused):not([data-tv-focused="true"]) {
+        outline: none;
       }
     </style>
   </head>

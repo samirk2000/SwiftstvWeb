@@ -61,55 +61,39 @@ a {
 }
 
 /* ---------- Focus / keyboard (webOS D-pad) ---------- */
-/* Cyan ring for native :focus AND virtual .tv-focused (webOS often refuses
-   programmatic focus() until a mouse click — virtual class fixes that). */
-:focus,
+/* ONLY the virtual marker paints the cyan ring. Bare :focus used to leave a
+   second ring on Username while Password had .tv-focused after IME BACK. */
 .tv-focused,
+[data-tv-focused='true'],
 .focused {
   outline: 3px solid var(--accent) !important;
   outline-offset: 3px;
 }
 
-button:focus,
+:focus:not(.tv-focused):not([data-tv-focused='true']) {
+  outline: none;
+}
+
 button.tv-focused,
-a:focus,
 a.tv-focused,
-input:focus,
 input.tv-focused,
-select:focus,
-textarea:focus,
-[tabindex]:focus,
+input[data-tv-focused='true'],
 [tabindex].tv-focused,
-[data-focusable]:focus,
-.tile:focus,
+[tabindex][data-tv-focused='true'],
 .tile.tv-focused,
 .tile.focused,
-article.tile:focus,
 article.tile.tv-focused,
-.menu-item:focus,
 .menu-item.tv-focused,
-.cat-chip:focus,
 .cat-chip.tv-focused,
-.channel:focus,
 .channel.tv-focused,
-.episode:focus,
 .episode.tv-focused,
-.back-btn:focus,
 .back-btn.tv-focused,
-.lang-toggle:focus,
 .lang-toggle.tv-focused,
-.brand:focus,
 .brand.tv-focused,
-.fav-btn:focus,
 .fav-btn.tv-focused,
-.btn-primary:focus,
 .btn-primary.tv-focused,
-.btn-ghost:focus,
 .btn-ghost.tv-focused,
-.search-box:focus,
 .search-box.tv-focused,
-.unmute-hint:focus,
-.epg-row:focus,
 .epg-row.tv-focused {
   outline: 3px solid var(--accent) !important;
   outline-offset: 3px;
@@ -117,15 +101,18 @@ article.tile.tv-focused,
   border-color: var(--accent);
 }
 
-article.tile:focus,
+/* Subtle border while typing in IME — not a second full ring. */
+input:focus:not(.tv-focused):not([data-tv-focused='true']),
+.search-box:focus:not(.tv-focused):not([data-tv-focused='true']) {
+  border-color: var(--accent);
+  box-shadow: none;
+}
+
 article.tile.tv-focused,
 article.tile.focused,
-.row-scroll .tile:focus,
 .row-scroll .tile.tv-focused,
-.tile:focus,
 .tile.tv-focused,
-.menu-item.tv-focused,
-.menu-item:focus {
+.menu-item.tv-focused {
   box-shadow: var(--focus-ring);
   border-color: var(--accent);
   transform: scale(1.04);

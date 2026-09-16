@@ -20,8 +20,6 @@ export const LG_BACK_KEYCODE = 461;
 /** Android TV / some remotes DPAD_CENTER */
 const DPAD_CENTER = 23;
 
-const TV_FOCUSED = 'tv-focused';
-
 const FOCUSABLE_SELECTOR = [
   'button:not([disabled])',
   'a[href]',
@@ -45,7 +43,7 @@ const STAMP_SELECTOR =
 const FocusCtx = createContext(null);
 
 /** Module-level virtual cursor — survives React re-renders, works without native focus. */
-let virtualEl = null;
+let currentFocused = null;
 
 function isVisible(el) {
   if (!el || !el.isConnected) return false;
@@ -84,80 +82,111 @@ export function queryFocusables(root) {
   return out;
 }
 
-function clearVirtualClass() {
-  document.querySelectorAll(`.${TV_FOCUSED}`).forEach((n) => {
-    n.classList.remove(TV_FOCUSED);
-    n.classList.remove('focused');
-  });
-}
+/**
+ * ONLY entry point that paints the cyan ring. Clears every previous marker first
+ * so Username + Password can never both show tv-focused at once.
+ */
+export function setFocused(newEl, opts = {}) {
+  const native = opts.native === true; // default false — caller opts in for IME
 
-/** Set the virtual (and best-effort native) focus. Always paints the cyan ring.
- *  Pass `{ native: false }` after IME blur / arrow moves onto inputs so webOS
- *  does not immediately reopen the on-screen keyboard. */
-export function setTvFocus(el, opts = {}) {
-  const native = opts.native !== false;
-  if (!el || !el.isConnected) return false;
-  clearVirtualClass();
-  virtualEl = el;
-  el.classList.add(TV_FOCUSED);
-  el.classList.add('focused');
+  document.querySelectorAll('.tv-focused, .focused, [data-tv-focused]').forEach((e) => {
+    e.classList.remove('tv-focused');
+    e.classList.remove('focused');
+    e.removeAttribute('data-tv-focused');
+  });
+
+  currentFocused = null;
+
+  if (!newEl || !newEl.isConnected) {
+    // eslint-disable-next-line no-console
+    console.log('[Focus] -> (none)');
+    return false;
+  }
+
+  newEl.classList.add('tv-focused');
+  newEl.classList.add('focused');
+  newEl.setAttribute('data-tv-focused', 'true');
+  currentFocused = newEl;
+
+  // eslint-disable-next-line no-console
+  console.log('[Focus] ->', newEl.id || newEl.dataset?.loginField || newEl.dataset?.focusKey || newEl.tagName);
+
+  // Drop native focus from any OTHER control so :focus can't paint a 2nd ring.
+  const active = document.activeElement;
+  if (active && active !== newEl && active !== document.body && active !== document.documentElement) {
+    try {
+      active.blur();
+    } catch {
+      /* ignore */
+    }
+  }
+
   if (native) {
     try {
-      el.focus({ preventScroll: true });
+      newEl.focus({ preventScroll: true });
     } catch {
       try {
-        el.focus();
+        newEl.focus();
       } catch {
         /* webOS may refuse — virtual ring still works */
       }
     }
   }
-  if (typeof el.scrollIntoView === 'function') {
+
+  if (typeof newEl.scrollIntoView === 'function') {
     try {
-      el.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
+      newEl.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
     } catch {
       try {
-        el.scrollIntoView(false);
+        newEl.scrollIntoView(false);
       } catch {
         /* ignore */
       }
     }
   }
+
   return true;
 }
 
+/** @deprecated use setFocused — kept as alias so existing imports keep working. */
+export function setTvFocus(el, opts = {}) {
+  if (!el) return setFocused(null);
+  // Preserve previous default (native true) for non-Login callers that expect it.
+  const native = opts.native !== false;
+  return setFocused(el, { native });
+}
+
 export function getTvFocus() {
-  if (virtualEl && virtualEl.isConnected) return virtualEl;
-  const painted = document.querySelector(`.${TV_FOCUSED}`);
+  if (currentFocused && currentFocused.isConnected) return currentFocused;
+  const painted =
+    document.querySelector('[data-tv-focused="true"]') ||
+    document.querySelector('.tv-focused');
   if (painted) {
-    virtualEl = painted;
+    currentFocused = painted;
     return painted;
-  }
-  const active = document.activeElement;
-  if (active && active !== document.body && active !== document.documentElement) {
-    return active;
   }
   return null;
 }
 
 export function focusElement(el) {
-  return setTvFocus(el);
+  return setFocused(el, { native: true });
 }
 
 /** Prefer main content controls over the topbar brand on first paint. */
 export function focusFirst(root) {
   const scope = root && root.querySelectorAll ? root : document;
   const preferred =
+    scope.querySelector?.('#login-user') ||
     scope.querySelector?.('.menu-item') ||
     scope.querySelector?.('.content button, .content [tabindex="0"], .content input') ||
     null;
   if (preferred && isVisible(preferred)) {
-    setTvFocus(preferred);
+    setFocused(preferred, { native: false });
     return preferred;
   }
   const list = queryFocusables(scope);
   if (!list.length) return null;
-  setTvFocus(list[0]);
+  setFocused(list[0], { native: false });
   return list[0];
 }
 
@@ -276,10 +305,8 @@ export function FocusRoot({ children }) {
       const t = e.target;
       if (t && t !== document.body && t !== document.documentElement) {
         if (t.matches?.(FOCUSABLE_SELECTOR) || t.closest?.('[tabindex]')) {
-          clearVirtualClass();
-          virtualEl = t;
-          t.classList.add(TV_FOCUSED);
-          t.classList.add('focused');
+          // Re-enter through setFocused so we never stack cyan rings.
+          setFocused(t, { native: false });
         }
       }
     };
@@ -441,8 +468,8 @@ export function openIme(el) {
   const realInput = resolveEditable(el) || (isTypingTarget(el) ? el : null);
   if (!realInput || realInput.disabled || realInput.readOnly) return false;
 
-  // Keep cyan ring on the editable while opening the keyboard.
-  setTvFocus(realInput, { native: false });
+  // Single cyan ring on the editable, then native focus to open the keyboard.
+  setFocused(realInput, { native: false });
 
   try {
     realInput.focus();
@@ -453,6 +480,9 @@ export function openIme(el) {
       /* continue with click / webOS API */
     }
   }
+
+  // Re-assert ring after focus (focusin also calls setFocused).
+  setFocused(realInput, { native: false });
 
   try {
     if (typeof realInput.click === 'function') realInput.click();
@@ -468,7 +498,6 @@ export function openIme(el) {
     /* ignore */
   }
 
-  // webOS TV keyboard API (present on device / simulator with webOS.js).
   try {
     const kb = window.webOS && window.webOS.keyboard;
     if (kb && typeof kb.show === 'function') kb.show();
@@ -476,7 +505,6 @@ export function openIme(el) {
     /* ignore */
   }
   try {
-    // Legacy PalmSystem fallback some webOS builds still expose.
     if (window.PalmSystem && typeof window.PalmSystem.keyboardShow === 'function') {
       window.PalmSystem.keyboardShow(1);
     }
@@ -540,7 +568,7 @@ export function useGlobalTvKeys({ onEscape, onEnter } = {}) {
           list[0] ||
           null;
         if (seed) {
-          setTvFocus(seed);
+          setFocused(seed, { native: false });
           active = seed;
         }
       }
@@ -569,7 +597,7 @@ export function useGlobalTvKeys({ onEscape, onEnter } = {}) {
         if (target) {
           // Don't native-focus inputs on arrow (reopens webOS IME). OK opens it.
           const native = !isTypingTarget(target);
-          setTvFocus(target, { native });
+          setFocused(target, { native });
         }
         return;
       }
@@ -585,10 +613,17 @@ export function useGlobalTvKeys({ onEscape, onEnter } = {}) {
 
       if (isBackKey(e)) {
         if (isTypingTarget(active) && document.activeElement === active) {
-          active.blur();
           e.preventDefault();
           e.stopPropagation();
-          focusFirst(scope);
+          try {
+            active.blur();
+          } catch {
+            /* ignore */
+          }
+          // Prefer the same login field (or #login-user) — never leave 2 rings.
+          const loginUser = document.getElementById('login-user');
+          const restore = loginUser || active;
+          setFocused(restore, { native: false });
           return;
         }
         if (typeof onEscapeRef.current === 'function') {

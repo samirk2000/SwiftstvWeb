@@ -96,6 +96,7 @@ function AppShell() {
     },
     onEnter: () => {
       const el =
+        document.querySelector('[data-tv-focused="true"]') ||
         document.querySelector('.tv-focused') ||
         document.activeElement;
       if (!el) return;
