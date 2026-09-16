@@ -91,20 +91,25 @@ function clearVirtualClass() {
   });
 }
 
-/** Set the virtual (and best-effort native) focus. Always paints the cyan ring. */
-export function setTvFocus(el) {
+/** Set the virtual (and best-effort native) focus. Always paints the cyan ring.
+ *  Pass `{ native: false }` after IME blur / arrow moves onto inputs so webOS
+ *  does not immediately reopen the on-screen keyboard. */
+export function setTvFocus(el, opts = {}) {
+  const native = opts.native !== false;
   if (!el || !el.isConnected) return false;
   clearVirtualClass();
   virtualEl = el;
   el.classList.add(TV_FOCUSED);
   el.classList.add('focused');
-  try {
-    el.focus({ preventScroll: true });
-  } catch {
+  if (native) {
     try {
-      el.focus();
+      el.focus({ preventScroll: true });
     } catch {
-      /* webOS may refuse — virtual ring still works */
+      try {
+        el.focus();
+      } catch {
+        /* webOS may refuse — virtual ring still works */
+      }
     }
   }
   if (typeof el.scrollIntoView === 'function') {
@@ -472,8 +477,15 @@ export function useGlobalTvKeys({ onEscape, onEnter } = {}) {
 
       const dir = arrowDirection(e);
       if (dir) {
-        if (isTypingTarget(active) && document.activeElement === active) {
-          return; // caret in input
+        // Single-line inputs: Left/Right keep caret; Up/Down leave the field
+        // (TV IME closed or still focused — otherwise Login gets stuck).
+        const typing = isTypingTarget(active) && document.activeElement === active;
+        if (typing) {
+          const leaveField =
+            dir.dy !== 0 &&
+            active.tagName === 'INPUT' &&
+            active.type !== 'textarea';
+          if (!leaveField) return;
         }
         e.preventDefault();
         e.stopPropagation();
@@ -481,13 +493,14 @@ export function useGlobalTvKeys({ onEscape, onEnter } = {}) {
           focusFirst(scope);
           return;
         }
-        // First arrow with no prior neighbour move: if we JUST seeded focus on
-        // this same event, stay on seed (so user sees the ring) unless they
-        // already had a selection.
         const fromRect = active.getBoundingClientRect();
         const candidates = list.filter((el) => el !== active);
         const target = nearest(dir.dx, dir.dy, fromRect, candidates);
-        if (target) setTvFocus(target);
+        if (target) {
+          // Don't native-focus inputs on arrow (reopens webOS IME). OK opens it.
+          const native = !isTypingTarget(target);
+          setTvFocus(target, { native });
+        }
         return;
       }
 
