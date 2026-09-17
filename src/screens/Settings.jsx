@@ -1,22 +1,13 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { t } from '../lib/i18n.js';
-import { getSession } from '../lib/session.js';
 import { getActiveProfile, upsertProfile, verifyPin } from '../lib/parental.js';
 import { useSession } from '../context/SessionContext.jsx';
-
-function normalizeUrl(raw) {
-  let u = String(raw || '').trim();
-  while (u.length > 0 && u.endsWith('/')) u = u.slice(0, -1);
-  return u;
-}
+import { FocusScope } from '../components/Focusable.jsx';
 
 export default function Settings() {
   const navigate = useNavigate();
-  const { lang, toggleLanguage, updateServer } = useSession();
-
-  const [serverUrl, setServerUrl] = useState(() => normalizeUrl(getSession()?.baseUrl || ''));
-  const [serverMsg, setServerMsg] = useState({ text: '', kind: '' });
+  const { lang, toggleLanguage } = useSession();
 
   // PIN change (reuses the parental profile registry).
   const profile = getActiveProfile();
@@ -24,16 +15,6 @@ export default function Settings() {
   const [newPin, setNewPin] = useState('');
   const [confirmPin, setConfirmPin] = useState('');
   const [pinMsg, setPinMsg] = useState({ text: '', kind: '' });
-
-  const saveServer = () => {
-    const url = normalizeUrl(serverUrl);
-    if (!/^https?:\/\//i.test(url)) {
-      setServerMsg({ text: t('settings.serverInvalid'), kind: 'err' });
-      return;
-    }
-    updateServer(url);
-    setServerMsg({ text: t('settings.saved'), kind: 'ok' });
-  };
 
   const savePin = () => {
     const hasPin = Boolean(profile?.pin);
@@ -62,9 +43,9 @@ export default function Settings() {
   };
 
   return (
-    <div>
+    <FocusScope trap autoFocus className="settings-scope">
       <div className="page-head">
-        <button className="back-btn" onClick={() => navigate(-1)}>
+        <button tabIndex={0} className="back-btn" onClick={() => navigate(-1)}>
           ← {t('common.back')}
         </button>
         <h1>{t('settings.title')}</h1>
@@ -75,12 +56,14 @@ export default function Settings() {
         <p className="hint">{t('settings.languageHint')}</p>
         <div className="detail-actions">
           <button
+            tabIndex={0}
             className={`cat-chip ${lang === 'es' ? 'selected' : ''}`}
             onClick={() => setLang('es')}
           >
             Español (ES)
           </button>
           <button
+            tabIndex={0}
             className={`cat-chip ${lang === 'en' ? 'selected' : ''}`}
             onClick={() => setLang('en')}
           >
@@ -90,27 +73,11 @@ export default function Settings() {
       </section>
 
       <section className="settings-card">
-        <h2 className="row-title">{t('settings.server')}</h2>
-        <p className="hint">{t('settings.serverHint')}</p>
-        <input
-          className="search-box"
-          value={serverUrl}
-          onChange={(e) => setServerUrl(e.target.value)}
-          placeholder="http://host:8080"
-        />
-        <div className="detail-actions">
-          <button className="btn-primary" onClick={saveServer}>
-            {t('settings.serverSave')}
-          </button>
-        </div>
-        {serverMsg.text && <p className={`login-status ${serverMsg.kind}`}>{serverMsg.text}</p>}
-      </section>
-
-      <section className="settings-card">
         <h2 className="row-title">{t('settings.pin')}</h2>
         <p className="hint">{t('settings.pinHint')}</p>
         {profile?.pin ? (
           <input
+            tabIndex={0}
             className="search-box pin-input"
             type="password"
             inputMode="numeric"
@@ -122,6 +89,7 @@ export default function Settings() {
           <p className="hint">{t('settings.noPin')}</p>
         )}
         <input
+          tabIndex={0}
           className="search-box pin-input"
           type="password"
           inputMode="numeric"
@@ -130,6 +98,7 @@ export default function Settings() {
           onChange={(e) => setNewPin(e.target.value)}
         />
         <input
+          tabIndex={0}
           className="search-box pin-input"
           type="password"
           inputMode="numeric"
@@ -138,12 +107,12 @@ export default function Settings() {
           onChange={(e) => setConfirmPin(e.target.value)}
         />
         <div className="detail-actions">
-          <button className="btn-primary" onClick={savePin}>
+          <button tabIndex={0} className="btn-primary" onClick={savePin}>
             {t('parental.save')}
           </button>
         </div>
         {pinMsg.text && <p className={`login-status ${pinMsg.kind}`}>{pinMsg.text}</p>}
       </section>
-    </div>
+    </FocusScope>
   );
 }

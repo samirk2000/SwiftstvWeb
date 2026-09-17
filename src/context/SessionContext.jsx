@@ -3,8 +3,6 @@ import {
   clearSession as clearStored,
   getLanguage,
   saveLanguage,
-  getSession,
-  saveSession,
   ensureActiveAccountListed,
   upsertAccount,
 } from '../lib/session.js';
@@ -47,27 +45,6 @@ export function SessionProvider({ children }) {
     setSession(null);
   }, []);
 
-  // Manual server override (Settings): swap the session baseUrl in both the
-  // stored session and the live context so usePanelList / stream URLs rebuild
-  // against the new host without a re-login.
-  const updateServer = useCallback(
-    (baseUrl) => {
-      const saved = getSession();
-      if (!saved) return;
-      const next = { ...saved, baseUrl };
-      saveSession(next);
-      bumpAccounts();
-      setSession((prev) => {
-        if (!prev) return prev;
-        const s = prev.session
-          ? { ...prev.session, baseUrl }
-          : { baseUrl, username: saved.username, password: saved.password };
-        return { ...prev, session: s, workingBaseUrl: baseUrl };
-      });
-    },
-    [bumpAccounts]
-  );
-
   const [langTick, setLangTick] = useState(0);
 
   const toggleLanguage = useCallback(() => {
@@ -82,14 +59,13 @@ export function SessionProvider({ children }) {
       session,
       loginSuccess,
       logout,
-      updateServer,
       toggleLanguage,
       lang: getLang(),
       langTick,
       accountsTick,
       bumpAccounts,
     }),
-    [session, loginSuccess, logout, updateServer, toggleLanguage, langTick, accountsTick, bumpAccounts]
+    [session, loginSuccess, logout, toggleLanguage, langTick, accountsTick, bumpAccounts]
   );
 
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>;

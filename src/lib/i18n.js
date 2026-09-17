@@ -125,11 +125,7 @@ export const STRINGS = {
     },
     settings: {
       title: 'Ajustes',
-      server: 'Servidor',
-      serverHint: 'URL base del panel Xtream (http://host:puerto)',
-      serverSave: 'Guardar servidor',
       saved: 'Guardado',
-      serverInvalid: 'URL inválida (usa http:// o https://)',
       language: 'Idioma',
       languageHint: 'Idioma de la interfaz',
       pin: 'PIN de control parental',
@@ -263,11 +259,7 @@ export const STRINGS = {
     },
     settings: {
       title: 'Settings',
-      server: 'Server',
-      serverHint: 'Xtream panel base URL (http://host:port)',
-      serverSave: 'Save server',
       saved: 'Saved',
-      serverInvalid: 'Invalid URL (use http:// or https://)',
       language: 'Language',
       languageHint: 'Interface language',
       pin: 'Parental PIN',
