@@ -81,6 +81,13 @@ export default function Player() {
   const [zapIndex, setZapIndex] = useState(0);
   const [zapCatTick, setZapCatTick] = useState(0); // re-render overlay after category swap
   const [zapLoading, setZapLoading] = useState(false);
+  // Netflix-style "next episode" card near the end of a series episode.
+  const [nextUp, setNextUp] = useState(null); // { title, secs } | null
+  const nextEpRef = useRef(null); // cached next episode payload
+  const nextUpDismissedRef = useRef(false);
+  const nextUpPlayingRef = useRef(false);
+  const nextUpRef = useRef(null);
+  nextUpRef.current = nextUp;
   const zapOpenRef = useRef(false);
   const zapIndexRef = useRef(0);
   const zapLoadingRef = useRef(false);
@@ -209,6 +216,19 @@ export default function Player() {
 
   const playNextEpisode = async () => {
     if (type !== 'series' || !seriesId) return false;
+    if (nextUpPlayingRef.current) return true;
+    const cached = nextEpRef.current;
+    if (cached?.url) {
+      nextUpPlayingRef.current = true;
+      setNextUp(null);
+      navigate(
+        `/player?type=series&id=${cached.id}&seriesId=${seriesId}&season=${encodeURIComponent(
+          String(cached.season)
+        )}&url=${encodeURIComponent(cached.url)}&title=${encodeURIComponent(cached.title)}`,
+        { replace: true }
+      );
+      return true;
+    }
     const saved = getSession();
     if (!saved) return false;
     const srv = { baseUrl: saved.baseUrl, username: saved.username, password: saved.password };
@@ -235,6 +255,14 @@ export default function Player() {
       next.title ||
       [info.info?.name, `T${season}`, epNum].filter(Boolean).join(' · ') ||
       String(next.id);
+    nextEpRef.current = {
+      id: next.id,
+      season,
+      url: nextUrl,
+      title: nextTitle,
+    };
+    nextUpPlayingRef.current = true;
+    setNextUp(null);
     navigate(
       `/player?type=series&id=${next.id}&seriesId=${seriesId}&season=${encodeURIComponent(
         String(season)
@@ -243,6 +271,57 @@ export default function Player() {
     );
     return true;
   };
+
+  // Prefetch next episode so the end-card is instant.
+  useEffect(() => {
+    nextUpDismissedRef.current = false;
+    nextUpPlayingRef.current = false;
+    nextEpRef.current = null;
+    setNextUp(null);
+    if (type !== 'series' || !seriesId) return undefined;
+    let cancelled = false;
+    (async () => {
+      try {
+        const saved = getSession();
+        if (!saved) return;
+        const srv = { baseUrl: saved.baseUrl, username: saved.username, password: saved.password };
+        const info = await getSeriesInfo(srv, seriesId);
+        if (cancelled || !info?.episodes) return;
+        const seasons = Object.keys(info.episodes || {}).sort((a, b) => Number(a) - Number(b));
+        let season = seasonParam || seasons[0];
+        let list = info.episodes[season] || [];
+        let idx = list.findIndex((ep) => String(ep.id) === String(id));
+        let next = idx >= 0 ? list[idx + 1] : null;
+        if (!next) {
+          const sIdx = seasons.indexOf(String(season));
+          if (sIdx >= 0 && sIdx < seasons.length - 1) {
+            season = seasons[sIdx + 1];
+            list = info.episodes[season] || [];
+            next = list[0];
+          }
+        }
+        if (!next || cancelled) return;
+        const container = next.container_extension || info.container_extension || 'mp4';
+        const nextUrl = seriesStreamUrl(srv, container, next, season, seriesId);
+        const epNum = next.episode_num ? `E${next.episode_num}` : '';
+        const nextTitle =
+          next.title ||
+          [info.info?.name, `T${season}`, epNum].filter(Boolean).join(' · ') ||
+          String(next.id);
+        nextEpRef.current = {
+          id: next.id,
+          season,
+          url: nextUrl,
+          title: nextTitle,
+        };
+      } catch {
+        /* ignore */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [type, seriesId, id, seasonParam, url]);
 
   // Live channel memory: once a channel fell back to HLS (mpegts can't play its
   // .ts on this browser), remember it so the next zap goes straight to HLS —
@@ -362,6 +441,24 @@ export default function Player() {
         e.key === 'GoBack' ||
         code === 461 ||
         code === 27;
+
+      // Netflix next-episode card owns OK / Back while visible.
+      if (nextUpRef.current && type === 'series') {
+        const isOk = e.key === 'Enter' || code === 13 || code === 23;
+        if (isBack) {
+          e.preventDefault();
+          e.stopImmediatePropagation();
+          nextUpDismissedRef.current = true;
+          setNextUp(null);
+          return;
+        }
+        if (isOk) {
+          e.preventDefault();
+          e.stopImmediatePropagation();
+          playNextEpisode().catch(() => {});
+          return;
+        }
+      }
 
       if (isBack) {
         e.preventDefault();
@@ -530,19 +627,69 @@ export default function Player() {
     return () => window.removeEventListener('keydown', onKey, true);
   }, [isVodLike, isLive, leaveOpen, navigate, seekJump, id]);
 
-  // Auto-play next episode when a series finishes (pref).
+  // Auto-play next episode when a series finishes (pref) + Netflix end-card.
   useEffect(() => {
     if (type !== 'series' || !seriesId) return undefined;
     const v = videoRef.current;
     if (!v) return undefined;
+
+    const NEXT_UP_WINDOW = 18; // seconds before end to show the card
+
+    const onTime = () => {
+      if (nextUpDismissedRef.current || leaveOpen) {
+        setNextUp((p) => (p ? null : p));
+        return;
+      }
+      const ep = nextEpRef.current;
+      if (!ep) return;
+      const dur = Number.isFinite(v.duration) ? v.duration : 0;
+      const tNow = v.currentTime || 0;
+      if (dur < 45) return;
+      const rem = dur - tNow;
+      if (rem <= 0.35) {
+        if (getPrefs().autoplayNext !== false) {
+          playNextEpisode().catch(() => {});
+        }
+        return;
+      }
+      if (rem <= NEXT_UP_WINDOW) {
+        const secs = Math.max(1, Math.ceil(rem));
+        setNextUp((prev) =>
+          prev && prev.title === ep.title && prev.secs === secs
+            ? prev
+            : { title: ep.title, secs }
+        );
+      } else {
+        setNextUp(null);
+      }
+    };
+
     const onEnded = () => {
-      if (!getPrefs().autoplayNext) return;
+      if (nextUpDismissedRef.current) return;
+      if (getPrefs().autoplayNext === false) return;
       playNextEpisode().catch(() => {});
     };
+
+    v.addEventListener('timeupdate', onTime);
+    v.addEventListener('seeked', onTime);
     v.addEventListener('ended', onEnded);
-    return () => v.removeEventListener('ended', onEnded);
+    return () => {
+      v.removeEventListener('timeupdate', onTime);
+      v.removeEventListener('seeked', onTime);
+      v.removeEventListener('ended', onEnded);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [type, seriesId, id, url, restart]);
+  }, [type, seriesId, id, url, restart, leaveOpen]);
+
+  // Park focus on "Ver ahora" when the next-episode card appears.
+  useEffect(() => {
+    if (!nextUp || leaveOpen) return undefined;
+    const timer = window.setTimeout(() => {
+      const btn = document.querySelector('.next-up .btn-primary');
+      if (btn) setFocused(btn, { native: false });
+    }, 40);
+    return () => window.clearTimeout(timer);
+  }, [nextUp?.title, leaveOpen]);
 
   // Keep progress UI in sync for VOD-like streams.
   useEffect(() => {
@@ -1096,6 +1243,34 @@ export default function Player() {
           ) : (
             <span>{zapBanner}</span>
           )}
+        </div>
+      )}
+
+      {nextUp && type === 'series' && !leaveOpen && (
+        <div className="next-up" role="dialog" aria-live="polite">
+          <div className="next-up-label">{t('player.nextUpTitle')}</div>
+          <div className="next-up-title">{nextUp.title}</div>
+          <div className="next-up-count">{t('player.nextUpIn', nextUp.secs)}</div>
+          <div className="next-up-actions">
+            <button
+              tabIndex={0}
+              className="btn-primary"
+              data-tv-focused="true"
+              onClick={() => playNextEpisode().catch(() => {})}
+            >
+              {t('player.nextUpNow')}
+            </button>
+            <button
+              tabIndex={0}
+              className="btn-ghost"
+              onClick={() => {
+                nextUpDismissedRef.current = true;
+                setNextUp(null);
+              }}
+            >
+              {t('player.nextUpCancel')}
+            </button>
+          </div>
         </div>
       )}
 

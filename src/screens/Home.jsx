@@ -41,18 +41,20 @@ function OnboardingTips({ onDismiss }) {
   );
 }
 
-function MenuItem({ to, icon, label, onNavigate, focus = false }) {
+function MenuItem({ to, icon, label, onNavigate, focus = false, hero = false, tone = '' }) {
   const { ref, tabIndex } = useFocusable(`menu-${to}`);
   return (
     <button
       ref={ref}
       tabIndex={tabIndex}
-      className="menu-item"
+      className={`menu-item ${hero ? 'menu-item--hero' : 'menu-item--tool'} ${
+        tone ? `menu-item--${tone}` : ''
+      }`}
       onClick={onNavigate}
       autoFocus={focus || undefined}
     >
       <span className="icon">{icon}</span>
-      <span>{label}</span>
+      <span className="menu-item-label">{label}</span>
     </button>
   );
 }
@@ -123,7 +125,9 @@ export default function Home() {
     setPrefs({ onboardingDone: true });
     setShowTips(false);
     window.setTimeout(() => {
-      const first = document.querySelector('.menu-item');
+      const first =
+        document.querySelector('.home-hero .menu-item') ||
+        document.querySelector('.menu-item');
       if (first) setFocused(first, { native: false });
     }, 40);
   };
@@ -139,22 +143,61 @@ export default function Home() {
         aria-hidden={showTips ? 'true' : undefined}
         style={showTips ? { pointerEvents: 'none', visibility: 'hidden' } : undefined}
       >
-      <div className="menu-grid">
-        <MenuItem
-          focus={!showTips}
-          to="live"
-          icon="📺"
-          label={t('home.live')}
-          onNavigate={() => go('/live')}
-        />
-        <MenuItem to="movies" icon="🎬" label={t('home.movies')} onNavigate={() => go('/vod')} />
-        <MenuItem to="series" icon="📚" label={t('home.series')} onNavigate={() => go('/series')} />
-        <MenuItem to="search" icon="🔎" label={t('home.search')} onNavigate={() => go('/search')} />
-        <MenuItem to="exclusivos" icon="⚡" label={t('home.exclusivos')} onNavigate={() => go('/exclusivos')} />
-        <MenuItem to="parental" icon="🔒" label={t('home.parental')} onNavigate={() => go('/parental')} />
-        <MenuItem to="accounts" icon="👤" label={t('home.accounts')} onNavigate={() => go('/accounts')} />
-        <MenuItem to="settings" icon="⚙" label={t('home.settings')} onNavigate={() => go('/settings')} />
-      </div>
+        <section className="home-hero" aria-label={t('home.live')}>
+          <MenuItem
+            focus={!showTips}
+            to="live"
+            icon="📺"
+            label={t('home.live')}
+            hero
+            tone="live"
+            onNavigate={() => go('/live')}
+          />
+          <MenuItem
+            to="movies"
+            icon="🎬"
+            label={t('home.movies')}
+            hero
+            tone="movies"
+            onNavigate={() => go('/vod')}
+          />
+          <MenuItem
+            to="series"
+            icon="📚"
+            label={t('home.series')}
+            hero
+            tone="series"
+            onNavigate={() => go('/series')}
+          />
+        </section>
+
+        <section className="home-tools" aria-label={t('home.settings')}>
+          <MenuItem to="search" icon="🔎" label={t('home.search')} onNavigate={() => go('/search')} />
+          <MenuItem
+            to="exclusivos"
+            icon="⚡"
+            label={t('home.exclusivos')}
+            onNavigate={() => go('/exclusivos')}
+          />
+          <MenuItem
+            to="parental"
+            icon="🔒"
+            label={t('home.parental')}
+            onNavigate={() => go('/parental')}
+          />
+          <MenuItem
+            to="accounts"
+            icon="👤"
+            label={t('home.accounts')}
+            onNavigate={() => go('/accounts')}
+          />
+          <MenuItem
+            to="settings"
+            icon="⚙"
+            label={t('home.settings')}
+            onNavigate={() => go('/settings')}
+          />
+        </section>
 
       {continueRow.length > 0 && (
         <Row
