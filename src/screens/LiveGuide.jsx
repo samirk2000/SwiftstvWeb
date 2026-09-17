@@ -8,7 +8,7 @@ import { usePreferFirstCategory } from '../hooks/usePreferFirstCategory.js';
 import { useWindowedList } from '../hooks/useWindowedList.js';
 import { isCategoryLocked } from '../lib/parental.js';
 import { isFavorite, toggleFavorite } from '../lib/session.js';
-import { useFocusable, FocusScope } from '../components/Focusable.jsx';
+import { useFocusable, FocusScope, setFocused } from '../components/Focusable.jsx';
 import { formatEpgTime, currentProgramme, epochAtLocal, shortDayLabel } from '../lib/time.js';
 import { setLiveZapList, setLastLiveChannel } from '../lib/liveZap.js';
 import { matchesSearch } from '../lib/searchText.js';
@@ -51,20 +51,23 @@ function ChannelRow({ channel, index, active, onPlay, onCatchup, fav, onToggleFa
       <span className="channel-num">{index + 1}</span>
       <span className="channel-name">{channel.name}</span>
       <button
+        type="button"
         tabIndex={0}
-        className={fav ? 'fav-btn fa' : 'fav-btn'}
+        data-tv-secondary="true"
+        className={`channel-action-btn channel-fav-btn ${fav ? 'is-fav' : ''}`}
         onClick={(e) => {
           e.stopPropagation();
           onToggleFav();
         }}
-        title={fav ? t('common.unfavorite') : t('common.favorite')}
       >
-        {fav ? '★' : '☆'}
+        {fav ? t('live.favOn') : t('live.favAdd')}
       </button>
       {channel.tv_archive === '1' && (
         <button
+          type="button"
           tabIndex={0}
-          className="btn-ghost btn-xs"
+          data-tv-secondary="true"
+          className="channel-action-btn"
           onClick={(e) => {
             e.stopPropagation();
             onCatchup();
@@ -73,9 +76,6 @@ function ChannelRow({ channel, index, active, onPlay, onCatchup, fav, onToggleFa
           {t('live.catchup')}
         </button>
       )}
-      <span className="channel-now">
-        {channel.epg_channel_id ? ` · ${channel.epg_channel_id}` : ''}
-      </span>
     </div>
   );
 }
@@ -311,6 +311,40 @@ export default function LiveGuide() {
 
   const { visible, hasMore, loadMore, remaining } = useWindowedList(filtered, PAGE);
 
+  const focusFirstChannel = () => {
+    const first = document.querySelector('.channel-list .channel');
+    if (!first) return false;
+    setFocused(first, { native: false });
+    return true;
+  };
+
+  // After category change / load: keep retrying until the first CHANNEL has the ring.
+  useEffect(() => {
+    if (!ready || loading || !visible.length) return undefined;
+    let cancelled = false;
+    const run = () => {
+      if (!cancelled) focusFirstChannel();
+    };
+    run();
+    const timers = [50, 120, 250, 500, 900, 1400].map((ms) => window.setTimeout(run, ms));
+    return () => {
+      cancelled = true;
+      timers.forEach((id) => window.clearTimeout(id));
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ready, loading, catId, visible[0]?.stream_id, filtered.length]);
+
+  const selectCategory = (id) => {
+    setQuery('');
+    setCatId(id);
+    // Poll until rows mount — clicking a chip used to leave focus on Favoritos/search/chip.
+    let tries = 0;
+    const idTimer = window.setInterval(() => {
+      tries += 1;
+      if (focusFirstChannel() || tries > 50) window.clearInterval(idTimer);
+    }, 80);
+  };
+
   const playChannel = (ch) => {
     // Continuous MPEG-TS live: /live/U/P/id.ts → the proxy keeps ONE shared
     // upstream connection per channel and the player decodes it with mpegts.js.
@@ -356,10 +390,7 @@ export default function LiveGuide() {
           <button
             tabIndex={0}
             className={`cat-chip ${!searchActive && catId === '' ? 'selected' : ''}`}
-            onClick={() => {
-              setQuery('');
-              setCatId('');
-            }}
+            onClick={() => selectCategory('')}
           >
             {t('live.all')}
           </button>
@@ -370,10 +401,7 @@ export default function LiveGuide() {
               className={`cat-chip ${
                 !searchActive && String(catId) === String(cat.category_id) ? 'selected' : ''
               }`}
-              onClick={() => {
-                setQuery('');
-                setCatId(String(cat.category_id));
-              }}
+              onClick={() => selectCategory(String(cat.category_id))}
             >
               {cat.category_name}
             </button>

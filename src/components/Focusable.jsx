@@ -44,6 +44,8 @@ const FocusCtx = createContext(null);
 
 /** Module-level virtual cursor — survives React re-renders, works without native focus. */
 let currentFocused = null;
+/** Ignore MutationObserver focus restores while setFocused is painting the ring. */
+let focusPaintLock = false;
 
 /** While opening the IME, ignore blur restores that would kill the keyboard. */
 let imeGuardEl = null;
@@ -173,9 +175,17 @@ export function queryFocusables(root) {
     if (seen.has(el)) continue;
     seen.add(el);
     if (!isVisible(el)) continue;
+    // Nested row actions (Favoritos / catch-up) — only reachable via → from the row.
+    if (el.dataset?.tvSecondary === 'true') continue;
     out.push(el);
   }
   return out;
+}
+
+/** Secondary controls inside a focused channel/tile row (→ to enter, ← to leave). */
+function secondaryFocusables(row) {
+  if (!row?.querySelectorAll) return [];
+  return Array.from(row.querySelectorAll('[data-tv-secondary="true"]')).filter(isVisible);
 }
 
 /**
@@ -184,6 +194,7 @@ export function queryFocusables(root) {
  */
 export function setFocused(newEl, opts = {}) {
   const native = opts.native === true; // default false — caller opts in for IME
+  focusPaintLock = true;
 
   document.querySelectorAll('.tv-focused, .focused, [data-tv-focused]').forEach((e) => {
     e.classList.remove('tv-focused');
@@ -196,6 +207,9 @@ export function setFocused(newEl, opts = {}) {
   if (!newEl || !newEl.isConnected) {
     // eslint-disable-next-line no-console
     console.log('[Focus] -> (none)');
+    queueMicrotask(() => {
+      focusPaintLock = false;
+    });
     return false;
   }
 
@@ -241,6 +255,9 @@ export function setFocused(newEl, opts = {}) {
     }
   }
 
+  queueMicrotask(() => {
+    focusPaintLock = false;
+  });
   return true;
 }
 
@@ -287,14 +304,26 @@ export function focusFirst(root) {
   }
   const preferred =
     scope.querySelector?.('#login-user') ||
+    scope.querySelector?.('.channel-list .channel') ||
+    scope.querySelector?.('.grid .tile') ||
+    // While Live/VOD lists are loading, do NOT land on category chips / search.
+    (document.querySelector('.state .spinner')
+      ? null
+      : scope.querySelector?.('.cat-chip.selected')) ||
     scope.querySelector?.('.menu-item') ||
-    scope.querySelector?.('.content button, .content [tabindex="0"], .content input') ||
+    scope.querySelector?.('.load-more-btn') ||
     null;
   if (preferred && isVisible(preferred)) {
     setFocused(preferred, { native: false });
     return preferred;
   }
-  const list = queryFocusables(scope);
+  // Last resort: skip search inputs and category chips while a list is loading.
+  const loadingList = Boolean(document.querySelector('.state .spinner'));
+  const list = queryFocusables(scope).filter((el) => {
+    if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') return false;
+    if (loadingList && el.classList?.contains('cat-chip')) return false;
+    return true;
+  });
   if (!list.length) return null;
   setFocused(list[0], { native: false });
   return list[0];
@@ -399,9 +428,11 @@ export function FocusRoot({ children }) {
     const timers = [0, 80, 250, 600, 1200].map((ms) => window.setTimeout(tryFocus, ms));
 
     const mo = new MutationObserver(() => {
+      if (focusPaintLock) return;
       stampTabIndex(root);
       // If virtual target was unmounted, pick a new one.
-      if (!getTvFocus()) tryFocus();
+      const cur = getTvFocus();
+      if (!cur || !cur.isConnected) tryFocus();
     });
     mo.observe(root, {
       childList: true,
@@ -412,8 +443,12 @@ export function FocusRoot({ children }) {
 
     // Keep virtual ring in sync when mouse / touch focuses something.
     const onFocusIn = (e) => {
+      if (focusPaintLock) return;
       const t = e.target;
       if (t && t !== document.body && t !== document.documentElement) {
+        // Category chips only move the ring on D-pad, not when clicked to filter —
+        // click would otherwise fight "focus first channel" after list remount.
+        if (t.classList?.contains('cat-chip')) return;
         if (t.matches?.(FOCUSABLE_SELECTOR) || t.closest?.('[tabindex]')) {
           // During IME open, only refresh the ring — avoid extra blur cycles.
           if (isImeGuarded(t)) {
@@ -705,8 +740,9 @@ export function useGlobalTvKeys({ onEscape, onEnter } = {}) {
       const list = queryFocusables(scope);
       let active = getTvFocus();
 
-      if (!active || !list.includes(active)) {
+      if (!active || (!list.includes(active) && active.dataset?.tvSecondary !== 'true')) {
         const seed =
+          list.find((el) => el.classList?.contains('channel')) ||
           list.find((el) => el.classList?.contains('menu-item')) ||
           list[0] ||
           null;
@@ -733,7 +769,32 @@ export function useGlobalTvKeys({ onEscape, onEnter } = {}) {
           focusFirst(scope);
           return;
         }
+
+        // Secondary actions live inside a row: ← returns to the row, ↑↓ jump rows.
+        if (active.dataset?.tvSecondary === 'true') {
+          const row = active.closest('.channel, .fav-tile, .cw-tile');
+          if (dir.dx < 0 && row) {
+            setFocused(row, { native: false });
+            return;
+          }
+          if (dir.dy !== 0 && row) {
+            const rows = list.filter((el) => el.classList?.contains('channel'));
+            const fromRect = row.getBoundingClientRect();
+            const target = nearest(0, dir.dy, fromRect, rows.filter((el) => el !== row));
+            if (target) setFocused(target, { native: false });
+            return;
+          }
+        }
+
         const fromRect = active.getBoundingClientRect();
+        // From a channel row, → goes ONLY to Favoritos / catch-up on that row.
+        if (active.classList?.contains('channel') && dir.dx > 0) {
+          const secondary = secondaryFocusables(active);
+          if (secondary.length) {
+            setFocused(secondary[0], { native: false });
+            return;
+          }
+        }
         const candidates = list.filter((el) => el !== active);
         const target = nearest(dir.dx, dir.dy, fromRect, candidates);
         if (target) {

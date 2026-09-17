@@ -46,6 +46,8 @@ export const STRINGS = {
       search: 'Buscar canales...',
       today: 'Hoy',
       yesterday: 'Ayer',
+      favAdd: 'Favoritos',
+      favOn: 'En favoritos',
     },
     vod: {
       title: 'Películas',
@@ -232,6 +234,8 @@ export const STRINGS = {
       search: 'Search channels...',
       today: 'Today',
       yesterday: 'Yesterday',
+      favAdd: 'Favorites',
+      favOn: 'In favorites',
     },
     vod: {
       title: 'Movies',
