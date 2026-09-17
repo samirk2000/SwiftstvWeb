@@ -8,6 +8,7 @@ import { isCategoryLocked } from '../lib/parental.js';
 import { isFavorite, toggleFavorite } from '../lib/session.js';
 import { useFocusable, FocusScope } from '../components/Focusable.jsx';
 import { formatEpgTime, currentProgramme, epochAtLocal, shortDayLabel } from '../lib/time.js';
+import { matchesSearch } from '../lib/searchText.js';
 
 // Days offered by the catch-up manual selector (today + N days back).
 const CATCHUP_DAYS = 7;
@@ -249,7 +250,10 @@ export default function LiveGuide() {
   const navigate = useNavigate();
   const { data: categories, server } = usePanelList(getLiveCategories);
   const [catId, setCatId] = usePersistedCategory('live');
-  const catArgs = useMemo(() => (catId ? [catId] : []), [catId]);
+  const [query, setQuery] = useState('');
+  const searchActive = Boolean(query.trim());
+  const effectiveCatId = searchActive ? '' : catId;
+  const catArgs = useMemo(() => (effectiveCatId ? [effectiveCatId] : []), [effectiveCatId]);
   const { data: streams, loading, error } = usePanelList(getLiveStreams, catArgs);
   // Channel (if any) whose archive selector is open.
   const [catchupFor, setCatchupFor] = useState(null);
@@ -257,7 +261,6 @@ export default function LiveGuide() {
   const [focused, setFocused] = useState(null);
   // Favorites cache: key `type-id` -> bool, re-read when streams change.
   const [favTick, setFavTick] = useState(0);
-  const [query, setQuery] = useState('');
 
   const isFav = (ch) =>
     ch && isFavorite('live', String(ch.stream_id));
@@ -286,12 +289,12 @@ export default function LiveGuide() {
   }, [categories]);
 
   const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    if (!q || !streams) return streams || [];
-    return (streams || []).filter((ch) => {
-      if (String(ch.name || '').toLowerCase().includes(q)) return true;
+    if (!streams) return [];
+    if (!query.trim()) return streams;
+    return streams.filter((ch) => {
+      if (matchesSearch(ch.name, query)) return true;
       const catName = catNameById.get(String(ch.category_id)) || '';
-      return String(catName).toLowerCase().includes(q);
+      return matchesSearch(catName, query);
     });
   }, [streams, query, catNameById]);
 
@@ -317,15 +320,22 @@ export default function LiveGuide() {
         className="search-box"
         placeholder={t('live.search')}
         value={query}
-        onChange={(e) => setQuery(e.target.value)}
+        onChange={(e) => {
+          const v = e.target.value;
+          setQuery(v);
+          if (v.trim() && catId) setCatId('');
+        }}
       />
 
       {visibleCats && visibleCats.length > 0 && (
         <div className="cat-bar">
           <button
             tabIndex={0}
-            className={`cat-chip ${catId === '' ? 'selected' : ''}`}
-            onClick={() => setCatId('')}
+            className={`cat-chip ${effectiveCatId === '' ? 'selected' : ''}`}
+            onClick={() => {
+              setQuery('');
+              setCatId('');
+            }}
           >
             {t('live.all')}
           </button>
@@ -333,8 +343,11 @@ export default function LiveGuide() {
             <button
               key={cat.category_id}
               tabIndex={0}
-              className={`cat-chip ${String(catId) === String(cat.category_id) ? 'selected' : ''}`}
-              onClick={() => setCatId(String(cat.category_id))}
+              className={`cat-chip ${String(effectiveCatId) === String(cat.category_id) ? 'selected' : ''}`}
+              onClick={() => {
+                setQuery('');
+                setCatId(String(cat.category_id));
+              }}
             >
               {cat.category_name}
             </button>

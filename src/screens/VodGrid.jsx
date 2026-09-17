@@ -6,6 +6,7 @@ import { usePanelList } from '../hooks/usePanelList.js';
 import { usePersistedCategory } from '../hooks/usePersistedCategory.js';
 import { isCategoryLocked } from '../lib/parental.js';
 import { useFocusable } from '../components/Focusable.jsx';
+import { matchesSearch } from '../lib/searchText.js';
 
 function VodTile({ vod, onOpen }) {
   const { ref, tabIndex } = useFocusable(`vod-${vod.stream_id}`);
@@ -29,20 +30,29 @@ export default function VodGrid() {
   const navigate = useNavigate();
   const { data: categories } = usePanelList(getVodCategories);
   const [catId, setCatId] = usePersistedCategory('vod');
-  const catArgs = useMemo(() => (catId ? [catId] : []), [catId]);
-  const { data: streams, loading, error } = usePanelList(getVodStreams, catArgs);
   const [query, setQuery] = useState('');
+  // While typing, always search in "Todos" — category chips hide most titles
+  // and average users think the movie "doesn't exist".
+  const searchActive = Boolean(query.trim());
+  const effectiveCatId = searchActive ? '' : catId;
+  const catArgs = useMemo(() => (effectiveCatId ? [effectiveCatId] : []), [effectiveCatId]);
+  const { data: streams, loading, error } = usePanelList(getVodStreams, catArgs);
   const visibleCats = useMemo(
     () => (categories || []).filter((c) => !isCategoryLocked(c.category_id)),
     [categories]
   );
 
-  // Client-side search over the current category's stream list.
   const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    if (!q || !streams) return streams || [];
-    return (streams || []).filter((v) => String(v.name || '').toLowerCase().includes(q));
+    if (!streams) return [];
+    if (!query.trim()) return streams;
+    return streams.filter((v) => matchesSearch(v.name, query));
   }, [streams, query]);
+
+  const onQueryChange = (e) => {
+    const v = e.target.value;
+    setQuery(v);
+    if (v.trim() && catId) setCatId('');
+  };
 
   return (
     <div>
@@ -55,20 +65,30 @@ export default function VodGrid() {
         className="search-box"
         placeholder={t('vod.search')}
         value={query}
-        onChange={(e) => setQuery(e.target.value)}
+        onChange={onQueryChange}
       />
 
       {visibleCats && visibleCats.length > 0 && (
         <div className="cat-bar">
-          <button tabIndex={0} className={`cat-chip ${catId === '' ? 'selected' : ''}`} onClick={() => setCatId('')}>
+          <button
+            tabIndex={0}
+            className={`cat-chip ${effectiveCatId === '' ? 'selected' : ''}`}
+            onClick={() => {
+              setQuery('');
+              setCatId('');
+            }}
+          >
             {t('live.all')}
           </button>
           {visibleCats.map((cat) => (
             <button
               key={cat.category_id}
               tabIndex={0}
-              className={`cat-chip ${String(catId) === String(cat.category_id) ? 'selected' : ''}`}
-              onClick={() => setCatId(String(cat.category_id))}
+              className={`cat-chip ${String(effectiveCatId) === String(cat.category_id) ? 'selected' : ''}`}
+              onClick={() => {
+                setQuery('');
+                setCatId(String(cat.category_id));
+              }}
             >
               {cat.category_name}
             </button>

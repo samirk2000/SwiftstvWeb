@@ -6,6 +6,7 @@ import { usePanelList } from '../hooks/usePanelList.js';
 import { usePersistedCategory } from '../hooks/usePersistedCategory.js';
 import { isCategoryLocked } from '../lib/parental.js';
 import { useFocusable } from '../components/Focusable.jsx';
+import { matchesSearch } from '../lib/searchText.js';
 
 function SeriesTile({ series, onOpen }) {
   const { ref, tabIndex } = useFocusable(`series-${series.series_id}`);
@@ -29,19 +30,27 @@ export default function SeriesList() {
   const navigate = useNavigate();
   const { data: categories } = usePanelList(getSeriesCategories);
   const [catId, setCatId] = usePersistedCategory('series');
-  const catArgs = useMemo(() => (catId ? [catId] : []), [catId]);
-  const { data: series, loading, error } = usePanelList(getSeries, catArgs);
   const [query, setQuery] = useState('');
+  const searchActive = Boolean(query.trim());
+  const effectiveCatId = searchActive ? '' : catId;
+  const catArgs = useMemo(() => (effectiveCatId ? [effectiveCatId] : []), [effectiveCatId]);
+  const { data: series, loading, error } = usePanelList(getSeries, catArgs);
   const visibleCats = useMemo(
     () => (categories || []).filter((c) => !isCategoryLocked(c.category_id)),
     [categories]
   );
 
   const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    if (!q || !series) return series || [];
-    return (series || []).filter((s) => String(s.name || '').toLowerCase().includes(q));
+    if (!series) return [];
+    if (!query.trim()) return series;
+    return series.filter((s) => matchesSearch(s.name, query));
   }, [series, query]);
+
+  const onQueryChange = (e) => {
+    const v = e.target.value;
+    setQuery(v);
+    if (v.trim() && catId) setCatId('');
+  };
 
   return (
     <div>
@@ -54,20 +63,30 @@ export default function SeriesList() {
         className="search-box"
         placeholder={t('series.search')}
         value={query}
-        onChange={(e) => setQuery(e.target.value)}
+        onChange={onQueryChange}
       />
 
       {visibleCats && visibleCats.length > 0 && (
         <div className="cat-bar">
-          <button tabIndex={0} className={`cat-chip ${catId === '' ? 'selected' : ''}`} onClick={() => setCatId('')}>
+          <button
+            tabIndex={0}
+            className={`cat-chip ${effectiveCatId === '' ? 'selected' : ''}`}
+            onClick={() => {
+              setQuery('');
+              setCatId('');
+            }}
+          >
             {t('live.all')}
           </button>
           {visibleCats.map((cat) => (
             <button
               key={cat.category_id}
               tabIndex={0}
-              className={`cat-chip ${String(catId) === String(cat.category_id) ? 'selected' : ''}`}
-              onClick={() => setCatId(String(cat.category_id))}
+              className={`cat-chip ${String(effectiveCatId) === String(cat.category_id) ? 'selected' : ''}`}
+              onClick={() => {
+                setQuery('');
+                setCatId(String(cat.category_id));
+              }}
             >
               {cat.category_name}
             </button>
