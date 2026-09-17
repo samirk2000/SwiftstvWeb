@@ -37,11 +37,35 @@ function hostOf(baseUrl) {
   }
 }
 
-/** Stable id for a credentials pair (user @ panel host). */
-export function accountIdFor(baseUrl, username) {
-  const u = String(username || '').trim().toLowerCase();
-  const h = hostOf(baseUrl).toLowerCase();
-  return `${u}@${h}`;
+/**
+ * Same Xtream user = one account. Multi-DNS aliases (cvcplayer.us / cavctv.xyz / …)
+ * used to create 3 identical rows because the id included the host.
+ */
+export function accountIdFor(_baseUrl, username) {
+  return String(username || '').trim().toLowerCase();
+}
+
+/** Collapse legacy host-based duplicates (user@host) into one row per username. */
+export function dedupeAccounts(list) {
+  const byId = new Map();
+  for (const a of Array.isArray(list) ? list : []) {
+    if (!a?.username) continue;
+    const id = accountIdFor(a.baseUrl, a.username);
+    const prev = byId.get(id);
+    const score = Number(a.lastUsedAt) || 0;
+    const prevScore = Number(prev?.lastUsedAt) || 0;
+    if (!prev || score >= prevScore) {
+      byId.set(id, {
+        ...a,
+        id,
+        host: hostOf(a.baseUrl),
+        label: a.label || prev?.label || a.username,
+      });
+    }
+  }
+  return [...byId.values()].sort(
+    (x, y) => (Number(y.lastUsedAt) || 0) - (Number(x.lastUsedAt) || 0)
+  );
 }
 
 export function getSession() {
@@ -71,7 +95,16 @@ export function clearSession() {
 
 export function listAccounts() {
   const list = read(KEYS.accounts, []);
-  return Array.isArray(list) ? list : [];
+  const raw = Array.isArray(list) ? list : [];
+  const deduped = dedupeAccounts(raw);
+  // Persist migration once so Cuentas stops showing DNS-alias clones.
+  if (
+    deduped.length !== raw.length ||
+    deduped.some((a, i) => a.id !== raw[i]?.id)
+  ) {
+    writeAccounts(deduped);
+  }
+  return deduped;
 }
 
 function writeAccounts(list) {

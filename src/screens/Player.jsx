@@ -529,19 +529,11 @@ export default function Player() {
           isExclusive,
           preferHls,
           onHlsFallback: () => {
+            // Remember HLS-only for the NEXT zap. Do NOT remount the player
+            // here — attachTs.fallbackToHls already starts a single HLS after
+            // tearing down mpegts. setRestart used to open a 2nd HLS while the
+            // delayed fallback still ran → panel showed 2–3 connections.
             markHlsOnlyChannel(channelKey);
-            // mpegts no pudo reproducir este canal. Si nunca llegó a arrancar
-            // (empezando), reinicia el reproductor con un <video> NUEVO (key de
-            // restart cambia) e irá DIRECTO a HLS — la vía que sí reproduce este
-            // canal en navegadores donde mpegts falla. Si el canal YA estaba
-            // reproduciendo y se trabó a mitad, no reinicia (evita bucle).
-            if (!preferHls && !startedRef.current) {
-              setError(false);
-              setErrorCode(null);
-              setStarted(false);
-              startedRef.current = false;
-              setRestart((x) => x + 1);
-            }
           },
           onHlsFail: () => clearHlsOnlyChannel(channelKey),
           onError: onPlaybackError,

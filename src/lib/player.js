@@ -133,6 +133,9 @@ function hlsConfigFor(url, opts) {
     levelLoadingMaxRetry: isLiveFallback ? 2 : 4,
     // Cache-busting of the manifest so DVR buffers don't go stale after stalls.
     progressive: true,
+    // Don't prefetch the next fragment while the current one is still loading —
+    // that looked like 2–3 panel connections for one live channel.
+    startFragPrefetch: false,
   };
   if (opts?.extraOrigin) {
     const headers = {};
@@ -685,7 +688,9 @@ export function attachTs(videoEl, url, opts = {}) {
     controller.hls = attachHls(videoEl, hlsUrl, {
       ...opts,
       isLiveFallback: true,
-      liveSyncCount: opts.preferHls ? 1 : 3,
+      // Always short live-edge for live HLS: sync 3 made slow CDNs hunt
+      // segments forever (many panel connections, frozen “Cargando”).
+      liveSyncCount: 1,
     });
   }
 
