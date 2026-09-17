@@ -1,8 +1,10 @@
 // Session + local persistence (localStorage). Mirrors the Roku registry:
 // WorkingUrl / Username / Password, plus continue-watching and favorites.
+// Also keeps a multi-account list so the user can switch panels/users.
 
 const KEYS = {
   session: 'swiftstv.session.v1',
+  accounts: 'swiftstv.accounts.v1',
   continueWatching: 'swiftstv.continueWatching.v1',
   favorites: 'swiftstv.favorites.v1',
   language: 'swiftstv.language.v1',
@@ -27,24 +29,109 @@ function write(key, value) {
   }
 }
 
+function hostOf(baseUrl) {
+  try {
+    return new URL(baseUrl).host || String(baseUrl || '');
+  } catch {
+    return String(baseUrl || '').replace(/^https?:\/\//i, '');
+  }
+}
+
+/** Stable id for a credentials pair (user @ panel host). */
+export function accountIdFor(baseUrl, username) {
+  const u = String(username || '').trim().toLowerCase();
+  const h = hostOf(baseUrl).toLowerCase();
+  return `${u}@${h}`;
+}
+
 export function getSession() {
   return read(KEYS.session, null);
 }
 
 export function saveSession(session) {
-  write(KEYS.session, {
+  const payload = {
     baseUrl: session.baseUrl,
     username: session.username,
     password: session.password,
     savedAt: Date.now(),
     user_info: session.user_info || null,
-  });
+  };
+  write(KEYS.session, payload);
+  // Keep the multi-account book in sync whenever the active session is saved.
+  upsertAccount(payload);
 }
 
 export function clearSession() {
   try {
     localStorage.removeItem(KEYS.session);
   } catch {}
+}
+
+// ---- Multi-account book ----------------------------------------------------
+
+export function listAccounts() {
+  const list = read(KEYS.accounts, []);
+  return Array.isArray(list) ? list : [];
+}
+
+function writeAccounts(list) {
+  write(KEYS.accounts, list);
+}
+
+/** Insert or update an account entry from a successful login / session save. */
+export function upsertAccount(session, extras = {}) {
+  if (!session?.baseUrl || !session?.username || !session?.password) return null;
+  const id = accountIdFor(session.baseUrl, session.username);
+  const prev = listAccounts();
+  const existing = prev.find((a) => a.id === id);
+  const next = {
+    id,
+    baseUrl: session.baseUrl,
+    username: session.username,
+    password: session.password,
+    label: extras.label || existing?.label || session.username,
+    host: hostOf(session.baseUrl),
+    user_info: session.user_info || existing?.user_info || null,
+    lastUsedAt: Date.now(),
+    createdAt: existing?.createdAt || Date.now(),
+  };
+  const list = [next, ...prev.filter((a) => a.id !== id)];
+  writeAccounts(list);
+  return next;
+}
+
+export function getAccount(id) {
+  return listAccounts().find((a) => a.id === id) || null;
+}
+
+export function removeAccount(id) {
+  writeAccounts(listAccounts().filter((a) => a.id !== id));
+}
+
+export function updateAccount(id, patch) {
+  const list = listAccounts();
+  const idx = list.findIndex((a) => a.id === id);
+  if (idx < 0) return null;
+  const cur = list[idx];
+  const next = {
+    ...cur,
+    ...patch,
+    id:
+      patch.baseUrl || patch.username
+        ? accountIdFor(patch.baseUrl || cur.baseUrl, patch.username || cur.username)
+        : cur.id,
+    host: hostOf(patch.baseUrl || cur.baseUrl),
+  };
+  const cleaned = list.filter((a, i) => i !== idx && a.id !== next.id);
+  cleaned.unshift(next);
+  writeAccounts(cleaned);
+  return next;
+}
+
+/** Ensure the currently saved session appears in the accounts list (migration). */
+export function ensureActiveAccountListed() {
+  const s = getSession();
+  if (s?.baseUrl && s?.username && s?.password) upsertAccount(s);
 }
 
 export function getContinueWatching() {
@@ -59,9 +146,6 @@ export function updateContinueWatching(item) {
     id: item.id,
     title: item.title,
     image: item.image,
-    // Keep the raw (un-proxied) Xtream URL so Home's "resume" can rebuild the
-    // player route. It's stored per-playback; absent items fall back to
-    // reconstruction from type/id + session.
     url: item.url || '',
     baseUrl: item.baseUrl,
     position: item.position || 0,
@@ -112,14 +196,6 @@ export function saveLanguage(lang) {
   write(KEYS.language, lang === 'en' ? 'en' : 'es');
 }
 
-// ---- "HLS-only" channel memory -------------------------------------------
-// Some live channels CONNECT on the panel and download endlessly via the
-// continuous .ts, but mpegts.js never produces playback on certain browsers
-// (and the dirty MSE teardown can leave the HLS fallback unable to attach on
-// the same element). Once a channel falls back to HLS, remember it so the next
-// zap goes DIRECTLY to HLS (the route that historically played those channels),
-// skipping the 12s mpegts wait and the broken transition. The memory is cleared
-// when the HLS fallback itself fails (so a Retry re-tries mpegts).
 function getHlsOnlySet() {
   const raw = read(KEYS.hlsOnly, null);
   return Array.isArray(raw) ? new Set(raw) : new Set();

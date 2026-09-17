@@ -77,6 +77,7 @@ export default function Home() {
         <MenuItem to="series" icon="📚" label={t('home.series')} onNavigate={() => go('/series')} />
         <MenuItem to="exclusivos" icon="⚡" label={t('home.exclusivos')} onNavigate={() => go('/exclusivos')} />
         <MenuItem to="parental" icon="🔒" label={t('home.parental')} onNavigate={() => go('/parental')} />
+        <MenuItem to="accounts" icon="👤" label={t('home.accounts')} onNavigate={() => go('/accounts')} />
         <MenuItem to="settings" icon="⚙" label={t('home.settings')} onNavigate={() => go('/settings')} />
       </div>
 

@@ -23,13 +23,16 @@ import SeriesDetail from './screens/SeriesDetail.jsx';
 import Player from './screens/Player.jsx';
 import Exclusivos from './screens/Exclusivos.jsx';
 import Parental from './screens/Parental.jsx';
+import Accounts from './screens/Accounts.jsx';
 import Settings from './screens/Settings.jsx';
 
 function TopBar() {
-  const { logout, toggleLanguage, lang } = useSession();
+  const { logout, toggleLanguage, lang, session } = useSession();
   const navigate = useNavigate();
   const location = useLocation();
   const isPlayer = location.pathname === '/player';
+  const isLogin = location.pathname === '/login';
+  const loggedIn = Boolean(session || getSession());
   const brand = useFocusable('top-brand');
   const langBtn = useFocusable('top-lang');
   const logoutBtn = useFocusable('top-logout');
@@ -43,9 +46,9 @@ function TopBar() {
         tabIndex={brand.tabIndex}
         role="button"
         className="brand"
-        onClick={() => navigate('/')}
+        onClick={() => navigate(loggedIn && !isLogin ? '/' : location.pathname)}
         onKeyDown={(e) => {
-          if (e.key === 'Enter') navigate('/');
+          if (e.key === 'Enter' && loggedIn && !isLogin) navigate('/');
         }}
       >
         Swift<em>tv</em>
@@ -59,17 +62,19 @@ function TopBar() {
         >
           {lang === 'es' ? 'ES' : 'EN'}
         </button>
-        <button
-          ref={logoutBtn.ref}
-          tabIndex={logoutBtn.tabIndex}
-          className="btn-ghost"
-          onClick={() => {
-            logout();
-            navigate('/login');
-          }}
-        >
-          {lang === 'es' ? 'Cerrar sesión' : 'Sign out'}
-        </button>
+        {!isLogin && loggedIn ? (
+          <button
+            ref={logoutBtn.ref}
+            tabIndex={logoutBtn.tabIndex}
+            className="btn-ghost"
+            onClick={() => {
+              logout();
+              navigate('/login');
+            }}
+          >
+            {lang === 'es' ? 'Cerrar sesión' : 'Sign out'}
+          </button>
+        ) : null}
       </div>
     </header>
   );
@@ -275,6 +280,14 @@ function AppShell() {
               element={
                 <RequireSession>
                   <Parental />
+                </RequireSession>
+              }
+            />
+            <Route
+              path="/accounts"
+              element={
+                <RequireSession>
+                  <Accounts />
                 </RequireSession>
               }
             />

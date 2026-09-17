@@ -1,18 +1,24 @@
 import { useEffect, useRef, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { loginWithFailover } from '../lib/dns.js';
 import { tryRestoreSession } from '../lib/xtream.js';
 import { t, getLang } from '../lib/i18n.js';
 import { useSession } from '../context/SessionContext.jsx';
 import { serverInfoLabel } from '../lib/accountText.js';
 import { setFocused, getTvFocus, openIme } from '../components/Focusable.jsx';
+import { getAccount } from '../lib/session.js';
 
 // Login field chain for webOS D-pad: Usuario → Contraseña → Iniciar sesión.
-// ALL cyan rings go through setFocused() so only one field is marked at a time.
+// Modes: default | add (?add=1) | edit (?edit=<accountId>)
 
 export default function Login() {
   const navigate = useNavigate();
+  const [params] = useSearchParams();
   const { loginSuccess } = useSession();
+
+  const isAdd = params.get('add') === '1';
+  const editId = params.get('edit') || '';
+  const isEdit = Boolean(editId);
 
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -24,7 +30,6 @@ export default function Login() {
   const submitRef = useRef(null);
   const blurTimer = useRef(null);
   const imeOpenRef = useRef(false);
-  // When true, ignore pending blur restores (D-pad already moved the ring).
   const navLockRef = useRef(false);
 
   const fieldOrder = () =>
@@ -45,14 +50,12 @@ export default function Login() {
     openIme(el);
   };
 
-  // After IME hide / blur: restore virtual ring ONLY if we didn't already move away.
   const onFieldBlur = (el) => {
     clearBlurTimer();
     blurTimer.current = window.setTimeout(() => {
       blurTimer.current = null;
       imeOpenRef.current = false;
       if (navLockRef.current) return;
-      // D-pad already parked the ring on another control — don't snap back.
       const painted = getTvFocus();
       if (painted && painted !== el) return;
       const active = document.activeElement;
@@ -88,7 +91,6 @@ export default function Login() {
       }
     }
     setFocused(next, { native: false });
-    // Keep lock briefly so a late blur from IME/Back can't yank the ring up.
     window.setTimeout(() => {
       navLockRef.current = false;
     }, 200);
@@ -117,7 +119,6 @@ export default function Login() {
     if (back && isLoginInput(current)) {
       e.preventDefault();
       e.stopPropagation();
-      // Close IME and keep ring on THIS field (not always Usuario).
       clearBlurTimer();
       navLockRef.current = true;
       imeOpenRef.current = false;
@@ -153,6 +154,14 @@ export default function Login() {
   };
 
   useEffect(() => {
+    if (!isEdit) return;
+    const acc = getAccount(editId);
+    if (!acc) return;
+    setUsername(acc.username || '');
+    setPassword(acc.password || '');
+  }, [isEdit, editId]);
+
+  useEffect(() => {
     const kick = () => setFocused(userRef.current, { native: false });
     const t1 = window.setTimeout(kick, 40);
     const t2 = window.setTimeout(() => {
@@ -166,6 +175,7 @@ export default function Login() {
   }, []);
 
   useEffect(() => {
+    if (isAdd || isEdit) return undefined;
     let cancelled = false;
     (async () => {
       const res = await tryRestoreSession();
@@ -179,7 +189,12 @@ export default function Login() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [isAdd, isEdit]);
+
+  const leaveLogin = () => {
+    if (isAdd || isEdit) navigate('/accounts');
+    else navigate(-1);
+  };
 
   const doLogin = async () => {
     if (busy) return;
@@ -220,6 +235,12 @@ export default function Login() {
     }
   };
 
+  const titleHint = isEdit
+    ? t('accounts.editHint')
+    : isAdd
+      ? t('accounts.addHint')
+      : t('login.typeHint');
+
   return (
     <div className="login-wrap">
       <form
@@ -230,8 +251,19 @@ export default function Login() {
           doLogin();
         }}
       >
+        {(isAdd || isEdit) && (
+          <button
+            type="button"
+            tabIndex={0}
+            className="back-btn"
+            style={{ alignSelf: 'flex-start', marginBottom: 8 }}
+            onClick={leaveLogin}
+          >
+            ← {t('common.back')}
+          </button>
+        )}
         <h1>{t('appName')}</h1>
-        <p className="login-hint">{t('login.typeHint')}</p>
+        <p className="login-hint">{titleHint}</p>
 
         <label htmlFor="login-user">
           {t('login.username')}
