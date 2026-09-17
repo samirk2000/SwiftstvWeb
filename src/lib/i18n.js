@@ -79,7 +79,10 @@ export const STRINGS = {
       pause: 'Pausa',
       vodHint: (seek = 30) =>
         `1º flecha abre controles · ← → ±${seek}s · OK pausa · Back salir`,
-      liveHint: '↑ ↓ o CH± cambia canal · números saltan · Back salir',
+      liveHint: '↑ ↓ lista de canales · OK sintoniza · Back cierra / guía',
+      zapGuide: 'Canales',
+      zapPlaying: 'En vivo',
+      zapHint: 'OK para ver · Back para cerrar',
       nextEpisode: 'Siguiente',
       signalError: 'No hay señal en este canal ahora.',
       signalHint: 'Prueba otro canal con ↑ ↓, o Reintentar en unos segundos.',
@@ -267,7 +270,10 @@ export const STRINGS = {
       pause: 'Pause',
       vodHint: (seek = 30) =>
         `1st arrow shows controls · ← → ±${seek}s · OK pause · Back exit`,
-      liveHint: '↑ ↓ or CH± change channel · numbers jump · Back exit',
+      liveHint: '↑ ↓ channel list · OK tune in · Back close / guide',
+      zapGuide: 'Channels',
+      zapPlaying: 'Live',
+      zapHint: 'OK to watch · Back to close',
       nextEpisode: 'Next',
       signalError: 'No signal on this channel right now.',
       signalHint: 'Try another channel with ↑ ↓, or Retry in a few seconds.',

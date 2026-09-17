@@ -12,7 +12,7 @@ import {
 } from '../lib/session.js';
 import { setFocused } from '../components/Focusable.jsx';
 import { getPrefs } from '../lib/prefs.js';
-import { zapRelative, zapByNumber, setLastLiveChannel } from '../lib/liveZap.js';
+import { zapByNumber, setLastLiveChannel, getLiveZapList, findZapIndex } from '../lib/liveZap.js';
 import { getSeriesInfo, seriesStreamUrl } from '../lib/xtream.js';
 
 export default function Player() {
@@ -67,6 +67,13 @@ export default function Player() {
   const [leaveOpen, setLeaveOpen] = useState(false);
   const [zapBanner, setZapBanner] = useState('');
   const [numBuffer, setNumBuffer] = useState('');
+  // Live zap guide overlay: ↑↓ browse without changing the playing stream; OK tunes in.
+  const [zapOpen, setZapOpen] = useState(false);
+  const [zapIndex, setZapIndex] = useState(0);
+  const zapOpenRef = useRef(false);
+  const zapIndexRef = useRef(0);
+  zapOpenRef.current = zapOpen;
+  zapIndexRef.current = zapIndex;
   const numTimer = useRef(null);
   const prefs = getPrefs();
   const seekJump = Number(prefs.seekJump) || 30;
@@ -101,6 +108,9 @@ export default function Player() {
 
   const goLiveChannel = (ch) => {
     if (!ch?.url) return;
+    setZapOpen(false);
+    setNumBuffer('');
+    if (numTimer.current) clearTimeout(numTimer.current);
     setLastLiveChannel(ch.id);
     setZapBanner(ch.name || ch.id);
     window.setTimeout(() => setZapBanner(''), 2500);
@@ -110,6 +120,35 @@ export default function Player() {
       )}`,
       { replace: true }
     );
+  };
+
+  const openZapAt = (idx) => {
+    const list = getLiveZapList();
+    if (!list.length) return;
+    const safe = ((idx % list.length) + list.length) % list.length;
+    setZapIndex(safe);
+    zapIndexRef.current = safe;
+    setZapOpen(true);
+    zapOpenRef.current = true;
+  };
+
+  const moveZap = (delta) => {
+    const list = getLiveZapList();
+    if (!list.length) return;
+    if (!zapOpenRef.current) {
+      const cur = findZapIndex(id);
+      openZapAt((cur < 0 ? 0 : cur) + delta);
+      return;
+    }
+    const next = (zapIndexRef.current + delta + list.length * 10) % list.length;
+    setZapIndex(next);
+    zapIndexRef.current = next;
+  };
+
+  const confirmZap = () => {
+    const list = getLiveZapList();
+    const ch = list[zapIndexRef.current];
+    if (ch) goLiveChannel(ch);
   };
 
   const playNextEpisode = async () => {
@@ -235,6 +274,14 @@ export default function Player() {
         setControlsVisible(true);
         return;
       }
+      // Live: first Back closes the zap overlay; second Back returns to the guide.
+      if (zapOpenRef.current) {
+        setZapOpen(false);
+        zapOpenRef.current = false;
+        setNumBuffer('');
+        if (numTimer.current) clearTimeout(numTimer.current);
+        return;
+      }
       navigate(-1);
     };
 
@@ -272,7 +319,7 @@ export default function Player() {
         e.stopImmediatePropagation();
       };
 
-      // ---- LIVE: CH+/−, numbers, OK shows OSD ----
+      // ---- LIVE: overlay zap (↑↓ browse, OK tune) · numbers · Back ----
       if (isLive) {
         const isChUp =
           e.key === 'ChannelUp' ||
@@ -296,14 +343,12 @@ export default function Player() {
         }
         if (isChUp) {
           claim();
-          const next = zapRelative(id, 1);
-          if (next) goLiveChannel(next);
+          moveZap(1);
           return;
         }
         if (isChDown) {
           claim();
-          const next = zapRelative(id, -1);
-          if (next) goLiveChannel(next);
+          moveZap(-1);
           return;
         }
         if (digit) {
@@ -311,18 +356,30 @@ export default function Player() {
           setNumBuffer((prev) => {
             const next = `${prev}${digit}`.slice(-4);
             clearTimeout(numTimer.current);
+            const ch = zapByNumber(next);
+            if (ch) {
+              const idx = findZapIndex(ch.id);
+              if (idx >= 0) openZapAt(idx);
+            } else if (!zapOpenRef.current) {
+              const cur = findZapIndex(id);
+              openZapAt(cur < 0 ? 0 : cur);
+            }
             numTimer.current = setTimeout(() => {
-              const ch = zapByNumber(next);
+              const picked = zapByNumber(next);
               setNumBuffer('');
-              if (ch) goLiveChannel(ch);
-            }, 1200);
+              if (picked) goLiveChannel(picked);
+            }, 1400);
             return next;
           });
           return;
         }
         if (e.key === 'Enter' || code === 13 || code === 23) {
           claim();
-          setControlsVisible(true);
+          if (zapOpenRef.current) {
+            confirmZap();
+          } else {
+            setControlsVisible(true);
+          }
           return;
         }
         return;
@@ -963,7 +1020,7 @@ export default function Player() {
         </div>
       )}
 
-      {(zapBanner || numBuffer) && (
+      {(zapBanner || numBuffer) && !zapOpen && (
         <div className="zap-banner" aria-live="polite">
           {numBuffer ? (
             <span className="zap-num">{numBuffer}_</span>
@@ -972,6 +1029,45 @@ export default function Player() {
           )}
         </div>
       )}
+
+      {isLive && zapOpen && (() => {
+        const list = getLiveZapList();
+        if (!list.length) return null;
+        const win = 7;
+        const half = Math.floor(win / 2);
+        let start = Math.max(0, zapIndex - half);
+        let end = Math.min(list.length, start + win);
+        start = Math.max(0, end - win);
+        const slice = list.slice(start, end);
+        return (
+          <div className="zap-guide" role="listbox" aria-label={t('player.zapGuide')}>
+            <div className="zap-guide-head">
+              <span>{t('player.zapGuide')}</span>
+              {numBuffer ? <span className="zap-num">{numBuffer}_</span> : null}
+            </div>
+            <ul className="zap-guide-list">
+              {slice.map((ch, i) => {
+                const abs = start + i;
+                const active = abs === zapIndex;
+                const playing = String(ch.id) === String(id);
+                return (
+                  <li
+                    key={ch.id}
+                    className={`zap-guide-row ${active ? 'is-active' : ''} ${playing ? 'is-playing' : ''}`}
+                    role="option"
+                    aria-selected={active}
+                  >
+                    <span className="zap-guide-num">{abs + 1}</span>
+                    <span className="zap-guide-name">{ch.name || ch.id}</span>
+                    {playing ? <span className="zap-guide-now">{t('player.zapPlaying')}</span> : null}
+                  </li>
+                );
+              })}
+            </ul>
+            <p className="zap-guide-hint">{t('player.zapHint')}</p>
+          </div>
+        );
+      })()}
 
       {leaveOpen && (
         <div className="exit-overlay player-leave" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
