@@ -10,7 +10,7 @@ import { isCategoryLocked } from '../lib/parental.js';
 import { isFavorite, toggleFavorite } from '../lib/session.js';
 import { useFocusable, FocusScope, setFocused } from '../components/Focusable.jsx';
 import { formatEpgTime, currentProgramme, epochAtLocal, shortDayLabel } from '../lib/time.js';
-import { setLiveZapList, setLastLiveChannel } from '../lib/liveZap.js';
+import { setLiveZapList, setLiveZapMeta, setLastLiveChannel } from '../lib/liveZap.js';
 import { matchesSearch } from '../lib/searchText.js';
 
 // Days offered by the catch-up manual selector (today + N days back).
@@ -354,6 +354,16 @@ export default function LiveGuide() {
       url: liveStreamTsUrl(server, c.stream_id),
     }));
     setLiveZapList(list);
+    setLiveZapMeta({
+      catId: effectiveCatId || catId || '',
+      categories: [
+        { id: '', name: t('live.all') },
+        ...(visibleCats || []).map((c) => ({
+          id: String(c.category_id),
+          name: c.category_name || String(c.category_id),
+        })),
+      ],
+    });
     setLastLiveChannel(String(ch.stream_id));
     const url = liveStreamTsUrl(server, ch.stream_id);
     navigate(

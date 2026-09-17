@@ -12,8 +12,17 @@ import {
 } from '../lib/session.js';
 import { setFocused } from '../components/Focusable.jsx';
 import { getPrefs } from '../lib/prefs.js';
-import { zapByNumber, setLastLiveChannel, getLiveZapList, findZapIndex } from '../lib/liveZap.js';
-import { getSeriesInfo, seriesStreamUrl } from '../lib/xtream.js';
+import {
+  zapByNumber,
+  setLastLiveChannel,
+  getLiveZapList,
+  findZapIndex,
+  getLiveZapMeta,
+  setLiveZapList,
+  setLiveZapCatId,
+  zapCategoryRelative,
+} from '../lib/liveZap.js';
+import { getSeriesInfo, seriesStreamUrl, getLiveStreams, liveStreamTsUrl } from '../lib/xtream.js';
 
 export default function Player() {
   const location = useLocation();
@@ -70,10 +79,14 @@ export default function Player() {
   // Live zap guide overlay: ↑↓ browse without changing the playing stream; OK tunes in.
   const [zapOpen, setZapOpen] = useState(false);
   const [zapIndex, setZapIndex] = useState(0);
+  const [zapCatTick, setZapCatTick] = useState(0); // re-render overlay after category swap
+  const [zapLoading, setZapLoading] = useState(false);
   const zapOpenRef = useRef(false);
   const zapIndexRef = useRef(0);
+  const zapLoadingRef = useRef(false);
   zapOpenRef.current = zapOpen;
   zapIndexRef.current = zapIndex;
+  zapLoadingRef.current = zapLoading;
   const numTimer = useRef(null);
   const prefs = getPrefs();
   const seekJump = Number(prefs.seekJump) || 30;
@@ -146,9 +159,52 @@ export default function Player() {
   };
 
   const confirmZap = () => {
+    if (zapLoadingRef.current) return;
     const list = getLiveZapList();
     const ch = list[zapIndexRef.current];
     if (ch) goLiveChannel(ch);
+  };
+
+  const shiftZapCategory = async (delta) => {
+    if (zapLoadingRef.current) return;
+    const nextCat = zapCategoryRelative(delta);
+    if (!nextCat) {
+      // No categories saved — still open overlay so user sees channels.
+      if (!zapOpenRef.current) {
+        const cur = findZapIndex(id);
+        openZapAt(cur < 0 ? 0 : cur);
+      }
+      return;
+    }
+    const saved = getSession();
+    if (!saved?.baseUrl) return;
+    setZapOpen(true);
+    zapOpenRef.current = true;
+    setZapLoading(true);
+    zapLoadingRef.current = true;
+    try {
+      const srv = {
+        baseUrl: saved.baseUrl,
+        username: saved.username,
+        password: saved.password,
+      };
+      const streams = await getLiveStreams(srv, nextCat.id || undefined);
+      const list = (Array.isArray(streams) ? streams : []).map((c) => ({
+        id: String(c.stream_id),
+        name: c.name || '',
+        url: liveStreamTsUrl(srv, c.stream_id),
+      }));
+      setLiveZapList(list);
+      setLiveZapCatId(nextCat.id);
+      setZapIndex(0);
+      zapIndexRef.current = 0;
+      setZapCatTick((x) => x + 1);
+    } catch {
+      /* keep previous list */
+    } finally {
+      setZapLoading(false);
+      zapLoadingRef.current = false;
+    }
   };
 
   const playNextEpisode = async () => {
@@ -319,7 +375,7 @@ export default function Player() {
         e.stopImmediatePropagation();
       };
 
-      // ---- LIVE: overlay zap (↑↓ browse, OK tune) · numbers · Back ----
+      // ---- LIVE: overlay zap (↑↓ canales, ←→ categoría, OK sintoniza) ----
       if (isLive) {
         const isChUp =
           e.key === 'ChannelUp' ||
@@ -335,20 +391,33 @@ export default function Player() {
           code === 428 ||
           code === 34 ||
           code === 40;
+        const isLeft = e.key === 'ArrowLeft' || code === 37;
+        const isRight = e.key === 'ArrowRight' || code === 39;
         const digit = /^[0-9]$/.test(e.key || '') ? e.key : code >= 48 && code <= 57 ? String(code - 48) : '';
 
-        if (e.repeat && (isChUp || isChDown || digit)) {
+        if (e.repeat && (isChUp || isChDown || isLeft || isRight || digit)) {
           claim();
           return;
         }
+        // ↑ = canal anterior (número más bajo), ↓ = siguiente — como control de TV.
         if (isChUp) {
           claim();
-          moveZap(1);
+          moveZap(-1);
           return;
         }
         if (isChDown) {
           claim();
-          moveZap(-1);
+          moveZap(1);
+          return;
+        }
+        if (isLeft) {
+          claim();
+          shiftZapCategory(-1);
+          return;
+        }
+        if (isRight) {
+          claim();
+          shiftZapCategory(1);
           return;
         }
         if (digit) {
@@ -1032,38 +1101,45 @@ export default function Player() {
 
       {isLive && zapOpen && (() => {
         const list = getLiveZapList();
-        if (!list.length) return null;
+        const meta = getLiveZapMeta();
+        const catName =
+          meta.categories.find((c) => String(c.id) === String(meta.catId))?.name ||
+          t('player.zapGuide');
         const win = 7;
         const half = Math.floor(win / 2);
-        let start = Math.max(0, zapIndex - half);
+        let start = list.length ? Math.max(0, zapIndex - half) : 0;
         let end = Math.min(list.length, start + win);
         start = Math.max(0, end - win);
         const slice = list.slice(start, end);
         return (
-          <div className="zap-guide" role="listbox" aria-label={t('player.zapGuide')}>
+          <div className="zap-guide" role="listbox" aria-label={t('player.zapGuide')} data-zap-tick={zapCatTick}>
             <div className="zap-guide-head">
-              <span>{t('player.zapGuide')}</span>
+              <span className="zap-guide-cat">← {catName} →</span>
               {numBuffer ? <span className="zap-num">{numBuffer}_</span> : null}
             </div>
-            <ul className="zap-guide-list">
-              {slice.map((ch, i) => {
-                const abs = start + i;
-                const active = abs === zapIndex;
-                const playing = String(ch.id) === String(id);
-                return (
-                  <li
-                    key={ch.id}
-                    className={`zap-guide-row ${active ? 'is-active' : ''} ${playing ? 'is-playing' : ''}`}
-                    role="option"
-                    aria-selected={active}
-                  >
-                    <span className="zap-guide-num">{abs + 1}</span>
-                    <span className="zap-guide-name">{ch.name || ch.id}</span>
-                    {playing ? <span className="zap-guide-now">{t('player.zapPlaying')}</span> : null}
-                  </li>
-                );
-              })}
-            </ul>
+            {zapLoading ? (
+              <div className="zap-guide-loading">{t('common.loading')}</div>
+            ) : (
+              <ul className="zap-guide-list">
+                {slice.map((ch, i) => {
+                  const abs = start + i;
+                  const active = abs === zapIndex;
+                  const playing = String(ch.id) === String(id);
+                  return (
+                    <li
+                      key={ch.id}
+                      className={`zap-guide-row ${active ? 'is-active' : ''} ${playing ? 'is-playing' : ''}`}
+                      role="option"
+                      aria-selected={active}
+                    >
+                      <span className="zap-guide-num">{abs + 1}</span>
+                      <span className="zap-guide-name">{ch.name || ch.id}</span>
+                      {playing ? <span className="zap-guide-now">{t('player.zapPlaying')}</span> : null}
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
             <p className="zap-guide-hint">{t('player.zapHint')}</p>
           </div>
         );

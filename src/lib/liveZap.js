@@ -1,7 +1,8 @@
-/** Live channel zap list for CH+/− and numeric entry while in the player. */
+/** Live channel zap list + category context for the in-player overlay. */
 
 const LIST_KEY = 'swiftstv.liveZap.v1';
 const LAST_KEY = 'swiftstv.liveLast.v1';
+const META_KEY = 'swiftstv.liveZapMeta.v1';
 
 function read(key, fallback) {
   try {
@@ -39,6 +40,49 @@ export function getLiveZapList() {
   return Array.isArray(list) ? list : [];
 }
 
+/**
+ * Categories available while zapping from the player overlay.
+ * @param {{ categories: { id: string, name: string }[], catId: string }} meta
+ */
+export function setLiveZapMeta(meta) {
+  const categories = Array.isArray(meta?.categories)
+    ? meta.categories
+        .filter((c) => c && (c.id != null || c.name))
+        .map((c) => ({ id: String(c.id ?? ''), name: String(c.name || '') }))
+    : [];
+  write(META_KEY, {
+    categories,
+    catId: meta?.catId != null ? String(meta.catId) : '',
+  });
+}
+
+export function getLiveZapMeta() {
+  const meta = read(META_KEY, null);
+  if (!meta || typeof meta !== 'object') return { categories: [], catId: '' };
+  return {
+    categories: Array.isArray(meta.categories) ? meta.categories : [],
+    catId: meta.catId != null ? String(meta.catId) : '',
+  };
+}
+
+export function setLiveZapCatId(catId) {
+  const meta = getLiveZapMeta();
+  write(META_KEY, { ...meta, catId: String(catId ?? '') });
+}
+
+/** Move ±1 category in the saved list. Returns next cat or null. */
+export function zapCategoryRelative(delta) {
+  const meta = getLiveZapMeta();
+  const cats = meta.categories || [];
+  if (cats.length < 2) return null;
+  let idx = cats.findIndex((c) => String(c.id) === String(meta.catId));
+  if (idx < 0) idx = 0;
+  const next = cats[(idx + delta + cats.length * 10) % cats.length];
+  if (!next) return null;
+  setLiveZapCatId(next.id);
+  return next;
+}
+
 export function setLastLiveChannel(id) {
   if (id == null) return;
   write(LAST_KEY, String(id));
@@ -68,7 +112,6 @@ export function zapByNumber(numStr) {
   if (!list.length || !numStr) return null;
   const n = Number(numStr);
   if (!Number.isFinite(n) || n <= 0) return null;
-  // Prefer list position (what the guide shows as 1..N).
   if (n >= 1 && n <= list.length) return list[n - 1];
   return list.find((c) => String(c.id) === String(n)) || null;
 }
