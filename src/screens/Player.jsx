@@ -9,6 +9,7 @@ import {
   markHlsOnlyChannel,
   clearHlsOnlyChannel,
 } from '../lib/session.js';
+import { setFocused } from '../components/Focusable.jsx';
 
 export default function Player() {
   const location = useLocation();
@@ -57,8 +58,37 @@ export default function Player() {
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [leaveOpen, setLeaveOpen] = useState(false);
-  const seekStep = 10;
+  // Big, obvious jumps — one press = 30s. No tiny ±10s on Up/Down (too easy to
+  // hit by accident on a TV remote and feels "broken" to average users).
   const seekJump = 30;
+  const controlsVisibleRef = useRef(controlsVisible);
+  controlsVisibleRef.current = controlsVisible;
+  const lastSeekAtRef = useRef(0);
+  const SEEK_COOLDOWN_MS = 650;
+  const pauseBtnRef = useRef(null);
+
+  // Claim D-pad/OK from global TV nav while VOD-like playback is active.
+  // Cleared during leave dialog so Seguir viendo / Salir remain OK-activatable.
+  useEffect(() => {
+    if (!isVodLike) return undefined;
+    if (leaveOpen) {
+      delete document.documentElement.dataset.tvPlayerKeys;
+      return undefined;
+    }
+    document.documentElement.dataset.tvPlayerKeys = 'vod';
+    return () => {
+      delete document.documentElement.dataset.tvPlayerKeys;
+    };
+  }, [isVodLike, leaveOpen]);
+
+  // When the transport bar appears, park focus on Pause — never on Atrás.
+  useEffect(() => {
+    if (!isVodLike || !controlsVisible || leaveOpen) return undefined;
+    const id = window.setTimeout(() => {
+      if (pauseBtnRef.current) setFocused(pauseBtnRef.current, { native: false });
+    }, 30);
+    return () => window.clearTimeout(id);
+  }, [isVodLike, controlsVisible, leaveOpen]);
 
   // Live channel memory: once a channel fell back to HLS (mpegts can't play its
   // .ts on this browser), remember it so the next zap goes straight to HLS —
@@ -95,17 +125,22 @@ export default function Player() {
     }
   };
 
-  // 'p' toggles PiP; VOD keys: space/OK pause, arrows seek, Back confirms leave.
+  // 'p' toggles PiP. VOD is intentionally "slow": first D-pad/OK only opens the
+  // bar; seek/pause need the bar visible. Ignores key-repeat so holding ←/→
+  // does not rocket through the movie.
   useEffect(() => {
     const bumpControls = () => {
       setControlsVisible(true);
       clearTimeout(hideTimer.current);
-      hideTimer.current = setTimeout(() => setControlsVisible(false), 4000);
+      hideTimer.current = setTimeout(() => setControlsVisible(false), 6000);
     };
 
     const seekBy = (delta) => {
       const v = videoRef.current;
       if (!v || !isVodLike) return;
+      const now = Date.now();
+      if (now - lastSeekAtRef.current < SEEK_COOLDOWN_MS) return;
+      lastSeekAtRef.current = now;
       const dur = Number.isFinite(v.duration) ? v.duration : 0;
       const next = Math.max(0, Math.min(dur || Infinity, (v.currentTime || 0) + delta));
       try {
@@ -144,6 +179,11 @@ export default function Player() {
       navigate(-1);
     };
 
+    /** First press only wakes the OSD — no seek/pause yet. */
+    const wakeOnly = () => {
+      bumpControls();
+    };
+
     const onKey = (e) => {
       if (e.key === 'p' || e.key === 'P') {
         togglePip(videoRef.current);
@@ -163,65 +203,91 @@ export default function Player() {
 
       if (isBack) {
         e.preventDefault();
-        e.stopPropagation();
+        e.stopImmediatePropagation();
         requestLeave();
         return;
       }
 
       if (!isVodLike) return;
 
-      // Media / transport keys (when the remote sends them).
-      if (e.key === 'MediaPlayPause' || e.key === ' ' || code === 179) {
+      const osdUp = controlsVisibleRef.current;
+      const isLeft = e.key === 'MediaRewind' || e.key === 'ArrowLeft' || code === 412 || code === 37;
+      const isRight = e.key === 'MediaFastForward' || e.key === 'ArrowRight' || code === 417 || code === 39;
+      const isUp = e.key === 'ArrowUp' || code === 38;
+      const isDown = e.key === 'ArrowDown' || code === 40;
+      const isOk =
+        e.key === 'Enter' ||
+        e.key === 'MediaPlayPause' ||
+        e.key === ' ' ||
+        code === 13 ||
+        code === 23 ||
+        code === 179;
+      const isMediaPlay = e.key === 'MediaPlay' || code === 415;
+      const isMediaPause = e.key === 'MediaPause' || code === 19;
+
+      const claim = () => {
         e.preventDefault();
-        e.stopPropagation();
-        togglePlay();
+        e.stopImmediatePropagation();
+      };
+
+      // Holding the remote fires key-repeat — ignore those entirely for VOD.
+      if (e.repeat && (isLeft || isRight || isUp || isDown || isOk || isMediaPlay || isMediaPause)) {
+        claim();
         return;
       }
-      if (e.key === 'MediaPlay' || code === 415) {
-        e.preventDefault();
+
+      // OSD closed: any transport key only reveals controls (Netflix/TV pattern).
+      if (!osdUp && (isLeft || isRight || isUp || isDown || isOk || isMediaPlay || isMediaPause)) {
+        claim();
+        wakeOnly();
+        return;
+      }
+
+      // Dedicated media keys still work when OSD is up.
+      if (isMediaPlay) {
+        claim();
         const v = videoRef.current;
         if (v?.paused) togglePlay();
+        else bumpControls();
         return;
       }
-      if (e.key === 'MediaPause' || code === 19) {
-        e.preventDefault();
+      if (isMediaPause) {
+        claim();
         const v = videoRef.current;
         if (v && !v.paused) togglePlay();
+        else bumpControls();
         return;
       }
-      if (e.key === 'MediaRewind' || e.key === 'ArrowLeft' || code === 412 || code === 37) {
-        // Only seek with arrows when controls are up OR always for VOD — always.
-        e.preventDefault();
-        e.stopPropagation();
+
+      // ← → only seek when the bar is already visible (+ cooldown).
+      if (isLeft) {
+        claim();
         seekBy(-seekJump);
         return;
       }
-      if (e.key === 'MediaFastForward' || e.key === 'ArrowRight' || code === 417 || code === 39) {
-        e.preventDefault();
-        e.stopPropagation();
+      if (isRight) {
+        claim();
         seekBy(seekJump);
         return;
       }
-      if (e.key === 'ArrowUp' || code === 38) {
-        e.preventDefault();
-        seekBy(seekStep);
+
+      // ↑ ↓ never seek/pause — only keep the bar visible.
+      if (isUp || isDown) {
+        claim();
+        bumpControls();
         return;
       }
-      if (e.key === 'ArrowDown' || code === 40) {
-        e.preventDefault();
-        seekBy(-seekStep);
-        return;
-      }
-      // OK / Enter toggles play when not focusing a button (buttons get click via global).
-      if ((e.key === 'Enter' || code === 13 || code === 23) && !e.target?.closest?.('button')) {
-        e.preventDefault();
+
+      // OK / Enter / Space ALWAYS pause/play (never activate Atrás).
+      if (isOk) {
+        claim();
         togglePlay();
       }
     };
 
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
-  }, [isVodLike, leaveOpen, navigate, seekJump, seekStep]);
+  }, [isVodLike, leaveOpen, navigate, seekJump]);
 
   // Keep progress UI in sync for VOD-like streams.
   useEffect(() => {
@@ -561,6 +627,9 @@ export default function Player() {
     e?.stopPropagation?.();
     const v = videoRef.current;
     if (!v) return;
+    const now = Date.now();
+    if (now - lastSeekAtRef.current < SEEK_COOLDOWN_MS) return;
+    lastSeekAtRef.current = now;
     const dur = Number.isFinite(v.duration) ? v.duration : 0;
     const next = Math.max(0, Math.min(dur || Infinity, (v.currentTime || 0) + delta));
     try {
@@ -570,6 +639,8 @@ export default function Player() {
     }
     setCurrentTime(next);
     setControlsVisible(true);
+    clearTimeout(hideTimer.current);
+    hideTimer.current = setTimeout(() => setControlsVisible(false), 6000);
   };
 
   if (error || !url) {
@@ -726,7 +797,9 @@ export default function Player() {
                   ⏪ -{seekJump}s
                 </button>
                 <button
+                  ref={pauseBtnRef}
                   tabIndex={0}
+                  data-player-pause="1"
                   className="btn-primary player-transport-btn"
                   onClick={togglePlayClick}
                 >
