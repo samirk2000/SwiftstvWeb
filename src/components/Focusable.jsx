@@ -416,17 +416,26 @@ export function useAutoFocus(deps = [], rootSelector) {
   }, deps);
 }
 
-function isBackKey(e) {
+function isTextBackspace(e) {
+  const code = e.keyCode || e.which || 0;
+  return e.key === 'Backspace' || code === 8;
+}
+
+/** LG / TV remote Back (NOT the IME delete key). */
+function isRemoteBackKey(e) {
   const code = e.keyCode || e.which || 0;
   return (
     e.key === 'Escape' ||
-    e.key === 'Backspace' ||
     e.key === 'BrowserBack' ||
     e.key === 'GoBack' ||
     code === LG_BACK_KEYCODE ||
-    code === 27 ||
-    code === 8
+    code === 27
   );
+}
+
+function isBackKey(e) {
+  // Backspace is only "Back" when we are NOT editing a text field.
+  return isRemoteBackKey(e) || isTextBackspace(e);
 }
 
 function isEnterKey(e) {
@@ -611,8 +620,12 @@ export function useGlobalTvKeys({ onEscape, onEnter } = {}) {
         return;
       }
 
-      if (isBackKey(e)) {
-        if (isTypingTarget(active) && document.activeElement === active) {
+      if (isBackKey(e) || isRemoteBackKey(e) || isTextBackspace(e)) {
+        const typing = isTypingTarget(active) && document.activeElement === active;
+        // IME delete: never steal Backspace while the input has native focus.
+        if (typing && isTextBackspace(e)) return;
+
+        if (typing && isRemoteBackKey(e)) {
           e.preventDefault();
           e.stopPropagation();
           try {
@@ -624,10 +637,13 @@ export function useGlobalTvKeys({ onEscape, onEnter } = {}) {
           setFocused(active, { native: false });
           return;
         }
-        if (typeof onEscapeRef.current === 'function') {
-          e.preventDefault();
-          e.stopPropagation();
-          onEscapeRef.current();
+
+        if (!typing && (isRemoteBackKey(e) || isTextBackspace(e))) {
+          if (typeof onEscapeRef.current === 'function') {
+            e.preventDefault();
+            e.stopPropagation();
+            onEscapeRef.current();
+          }
         }
       }
     };

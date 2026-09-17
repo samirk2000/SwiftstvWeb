@@ -106,17 +106,24 @@ export default function Login() {
       e.key === 'Accept' ||
       code === 13 ||
       code === 23;
-    const back =
+    const remoteBack =
       e.key === 'Escape' ||
-      e.key === 'Backspace' ||
+      e.key === 'BrowserBack' ||
+      e.key === 'GoBack' ||
       code === 461 ||
-      code === 27 ||
-      code === 8;
+      code === 27;
+    const isBs = e.key === 'Backspace' || code === 8;
 
     const fields = fieldOrder();
     const current = fields[index];
 
-    if (back && isLoginInput(current)) {
+    // While the IME has the input focused, Backspace must delete characters —
+    // only the TV Back key (461) / Escape closes the keyboard.
+    if (isBs && isLoginInput(current) && document.activeElement === current) {
+      return;
+    }
+
+    if (remoteBack && isLoginInput(current)) {
       e.preventDefault();
       e.stopPropagation();
       clearBlurTimer();
