@@ -54,6 +54,9 @@ export const STRINGS = {
       play: 'Reproducir',
       quality: 'Calidad',
       duration: 'Duración',
+      synopsis: 'Sinopsis',
+      director: 'Director',
+      cast: 'Reparto',
     },
     series: {
       title: 'Series',
@@ -61,6 +64,7 @@ export const STRINGS = {
       seasons: 'Temporadas',
       episodes: 'Capítulos',
       info: 'Información',
+      synopsis: 'Sinopsis',
     },
     player: {
       error: 'No se pudo reproducir este contenido.',
@@ -68,6 +72,13 @@ export const STRINGS = {
       back: 'Atrás',
       buffering: 'Cargando, espera...',
       unmute: 'Pulsa para activar el sonido',
+      play: 'Reproducir',
+      pause: 'Pausa',
+      vodHint: '← → adelantar/retroceder · OK pausa · Back salir',
+      leaveTitle: '¿Salir de la reproducción?',
+      leaveMessage: 'Se guardará tu posición para continuar después.',
+      leaveStay: 'Seguir viendo',
+      leaveConfirm: 'Salir',
     },
     exclusivos: {
       title: 'Canales Exclusivos',
@@ -188,6 +199,9 @@ export const STRINGS = {
       play: 'Play',
       quality: 'Quality',
       duration: 'Duration',
+      synopsis: 'Synopsis',
+      director: 'Director',
+      cast: 'Cast',
     },
     series: {
       title: 'Series',
@@ -195,6 +209,7 @@ export const STRINGS = {
       seasons: 'Seasons',
       episodes: 'Episodes',
       info: 'Info',
+      synopsis: 'Synopsis',
     },
     player: {
       error: 'Could not play this content.',
@@ -202,6 +217,13 @@ export const STRINGS = {
       back: 'Back',
       buffering: 'Loading, please wait...',
       unmute: 'Press to enable sound',
+      play: 'Play',
+      pause: 'Pause',
+      vodHint: '← → seek · OK pause · Back exit',
+      leaveTitle: 'Leave playback?',
+      leaveMessage: 'Your position will be saved so you can continue later.',
+      leaveStay: 'Keep watching',
+      leaveConfirm: 'Leave',
     },
     exclusivos: {
       title: 'Exclusive Channels',

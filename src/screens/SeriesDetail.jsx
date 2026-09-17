@@ -4,6 +4,7 @@ import { t } from '../lib/i18n.js';
 import { getSeriesInfo, seriesStreamUrl } from '../lib/xtream.js';
 import { getSession, isFavorite, toggleFavorite } from '../lib/session.js';
 import { useFocusable } from '../components/Focusable.jsx';
+import { pickSynopsis } from '../lib/metaText.js';
 
 function EpisodeRow({ index, ep, onPlay }) {
   const { ref, tabIndex } = useFocusable(`episode-${ep.id}`);
@@ -25,7 +26,7 @@ function EpisodeRow({ index, ep, onPlay }) {
 export default function SeriesDetail() {
   const { id } = useParams();
   const navigate = useNavigate();
-  const [info, setInfo] = useState(null); // { info, seasons, episodes }
+  const [info, setInfo] = useState(null);
   const [server, setServer] = useState(null);
   const [season, setSeason] = useState(null);
   const [fav, setFav] = useState(false);
@@ -40,9 +41,6 @@ export default function SeriesDetail() {
     setServer(srv);
     setFav(isFavorite('series', id));
     (async () => {
-      // get_series_info returns { info, seasons, episodes } where seasons and
-      // episodes are TOP-LEVEL siblings of info. Keep the whole object (not just
-      // .info) so the seasons/episodes below resolve.
       const res = await getSeriesInfo(srv, id);
       if (res && res.info) setInfo(res);
     })();
@@ -56,15 +54,17 @@ export default function SeriesDetail() {
   const activeSeason = season || (seasonsList.length ? String(seasonsList[0].season_number) : null);
 
   const meta = info?.info || {};
+  const synopsis = pickSynopsis(
+    meta.plot,
+    meta.description,
+    meta.synopsis,
+    meta.overview,
+    meta.series_desc
+  );
 
   const play = (ep) => {
-    // The container extension lives on each episode (e.g. "mp4"); fall back to
-    // the series-level one if present, else 'mp4'.
     const container = ep?.container_extension || info?.container_extension || 'mp4';
     const url = seriesStreamUrl(server, container, ep, activeSeason, id);
-    // Continue-watching is keyed by (type, id): pass the EPISODE id (not the
-    // series id) so each episode keeps its own resume position, and pass a
-    // meaningful title (episode title, else "Series · T# · E#").
     const epNum = ep?.episode_num ? `E${ep.episode_num}` : '';
     const title =
       ep?.title ||
@@ -98,8 +98,32 @@ export default function SeriesDetail() {
             <img className="detail-poster" src={meta.cover_big || meta.cover} alt={meta.name} />
             <div className="detail-meta">
               <h1>{meta.name}</h1>
-              {meta.genre ? <div className="badges"><span className="badge">{meta.genre}</span></div> : null}
-              {meta.plot && <p>{meta.plot}</p>}
+              <div className="badges">
+                {meta.genre ? <span className="badge">{meta.genre}</span> : null}
+                {meta.rating ? <span className="badge">★ {meta.rating}</span> : null}
+                {meta.releaseDate || meta.releasedate ? (
+                  <span className="badge">{String(meta.releaseDate || meta.releasedate).slice(0, 4)}</span>
+                ) : null}
+              </div>
+
+              {synopsis ? (
+                <section className="synopsis">
+                  <h2 className="synopsis-title">{t('series.synopsis')}</h2>
+                  <p>{synopsis}</p>
+                </section>
+              ) : null}
+
+              {meta.cast || meta.actors ? (
+                <p className="meta-line">
+                  <strong>{t('vod.cast')}:</strong> {meta.cast || meta.actors}
+                </p>
+              ) : null}
+              {meta.director ? (
+                <p className="meta-line">
+                  <strong>{t('vod.director')}:</strong> {meta.director}
+                </p>
+              ) : null}
+
               <div className="detail-actions">
                 <button
                   tabIndex={0}
@@ -135,7 +159,9 @@ export default function SeriesDetail() {
             ))}
           </div>
 
-          <h2 className="row-title">{t('series.episodes')} · T{activeSeason}</h2>
+          <h2 className="row-title">
+            {t('series.episodes')} · T{activeSeason}
+          </h2>
           {eps.length ? (
             <div className="episode-list">
               {eps.map((ep, i) => (

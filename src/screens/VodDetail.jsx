@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { t } from '../lib/i18n.js';
 import { getVodInfo, vodStreamUrl } from '../lib/xtream.js';
 import { getSession } from '../lib/session.js';
 import { isFavorite, toggleFavorite } from '../lib/session.js';
 import { formatDuration } from '../lib/time.js';
+import { pickSynopsis } from '../lib/metaText.js';
 
 export default function VodDetail() {
   const { id } = useParams();
@@ -31,16 +32,41 @@ export default function VodDetail() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
-  const streamData = info?.info || {}; // the VOD stream (name, cover_big)
-  const meta = info?.movie_data || {}; // movie metadata (plot, year, ext)
+  const streamData = info?.info || {};
+  // Panels disagree on where metadata lives — check both bags.
+  const meta = info?.movie_data || info?.info || {};
+  const synopsis = pickSynopsis(
+    meta.plot,
+    meta.description,
+    meta.synopsis,
+    meta.overview,
+    meta.movie_plot,
+    streamData.plot,
+    streamData.description
+  );
+
   const play = () => {
-    const ext = (meta?.container_extension) || 'mp4';
+    const ext = meta?.container_extension || streamData?.container_extension || 'mp4';
     const url = vodStreamUrl(server, id, ext);
-    navigate(`/player?type=vod&id=${id}&url=${encodeURIComponent(url)}&title=${encodeURIComponent(streamData?.name || '')}`);
+    navigate(
+      `/player?type=vod&id=${id}&url=${encodeURIComponent(url)}&title=${encodeURIComponent(
+        streamData?.name || meta?.name || ''
+      )}`
+    );
   };
 
   const poster =
-    meta?.cover_big || streamData?.cover_big || streamData?.backdrop_path || meta?.cover;
+    meta?.cover_big ||
+    streamData?.cover_big ||
+    streamData?.backdrop_path ||
+    meta?.cover ||
+    meta?.movie_image;
+
+  const durationLabel = meta?.duration
+    ? formatDuration(meta.duration)
+    : streamData?.duration
+      ? formatDuration(streamData.duration)
+      : '';
 
   return (
     <div>
@@ -58,17 +84,35 @@ export default function VodDetail() {
         </div>
       ) : (
         <div className="detail">
-          <img className="detail-poster" src={poster} alt={streamData?.name} />
+          <img className="detail-poster" src={poster} alt={streamData?.name || meta?.name} />
           <div className="detail-meta">
-            <h1>{streamData?.name}</h1>
+            <h1>{streamData?.name || meta?.name}</h1>
             <div className="badges">
               {meta?.year ? <span className="badge">{meta.year}</span> : null}
               {meta?.rating ? <span className="badge">★ {meta.rating}</span> : null}
-              {meta?.duration ? <span className="badge">{formatDuration(meta.duration)}</span> : null}
+              {durationLabel ? <span className="badge">{durationLabel}</span> : null}
+              {meta?.genre ? <span className="badge">{meta.genre}</span> : null}
               {streamData?.added ? <span className="badge">{streamData.added}</span> : null}
             </div>
-            <p>{meta?.plot || meta?.description || ''}</p>
-            {meta?.genre ? <p className="badge">{meta.genre}</p> : null}
+
+            {synopsis ? (
+              <section className="synopsis">
+                <h2 className="synopsis-title">{t('vod.synopsis')}</h2>
+                <p>{synopsis}</p>
+              </section>
+            ) : null}
+
+            {meta?.director ? (
+              <p className="meta-line">
+                <strong>{t('vod.director')}:</strong> {meta.director}
+              </p>
+            ) : null}
+            {meta?.cast || meta?.actors ? (
+              <p className="meta-line">
+                <strong>{t('vod.cast')}:</strong> {meta.cast || meta.actors}
+              </p>
+            ) : null}
+
             <div className="detail-actions">
               <button tabIndex={0} className="btn-primary" onClick={play}>
                 ▶ {t('vod.play')}
@@ -80,9 +124,8 @@ export default function VodDetail() {
                   const added = toggleFavorite({
                     type: 'vod',
                     id,
-                    title: streamData?.name || '',
-                    image:
-                      meta?.cover_big || streamData?.cover_big || streamData?.backdrop_path || meta?.cover || '',
+                    title: streamData?.name || meta?.name || '',
+                    image: poster || '',
                   });
                   setFav(added);
                 }}

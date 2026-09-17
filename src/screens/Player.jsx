@@ -51,6 +51,15 @@ export default function Player() {
   // fallback for webviews that never fire `playing`, from `timeupdate`).
   const hlsClearedRef = useRef(false);
 
+  // VOD / series / catchup get scrubber + pause/seek. Live stays zap-only.
+  const isVodLike = type === 'vod' || type === 'series' || type === 'catchup';
+  const [paused, setPaused] = useState(false);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [duration, setDuration] = useState(0);
+  const [leaveOpen, setLeaveOpen] = useState(false);
+  const seekStep = 10;
+  const seekJump = 30;
+
   // Live channel memory: once a channel fell back to HLS (mpegts can't play its
   // .ts on this browser), remember it so the next zap goes straight to HLS —
   // skipping the 12s mpegts watchdog and the dirty MSE teardown. Cleared if the
@@ -86,14 +95,158 @@ export default function Player() {
     }
   };
 
-  // 'p' toggles PiP; handled screen-local.
+  // 'p' toggles PiP; VOD keys: space/OK pause, arrows seek, Back confirms leave.
   useEffect(() => {
-    const onKey = (e) => {
-      if (e.key === 'p' || e.key === 'P') togglePip(videoRef.current);
+    const bumpControls = () => {
+      setControlsVisible(true);
+      clearTimeout(hideTimer.current);
+      hideTimer.current = setTimeout(() => setControlsVisible(false), 4000);
     };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, []);
+
+    const seekBy = (delta) => {
+      const v = videoRef.current;
+      if (!v || !isVodLike) return;
+      const dur = Number.isFinite(v.duration) ? v.duration : 0;
+      const next = Math.max(0, Math.min(dur || Infinity, (v.currentTime || 0) + delta));
+      try {
+        v.currentTime = next;
+      } catch {
+        /* ignore */
+      }
+      setCurrentTime(next);
+      bumpControls();
+    };
+
+    const togglePlay = () => {
+      const v = videoRef.current;
+      if (!v || !isVodLike) return;
+      if (v.paused) {
+        const p = v.play();
+        if (p && typeof p.catch === 'function') p.catch(() => {});
+        setPaused(false);
+      } else {
+        try {
+          v.pause();
+        } catch {
+          /* ignore */
+        }
+        setPaused(true);
+      }
+      bumpControls();
+    };
+
+    const requestLeave = () => {
+      if (isVodLike) {
+        setLeaveOpen(true);
+        setControlsVisible(true);
+        return;
+      }
+      navigate(-1);
+    };
+
+    const onKey = (e) => {
+      if (e.key === 'p' || e.key === 'P') {
+        togglePip(videoRef.current);
+        return;
+      }
+
+      // While leave dialog is open, don't steal arrows for seeking.
+      if (leaveOpen) return;
+
+      const code = e.keyCode || e.which || 0;
+      const isBack =
+        e.key === 'Escape' ||
+        e.key === 'BrowserBack' ||
+        e.key === 'GoBack' ||
+        code === 461 ||
+        code === 27;
+
+      if (isBack) {
+        e.preventDefault();
+        e.stopPropagation();
+        requestLeave();
+        return;
+      }
+
+      if (!isVodLike) return;
+
+      // Media / transport keys (when the remote sends them).
+      if (e.key === 'MediaPlayPause' || e.key === ' ' || code === 179) {
+        e.preventDefault();
+        e.stopPropagation();
+        togglePlay();
+        return;
+      }
+      if (e.key === 'MediaPlay' || code === 415) {
+        e.preventDefault();
+        const v = videoRef.current;
+        if (v?.paused) togglePlay();
+        return;
+      }
+      if (e.key === 'MediaPause' || code === 19) {
+        e.preventDefault();
+        const v = videoRef.current;
+        if (v && !v.paused) togglePlay();
+        return;
+      }
+      if (e.key === 'MediaRewind' || e.key === 'ArrowLeft' || code === 412 || code === 37) {
+        // Only seek with arrows when controls are up OR always for VOD — always.
+        e.preventDefault();
+        e.stopPropagation();
+        seekBy(-seekJump);
+        return;
+      }
+      if (e.key === 'MediaFastForward' || e.key === 'ArrowRight' || code === 417 || code === 39) {
+        e.preventDefault();
+        e.stopPropagation();
+        seekBy(seekJump);
+        return;
+      }
+      if (e.key === 'ArrowUp' || code === 38) {
+        e.preventDefault();
+        seekBy(seekStep);
+        return;
+      }
+      if (e.key === 'ArrowDown' || code === 40) {
+        e.preventDefault();
+        seekBy(-seekStep);
+        return;
+      }
+      // OK / Enter toggles play when not focusing a button (buttons get click via global).
+      if ((e.key === 'Enter' || code === 13 || code === 23) && !e.target?.closest?.('button')) {
+        e.preventDefault();
+        togglePlay();
+      }
+    };
+
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, [isVodLike, leaveOpen, navigate, seekJump, seekStep]);
+
+  // Keep progress UI in sync for VOD-like streams.
+  useEffect(() => {
+    if (!isVodLike) return undefined;
+    const v = videoRef.current;
+    if (!v) return undefined;
+    const sync = () => {
+      setCurrentTime(v.currentTime || 0);
+      setDuration(Number.isFinite(v.duration) ? v.duration : 0);
+      setPaused(Boolean(v.paused));
+    };
+    v.addEventListener('timeupdate', sync);
+    v.addEventListener('seeked', sync);
+    v.addEventListener('play', sync);
+    v.addEventListener('pause', sync);
+    v.addEventListener('loadedmetadata', sync);
+    sync();
+    return () => {
+      v.removeEventListener('timeupdate', sync);
+      v.removeEventListener('seeked', sync);
+      v.removeEventListener('play', sync);
+      v.removeEventListener('pause', sync);
+      v.removeEventListener('loadedmetadata', sync);
+    };
+  }, [isVodLike, restart, started]);
 
   // Safety net on true unmount: destroy the controller (HLS/mpegts), force-abort
   // the request and wipe the video so the panel never keeps the stream "Online"
@@ -307,9 +460,10 @@ export default function Player() {
     };
     video.addEventListener('stalled', onStall);
 
-    // Draining the buffer / pausing releases the connection: abort any
-    // outstanding request load so the panel sees the socket close.
+    // For LIVE, pausing can release the panel slot. For VOD/series we must NOT
+    // abort — otherwise Pause would kill the movie download.
     const onPause = () => {
+      if (type !== 'live') return;
       if (abortRef.current) {
         try { abortRef.current.abort(); } catch {}
         abortRef.current = null;
@@ -363,6 +517,61 @@ export default function Player() {
     };
   }, []);
 
+  const formatClock = (secs) => {
+    const s = Math.max(0, Math.floor(Number(secs) || 0));
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const r = s % 60;
+    if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(r).padStart(2, '0')}`;
+    return `${m}:${String(r).padStart(2, '0')}`;
+  };
+
+  const seekToRatio = (ratio) => {
+    const v = videoRef.current;
+    if (!v || !duration) return;
+    const next = Math.max(0, Math.min(duration, duration * ratio));
+    try {
+      v.currentTime = next;
+    } catch {
+      /* ignore */
+    }
+    setCurrentTime(next);
+  };
+
+  const togglePlayClick = (e) => {
+    e?.stopPropagation?.();
+    const v = videoRef.current;
+    if (!v) return;
+    if (v.paused) {
+      const p = v.play();
+      if (p && typeof p.catch === 'function') p.catch(() => {});
+      setPaused(false);
+    } else {
+      try {
+        v.pause();
+      } catch {
+        /* ignore */
+      }
+      setPaused(true);
+    }
+    setControlsVisible(true);
+  };
+
+  const seekByClick = (delta, e) => {
+    e?.stopPropagation?.();
+    const v = videoRef.current;
+    if (!v) return;
+    const dur = Number.isFinite(v.duration) ? v.duration : 0;
+    const next = Math.max(0, Math.min(dur || Infinity, (v.currentTime || 0) + delta));
+    try {
+      v.currentTime = next;
+    } catch {
+      /* ignore */
+    }
+    setCurrentTime(next);
+    setControlsVisible(true);
+  };
+
   if (error || !url) {
     const formatIssue = errorCode === 4 || unsupportedContainer;
     return (
@@ -376,9 +585,6 @@ export default function Player() {
             className="btn-ghost"
             style={{ position: 'absolute', bottom: 96, left: '50%', transform: 'translateX(-50%)' }}
             onClick={() => {
-              // Manual retry only — never an automatic loop. Reset the error and
-              // bump `restart` so the [url] effect re-runs, destroying any old
-              // controller and rebuilding the player from scratch.
               setError(false);
               setErrorCode(null);
               setStarted(false);
@@ -401,12 +607,14 @@ export default function Player() {
     );
   }
 
+  const progress = duration > 0 ? Math.min(100, (currentTime / duration) * 100) : 0;
+
   return (
     <div
       className="player-screen"
       onClick={() => {
+        if (leaveOpen) return;
         setControlsVisible((v) => !v);
-        setTimeout(() => {}, 0);
       }}
     >
       <video
@@ -446,7 +654,6 @@ export default function Player() {
             const p = v.play();
             if (p && typeof p.catch === 'function') {
               p.catch(() => {
-                // Unmute was also blocked: stay muted and keep the hint.
                 v.muted = true;
                 setMutedHint(true);
               });
@@ -456,15 +663,112 @@ export default function Player() {
           🔊 {t('player.unmute')}
         </button>
       )}
-      {controlsVisible && (
-        <div className="player-controls">
-          <button tabIndex={0} className="back-btn" onClick={() => navigate(-1)}>
-            ← {t('common.back')}
-          </button>
-          <span className="player-title">{title}</span>
-          <button tabIndex={0} className="btn-ghost" onClick={() => togglePip(videoRef.current)}>
-            PiP
-          </button>
+
+      {controlsVisible && !leaveOpen && (
+        <div className="player-controls" onClick={(e) => e.stopPropagation()}>
+          <div className="player-controls-top">
+            <button
+              tabIndex={0}
+              className="back-btn"
+              onClick={() => {
+                if (isVodLike) setLeaveOpen(true);
+                else navigate(-1);
+              }}
+            >
+              ← {t('common.back')}
+            </button>
+            <span className="player-title">{title}</span>
+            <button tabIndex={0} className="btn-ghost" onClick={() => togglePip(videoRef.current)}>
+              PiP
+            </button>
+          </div>
+
+          {isVodLike && (
+            <>
+              <div
+                className="player-progress"
+                role="slider"
+                tabIndex={0}
+                aria-valuemin={0}
+                aria-valuemax={Math.floor(duration || 0)}
+                aria-valuenow={Math.floor(currentTime || 0)}
+                onClick={(e) => {
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  const ratio = rect.width ? (e.clientX - rect.left) / rect.width : 0;
+                  seekToRatio(ratio);
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'ArrowLeft') {
+                    e.preventDefault();
+                    seekByClick(-seekJump, e);
+                  }
+                  if (e.key === 'ArrowRight') {
+                    e.preventDefault();
+                    seekByClick(seekJump, e);
+                  }
+                }}
+              >
+                <div className="player-progress-bar">
+                  <div className="player-progress-fill" style={{ width: `${progress}%` }} />
+                </div>
+                <div className="player-time">
+                  <span>{formatClock(currentTime)}</span>
+                  <span>{formatClock(duration)}</span>
+                </div>
+              </div>
+
+              <div className="player-transport">
+                <button
+                  tabIndex={0}
+                  className="btn-ghost player-transport-btn"
+                  onClick={(e) => seekByClick(-seekJump, e)}
+                >
+                  ⏪ -{seekJump}s
+                </button>
+                <button
+                  tabIndex={0}
+                  className="btn-primary player-transport-btn"
+                  onClick={togglePlayClick}
+                >
+                  {paused ? `▶ ${t('player.play')}` : `⏸ ${t('player.pause')}`}
+                </button>
+                <button
+                  tabIndex={0}
+                  className="btn-ghost player-transport-btn"
+                  onClick={(e) => seekByClick(seekJump, e)}
+                >
+                  +{seekJump}s ⏩
+                </button>
+              </div>
+              <p className="player-hint">{t('player.vodHint')}</p>
+            </>
+          )}
+        </div>
+      )}
+
+      {leaveOpen && (
+        <div className="exit-overlay player-leave" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
+          <div className="exit-dialog">
+            <h2>{t('player.leaveTitle')}</h2>
+            <p>{t('player.leaveMessage')}</p>
+            <div className="exit-actions">
+              <button
+                tabIndex={0}
+                className="btn-primary"
+                autoFocus
+                onClick={() => setLeaveOpen(false)}
+              >
+                {t('player.leaveStay')}
+              </button>
+              <button
+                tabIndex={0}
+                className="btn-ghost"
+                onClick={() => navigate(-1)}
+              >
+                {t('player.leaveConfirm')}
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

@@ -182,6 +182,8 @@ function AppShell() {
         closeExit();
         return;
       }
+      // Player owns its Back (leave confirm for VOD/series).
+      if (location.pathname === '/player') return;
       // Accidental Back on Home/Login → ask before quitting the app.
       if (isRootRoute) {
         setExitOpen(true);
