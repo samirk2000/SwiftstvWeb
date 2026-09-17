@@ -6,7 +6,7 @@ const DEFAULTS = {
   seekJump: 30, // seconds: 10 | 30 | 60
   autoplayNext: true,
   onboardingDone: false,
-  uiScale: 'normal', // comfortable | normal | compact
+  uiScale: 'comfortable', // comfortable | normal | compact — TV-first default
 };
 
 function read() {

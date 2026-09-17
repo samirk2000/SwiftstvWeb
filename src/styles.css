@@ -453,29 +453,38 @@ article.tile,
 /* ---------- Category bar ---------- */
 .cat-bar {
   display: flex;
-  gap: 10px;
+  gap: 12px;
   overflow-x: auto;
-  padding: 4px 2px 12px;
-  margin: 8px 0 4px;
+  padding: 6px 2px 16px;
+  margin: 8px 0 6px;
   scrollbar-width: thin;
 }
 
 .cat-chip {
-  padding: 8px 16px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
+  padding: 14px 22px;
+  min-height: 52px;
+  border: 2px solid var(--border);
+  border-radius: 14px;
   background: var(--surface);
-  color: var(--text-dim);
+  color: var(--text);
   white-space: nowrap;
-  font-size: 14px;
+  font-size: 18px;
+  font-weight: 600;
   flex: 0 0 auto;
+  line-height: 1.2;
 }
 
 .cat-chip:hover,
 .cat-chip:focus,
 .cat-chip.selected {
   border-color: var(--accent);
-  color: var(--accent);
+  color: #061219;
+  background: var(--accent);
+}
+
+.cat-chip.tv-focused,
+.cat-chip[data-tv-focused='true'] {
+  transform: scale(1.05);
 }
 
 /* ---------- Page header ---------- */
@@ -520,12 +529,13 @@ article.tile,
   align-items: center;
   gap: 14px;
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: 12px;
   background: var(--bg-card);
-  padding: 10px 14px;
+  padding: 14px 16px;
+  min-height: 64px;
   /* Reserve layout but skip painting off-screen rows on long channel lists. */
   content-visibility: auto;
-  contain-intrinsic-size: 1px 48px;
+  contain-intrinsic-size: 1px 64px;
 }
 
 .channel:focus {
@@ -559,6 +569,7 @@ article.tile,
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  font-size: 20px;
 }
 
 .channel .channel-now {
@@ -877,13 +888,14 @@ article.tile,
 /* ---------- Search ---------- */
 .search-box {
   width: 100%;
-  max-width: 640px;
-  padding: 12px 16px;
-  border-radius: 10px;
-  border: 1px solid var(--border);
+  max-width: 720px;
+  padding: 16px 18px;
+  min-height: 56px;
+  border-radius: 12px;
+  border: 2px solid var(--border);
   background: var(--surface);
   color: var(--text);
-  font-size: 16px;
+  font-size: 18px;
   margin-bottom: 16px;
 }
 
@@ -1334,5 +1346,31 @@ html[data-ui-scale='compact'] {
 }
 html[data-ui-scale='comfortable'] .menu-item {
   min-height: 108px;
+}
+html[data-ui-scale='comfortable'] .cat-chip {
+  min-height: 58px;
+  font-size: 20px;
+  padding: 16px 24px;
+}
+html[data-ui-scale='comfortable'] .channel {
+  min-height: 72px;
+}
+html[data-ui-scale='comfortable'] .channel .channel-name {
+  font-size: 22px;
+}
+html[data-ui-scale='comfortable'] .search-box {
+  font-size: 20px;
+  min-height: 60px;
+}
+
+.load-more-wrap {
+  display: flex;
+  justify-content: center;
+  padding: 22px 8px 28px;
+}
+.load-more-btn {
+  min-width: 220px;
+  min-height: 56px;
+  font-size: 18px;
 }
 

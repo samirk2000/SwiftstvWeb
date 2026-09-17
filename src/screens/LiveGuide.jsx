@@ -4,6 +4,8 @@ import { t } from '../lib/i18n.js';
 import { getLiveCategories, getLiveStreams, getShortEpg, liveCatchupUrl, liveStreamTsUrl } from '../lib/xtream.js';
 import { usePanelList } from '../hooks/usePanelList.js';
 import { usePersistedCategory } from '../hooks/usePersistedCategory.js';
+import { usePreferFirstCategory } from '../hooks/usePreferFirstCategory.js';
+import { useWindowedList } from '../hooks/useWindowedList.js';
 import { isCategoryLocked } from '../lib/parental.js';
 import { isFavorite, toggleFavorite } from '../lib/session.js';
 import { useFocusable, FocusScope } from '../components/Focusable.jsx';
@@ -14,6 +16,7 @@ import { matchesSearch } from '../lib/searchText.js';
 // Days offered by the catch-up manual selector (today + N days back).
 const CATCHUP_DAYS = 7;
 const CATCHUP_HOURS = Array.from({ length: 24 }, (_, i) => i);
+const PAGE = 60;
 
 // A D-pad focusable chip (selected state + click). Registered in the global
 // focus ring so a remote can reach it like the other TV-first controls.
@@ -253,9 +256,15 @@ export default function LiveGuide() {
   const [catId, setCatId] = usePersistedCategory('live');
   const [query, setQuery] = useState('');
   const searchActive = Boolean(query.trim());
-  const effectiveCatId = searchActive ? '' : catId;
-  const catArgs = useMemo(() => (effectiveCatId ? [effectiveCatId] : []), [effectiveCatId]);
-  const { data: streams, loading, error } = usePanelList(getLiveStreams, catArgs);
+  const ready = searchActive || catId !== null;
+  const effectiveCatId = searchActive ? '' : catId || '';
+  const catArgs = useMemo(
+    () => (effectiveCatId ? [effectiveCatId] : []),
+    [effectiveCatId]
+  );
+  const { data: streams, loading, error } = usePanelList(getLiveStreams, catArgs, {
+    enabled: ready,
+  });
   // Channel (if any) whose archive selector is open.
   const [catchupFor, setCatchupFor] = useState(null);
   // Channel currently focused (drives the now+next EPG strip).
@@ -281,6 +290,7 @@ export default function LiveGuide() {
     () => (categories || []).filter((c) => !isCategoryLocked(c.category_id)),
     [categories]
   );
+  usePreferFirstCategory(catId, setCatId, visibleCats, searchActive);
 
   // category_id -> name lookup so search can also match the category label.
   const catNameById = useMemo(() => {
@@ -298,6 +308,8 @@ export default function LiveGuide() {
       return matchesSearch(catName, query);
     });
   }, [streams, query, catNameById]);
+
+  const { visible, hasMore, loadMore, remaining } = useWindowedList(filtered, PAGE);
 
   const playChannel = (ch) => {
     // Continuous MPEG-TS live: /live/U/P/id.ts → the proxy keeps ONE shared
@@ -343,7 +355,7 @@ export default function LiveGuide() {
         <div className="cat-bar">
           <button
             tabIndex={0}
-            className={`cat-chip ${effectiveCatId === '' ? 'selected' : ''}`}
+            className={`cat-chip ${!searchActive && catId === '' ? 'selected' : ''}`}
             onClick={() => {
               setQuery('');
               setCatId('');
@@ -355,7 +367,9 @@ export default function LiveGuide() {
             <button
               key={cat.category_id}
               tabIndex={0}
-              className={`cat-chip ${String(effectiveCatId) === String(cat.category_id) ? 'selected' : ''}`}
+              className={`cat-chip ${
+                !searchActive && String(catId) === String(cat.category_id) ? 'selected' : ''
+              }`}
               onClick={() => {
                 setQuery('');
                 setCatId(String(cat.category_id));
@@ -371,7 +385,7 @@ export default function LiveGuide() {
         <NowNextPanel channel={focused} server={server} />
       )}
 
-      {loading ? (
+      {!ready || loading ? (
         <div className="state">
           <div className="spinner" />
           {t('common.loading')}
@@ -382,7 +396,7 @@ export default function LiveGuide() {
         </div>
       ) : (
         <div className="channel-list">
-          {filtered.map((ch, i) => (
+          {visible.map((ch, i) => (
             <ChannelRow
               key={ch.stream_id}
               channel={ch}
@@ -395,6 +409,14 @@ export default function LiveGuide() {
               onCatchup={() => setCatchupFor(ch)}
             />
           ))}
+
+          {hasMore ? (
+            <div className="load-more-wrap">
+              <button tabIndex={0} className="btn-primary load-more-btn" onClick={loadMore}>
+                {t('common.loadMore', remaining)}
+              </button>
+            </div>
+          ) : null}
 
           {catchupFor && (
             <CatchupPanel

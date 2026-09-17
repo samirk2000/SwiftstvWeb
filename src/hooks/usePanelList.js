@@ -4,7 +4,8 @@ import { getSession } from '../lib/session.js';
 
 // Loads a panel-backed list for the current session. Handles the loading /
 // error states and a "reload" of categories selection.
-export function usePanelList(loadFn, args = []) {
+export function usePanelList(loadFn, args = [], opts = {}) {
+  const enabled = opts.enabled !== false;
   const { session } = useSession();
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
@@ -27,6 +28,12 @@ export function usePanelList(loadFn, args = []) {
 
   useEffect(() => {
     let cancelled = false;
+    if (!enabled) {
+      setData(null);
+      setError(null);
+      setLoading(true);
+      return undefined;
+    }
     if (!server || !server.baseUrl) {
       setError('no-session');
       setLoading(false);
@@ -49,7 +56,7 @@ export function usePanelList(loadFn, args = []) {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [server, tick, JSON.stringify(args)]);
+  }, [server, tick, enabled, JSON.stringify(args)]);
 
   return { data, error, loading, reload, server };
 }

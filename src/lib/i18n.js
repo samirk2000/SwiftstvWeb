@@ -123,6 +123,7 @@ export const STRINGS = {
       unfavorite: 'Quitar favorito',
       yes: 'Sí',
       no: 'No',
+      loadMore: (n) => (n > 0 ? `Ver más (${n})` : 'Ver más'),
     },
     exit: {
       title: '¿Salir de Swiftstv?',
@@ -308,6 +309,7 @@ export const STRINGS = {
       unfavorite: 'Remove favorite',
       yes: 'Yes',
       no: 'No',
+      loadMore: (n) => (n > 0 ? `Show more (${n})` : 'Show more'),
     },
     exit: {
       title: 'Exit Swiftstv?',
