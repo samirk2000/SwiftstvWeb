@@ -15,6 +15,21 @@ import { streamProxyCandidates } from './proxy.js';
 
 const RECOVERY_ATTEMPTS = 3;
 
+// Global generation for mono-connection: every hardStop / channel change bumps
+// this so delayed HLS fallbacks / native retries from a PREVIOUS attach can never
+// reopen a panel socket after the user left or zapped (Recientes → canal → otro).
+let PLAYBACK_EPOCH = 0;
+
+/** Call before tearing down / starting a new stream. Returns the new epoch. */
+export function invalidatePlayback() {
+  PLAYBACK_EPOCH += 1;
+  return PLAYBACK_EPOCH;
+}
+
+export function isPlaybackEpoch(epoch) {
+  return epoch === PLAYBACK_EPOCH;
+}
+
 // Containers that TV browsers (webOS/Tizen/Vidaa/Android WebView) cannot demux
 // natively. IPTV apps bundle their own players (ExoPlayer/VLC) so the same file
 // plays there; in-browser we try an .mp4 variant and otherwise surface a clear
@@ -136,6 +151,12 @@ function hlsConfigFor(url, opts) {
     // Don't prefetch the next fragment while the current one is still loading —
     // that looked like 2–3 panel connections for one live channel.
     startFragPrefetch: false,
+    // Subtitles: WebVTT / in-manifest tracks when the panel provides them.
+    enableWebVTT: true,
+    enableIMSC1: true,
+    enableCEA708Captions: true,
+    subtitleDisplay: true,
+    renderTextTracksNatively: true,
   };
   if (opts?.extraOrigin) {
     const headers = {};
@@ -158,6 +179,7 @@ function hlsConfigFor(url, opts) {
 // Attach HLS.js to a <video>. Returns a controller. Must be called after the
 // video element is mounted.
 export function attachHls(videoEl, url, opts = {}) {
+  const epoch = PLAYBACK_EPOCH;
   const controller = {
     hls: null,
     native: false,
@@ -170,7 +192,15 @@ export function attachHls(videoEl, url, opts = {}) {
         nativeWatchdog = null;
       }
       if (controller.hls) {
-        controller.hls.destroy();
+        try {
+          controller.hls.stopLoad();
+        } catch {}
+        try {
+          controller.hls.detachMedia();
+        } catch {}
+        try {
+          controller.hls.destroy();
+        } catch {}
         controller.hls = null;
       }
       // Detach the native retry/error handlers BEFORE wiping the element: the
@@ -189,6 +219,7 @@ export function attachHls(videoEl, url, opts = {}) {
       wipeElement();
     },
     reloadUrl() {
+      if (!isPlaybackEpoch(epoch) || controller.destroyed) return;
       controller.errorCount = 0;
       attemptedReload = false;
       doStartPlayback();
@@ -248,8 +279,19 @@ export function attachHls(videoEl, url, opts = {}) {
   }
 
   function doStartPlayback() {
-    if (controller.destroyed) return;
-    if (controller.hls) controller.hls.destroy();
+    if (controller.destroyed || !isPlaybackEpoch(epoch)) return;
+    if (controller.hls) {
+      try {
+        controller.hls.stopLoad();
+      } catch {}
+      try {
+        controller.hls.detachMedia();
+      } catch {}
+      try {
+        controller.hls.destroy();
+      } catch {}
+      controller.hls = null;
+    }
     manifestLoaded = false;
     if (nativeWatchdog) {
       clearInterval(nativeWatchdog);
@@ -273,6 +315,7 @@ export function attachHls(videoEl, url, opts = {}) {
       hls.loadSource(srcUrl);
       hls.attachMedia(videoEl);
       hls.on(Hls.Events.ERROR, (_evt, data) => {
+        if (!isPlaybackEpoch(epoch) || controller.destroyed) return;
         if (!data || !data.fatal) return;
         // If the manifest failed to load from this candidate (NETWORK_ERROR
         // before any manifest arrived), try the next route: external proxy ->
@@ -294,7 +337,13 @@ export function attachHls(videoEl, url, opts = {}) {
         }
       });
       hls.on(Hls.Events.MANIFEST_LOADED, () => {
+        if (!isPlaybackEpoch(epoch) || controller.destroyed) return;
         manifestLoaded = true;
+        if (typeof opts.onTracksUpdate === 'function') {
+          try {
+            opts.onTracksUpdate();
+          } catch {}
+        }
         if (opts.startPosition && !controller.seeked) {
           // Catchup: jump into the archive (seconds from the DVR edge).
           controller.seeked = true;
@@ -309,6 +358,22 @@ export function attachHls(videoEl, url, opts = {}) {
               { once: true }
             );
           }
+        }
+      });
+      hls.on(Hls.Events.AUDIO_TRACKS_UPDATED, () => {
+        if (!isPlaybackEpoch(epoch) || controller.destroyed) return;
+        if (typeof opts.onTracksUpdate === 'function') {
+          try {
+            opts.onTracksUpdate();
+          } catch {}
+        }
+      });
+      hls.on(Hls.Events.SUBTITLE_TRACKS_UPDATED, () => {
+        if (!isPlaybackEpoch(epoch) || controller.destroyed) return;
+        if (typeof opts.onTracksUpdate === 'function') {
+          try {
+            opts.onTracksUpdate();
+          } catch {}
         }
       });
     } else {
@@ -353,7 +418,7 @@ export function attachHls(videoEl, url, opts = {}) {
   // guard also ensures a teardown-triggered error event can never restart the
   // stream after the player was left.
   function onNativeError() {
-    if (controller.destroyed) return;
+    if (controller.destroyed || !isPlaybackEpoch(epoch)) return;
     clearInterval(nativeWatchdog);
     nativeWatchdog = null;
     if (nativeRetries < MAX_NATIVE_RETRIES) {
@@ -369,6 +434,11 @@ export function attachHls(videoEl, url, opts = {}) {
   // metadata. After VOD_STALL_MS, retry the same route once (cache-busted),
   // then advance to the next candidate, and only then surface the error.
   function onNativeWatch() {
+    if (!isPlaybackEpoch(epoch) || controller.destroyed) {
+      clearInterval(nativeWatchdog);
+      nativeWatchdog = null;
+      return;
+    }
     if (videoEl.readyState >= 1 || videoEl.error || controller.destroyed) {
       clearInterval(nativeWatchdog);
       nativeWatchdog = null;
@@ -386,7 +456,7 @@ export function attachHls(videoEl, url, opts = {}) {
   }
 
   function nextCandidate() {
-    if (controller.destroyed) return;
+    if (controller.destroyed || !isPlaybackEpoch(epoch)) return;
     if (attempt < candidates.length - 1) {
       attempt += 1;
       controller.errorCount = 0;
@@ -397,7 +467,7 @@ export function attachHls(videoEl, url, opts = {}) {
   }
 
   function fail() {
-    if (controller.destroyed) return;
+    if (controller.destroyed || !isPlaybackEpoch(epoch)) return;
     clearInterval(nativeWatchdog);
     nativeWatchdog = null;
     if (nativeErrorBound && videoEl) {
@@ -408,7 +478,7 @@ export function attachHls(videoEl, url, opts = {}) {
   }
 
   function setNativeSrc(bustCache) {
-    if (controller.destroyed) return;
+    if (controller.destroyed || !isPlaybackEpoch(epoch)) return;
     // Detach the error handler while we re-arm: the wipe below (pause + load
     // with an emptied src) fires a MEDIA_ERR_SRC_NOT_SUPPORTED 'error' event
     // that must NOT be treated as a playback failure. Re-bind after assigning
@@ -471,6 +541,7 @@ function tsToHlsUrl(tsUrl) {
 // we automatically switch the same channel to its .m3u8 URL via attachHls. The
 // onError callback is only surfaced if the HLS fallback also fails.
 export function attachTs(videoEl, url, opts = {}) {
+  const epoch = PLAYBACK_EPOCH;
   const candidates = mediaCandidates(url, {
     continuous: true,
     isExclusive: Boolean(opts.isExclusive),
@@ -488,6 +559,12 @@ export function attachTs(videoEl, url, opts = {}) {
       controller.destroyed = true;
       clearWatchdogs();
       if (controller.hls) {
+        try {
+          controller.hls.stopLoad();
+        } catch {}
+        try {
+          controller.hls.detachMedia();
+        } catch {}
         try {
           controller.hls.destroy();
         } catch {}
@@ -603,7 +680,7 @@ export function attachTs(videoEl, url, opts = {}) {
     let lastAdvanceAt = Date.now();
     let lastT = videoEl.currentTime || 0;
     return setInterval(() => {
-      if (controller.destroyed) {
+      if (controller.destroyed || !isPlaybackEpoch(epoch)) {
         clearWatchdogs();
         return;
       }
@@ -672,8 +749,10 @@ export function attachTs(videoEl, url, opts = {}) {
 
   function startHls() {
     clearWatchdogs();
-    if (controller.destroyed || !hlsUrl) {
-      if (typeof opts.onError === 'function' && !controller.destroyed) opts.onError(new Error('no hls fallback'));
+    if (controller.destroyed || !isPlaybackEpoch(epoch) || !hlsUrl) {
+      if (typeof opts.onError === 'function' && !controller.destroyed && isPlaybackEpoch(epoch)) {
+        opts.onError(new Error('no hls fallback'));
+      }
       return;
     }
     // eslint-disable-next-line no-console
@@ -698,7 +777,7 @@ export function attachTs(videoEl, url, opts = {}) {
   // que dejó el elemento/manifiesto en mal estado (transición desde el worker
   // de mpegts, primer playlist incompleto, CDN aún calentando).
   function retryHls() {
-    if (controller.destroyed) return;
+    if (controller.destroyed || !isPlaybackEpoch(epoch)) return;
     if (controller.hls) {
       try {
         controller.hls.destroy();
@@ -718,7 +797,7 @@ export function attachTs(videoEl, url, opts = {}) {
   // el panel libere la conexión continua y el elemento termine de desprenderse
   // del MediaSource del worker (ver comentario de la constante).
   function fallbackToHls(reason) {
-    if (controller.destroyed || controller.fellBack) return;
+    if (controller.destroyed || !isPlaybackEpoch(epoch) || controller.fellBack) return;
     controller.fellBack = true;
     clearWatchdogs();
     // eslint-disable-next-line no-console
@@ -734,14 +813,14 @@ export function attachTs(videoEl, url, opts = {}) {
     wipeElement();
     hlsDelayTimer = setTimeout(() => {
       hlsDelayTimer = null;
-      if (controller.destroyed) return;
+      if (controller.destroyed || !isPlaybackEpoch(epoch)) return;
       startHls();
       armFallbackWatchdog();
     }, HLS_START_DELAY_MS);
   }
 
   function startTs() {
-    if (controller.destroyed) return;
+    if (controller.destroyed || !isPlaybackEpoch(epoch)) return;
     // Preferencia persistida del canal (memoria "HLS-only"): si un canal ya cayó
     // al fallback HLS en un navegador donde mpegts nunca reproduce el .ts, la
     // próxima vez vamos DIRECTOS a HLS — sin esperar el watchdog de 12s ni
@@ -864,6 +943,7 @@ export function attachTs(videoEl, url, opts = {}) {
   }
 
   function doStartPlayback() {
+    if (controller.destroyed || !isPlaybackEpoch(epoch)) return;
     if (controller.hls) {
       try {
         controller.hls.destroy();

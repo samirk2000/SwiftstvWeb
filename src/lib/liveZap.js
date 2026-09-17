@@ -42,7 +42,7 @@ export function getLiveZapList() {
 
 /**
  * Categories available while zapping from the player overlay.
- * @param {{ categories: { id: string, name: string }[], catId: string }} meta
+ * @param {{ categories: { id: string, name: string }[], catId: string, adultSession?: boolean }} meta
  */
 export function setLiveZapMeta(meta) {
   const categories = Array.isArray(meta?.categories)
@@ -53,15 +53,17 @@ export function setLiveZapMeta(meta) {
   write(META_KEY, {
     categories,
     catId: meta?.catId != null ? String(meta.catId) : '',
+    adultSession: Boolean(meta?.adultSession),
   });
 }
 
 export function getLiveZapMeta() {
   const meta = read(META_KEY, null);
-  if (!meta || typeof meta !== 'object') return { categories: [], catId: '' };
+  if (!meta || typeof meta !== 'object') return { categories: [], catId: '', adultSession: false };
   return {
     categories: Array.isArray(meta.categories) ? meta.categories : [],
     catId: meta.catId != null ? String(meta.catId) : '',
+    adultSession: Boolean(meta.adultSession),
   };
 }
 

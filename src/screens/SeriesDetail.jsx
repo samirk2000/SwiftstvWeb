@@ -5,6 +5,8 @@ import { getSeriesInfo, seriesStreamUrl } from '../lib/xtream.js';
 import { getSession, isFavorite, toggleFavorite } from '../lib/session.js';
 import { useFocusable } from '../components/Focusable.jsx';
 import { pickSynopsis } from '../lib/metaText.js';
+import { hasAdultPin, needsAdultGate, hasAdultBrowseUnlock } from '../lib/parental.js';
+import AdultPinDialog from '../components/AdultPinDialog.jsx';
 
 function EpisodeRow({ index, ep, onPlay }) {
   const { ref, tabIndex } = useFocusable(`episode-${ep.id}`);
@@ -30,6 +32,9 @@ export default function SeriesDetail() {
   const [server, setServer] = useState(null);
   const [season, setSeason] = useState(null);
   const [fav, setFav] = useState(false);
+  const [pinOpen, setPinOpen] = useState(false);
+  const [adultOk, setAdultOk] = useState(() => hasAdultBrowseUnlock());
+  const [pendingEp, setPendingEp] = useState(null);
 
   useEffect(() => {
     const saved = getSession();
@@ -40,6 +45,8 @@ export default function SeriesDetail() {
     const srv = { baseUrl: saved.baseUrl, username: saved.username, password: saved.password };
     setServer(srv);
     setFav(isFavorite('series', id));
+    setAdultOk(hasAdultBrowseUnlock());
+    setPendingEp(null);
     (async () => {
       const res = await getSeriesInfo(srv, id);
       if (res && res.info) setInfo(res);
@@ -54,6 +61,7 @@ export default function SeriesDetail() {
   const activeSeason = season || (seasonsList.length ? String(seasonsList[0].season_number) : null);
 
   const meta = info?.info || {};
+  const isAdult = needsAdultGate(meta.name || '', meta.category_name || '');
   const synopsis = pickSynopsis(
     meta.plot,
     meta.description,
@@ -62,7 +70,7 @@ export default function SeriesDetail() {
     meta.series_desc
   );
 
-  const play = (ep) => {
+  const doPlay = (ep) => {
     const container = ep?.container_extension || info?.container_extension || 'mp4';
     const url = seriesStreamUrl(server, container, ep, activeSeason, id);
     const epNum = ep?.episode_num ? `E${ep.episode_num}` : '';
@@ -78,8 +86,31 @@ export default function SeriesDetail() {
     );
   };
 
+  const play = (ep) => {
+    if (isAdult && !adultOk) {
+      setPendingEp(ep);
+      setPinOpen(true);
+      return;
+    }
+    doPlay(ep);
+  };
+
   return (
     <div>
+      <AdultPinDialog
+        open={pinOpen}
+        creating={!hasAdultPin()}
+        onDismiss={() => {
+          setPinOpen(false);
+          setPendingEp(null);
+        }}
+        onUnlocked={() => {
+          setAdultOk(true);
+          setPinOpen(false);
+          if (pendingEp) doPlay(pendingEp);
+          setPendingEp(null);
+        }}
+      />
       <div className="page-head">
         <button tabIndex={0} className="back-btn" onClick={() => navigate(-1)}>
           ← {t('common.back')}
@@ -134,6 +165,8 @@ export default function SeriesDetail() {
                       id,
                       title: meta.name || '',
                       image: meta.cover_big || meta.cover || '',
+                      categoryId: meta.category_id || '',
+                      categoryName: meta.category_name || '',
                     });
                     setFav(added);
                   }}

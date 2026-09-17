@@ -1,3 +1,5 @@
+import { isAdultContent, isAdultTitle } from './adult.js';
+
 // Session + local persistence (localStorage). Mirrors the Roku registry:
 // WorkingUrl / Username / Password, plus continue-watching and favorites.
 // Also keeps a multi-account list so the user can switch panels/users.
@@ -7,6 +9,7 @@ const KEYS = {
   accounts: 'swiftstv.accounts.v1',
   continueWatching: 'swiftstv.continueWatching.v1',
   favorites: 'swiftstv.favorites.v1',
+  recentLive: 'swiftstv.recentLive.v1',
   language: 'swiftstv.language.v1',
   hlsOnly: 'swiftstv.hlsOnlyChannels.v1',
 };
@@ -168,10 +171,24 @@ export function ensureActiveAccountListed() {
 }
 
 export function getContinueWatching() {
-  return read(KEYS.continueWatching, []);
+  const list = read(KEYS.continueWatching, []);
+  // Drop adult / live that may have been stored before the filters existed.
+  // Live history lives in recentLive, not Home's "Seguir viendo".
+  const clean = (Array.isArray(list) ? list : []).filter(
+    (x) =>
+      x?.id &&
+      x.type !== 'live' &&
+      x.type !== 'catchup' &&
+      !isAdultContent(x.title, x.categoryName),
+  );
+  if (clean.length !== (list || []).length) write(KEYS.continueWatching, clean);
+  return clean;
 }
 
 export function updateContinueWatching(item) {
+  // Live → Recientes (LiveGuide). Adult → never on Home rails.
+  if (!item || item.type === 'live' || item.type === 'catchup') return;
+  if (isAdultContent(item.title, item.categoryName) || isAdultTitle(item.title)) return;
   let list = getContinueWatching();
   list = list.filter((x) => !(x.type === item.type && x.id === item.id));
   list.unshift({
@@ -183,6 +200,9 @@ export function updateContinueWatching(item) {
     baseUrl: item.baseUrl,
     position: item.position || 0,
     duration: item.duration || 0,
+    seriesId: item.seriesId || '',
+    season: item.season || '',
+    categoryName: item.categoryName || '',
     playedAt: Date.now(),
   });
   if (list.length > 20) list = list.slice(0, 20);
@@ -195,29 +215,67 @@ export function removeContinueWatching(type, id) {
 }
 
 export function getFavorites() {
-  return read(KEYS.favorites, []);
+  const list = read(KEYS.favorites, []);
+  return Array.isArray(list) ? list : [];
+}
+
+/** Favorites for one section (`live` | `vod` | `series`), adult-safe for Home rails. */
+export function getFavoritesByType(type, { hideAdult = false } = {}) {
+  let list = getFavorites().filter((x) => x.type === type);
+  if (hideAdult) list = list.filter((x) => !isAdultContent(x.title, x.categoryName));
+  return list;
 }
 
 export function isFavorite(type, id) {
-  return getFavorites().some((x) => x.type === type && x.id === id);
+  return getFavorites().some((x) => x.type === type && String(x.id) === String(id));
 }
 
 export function toggleFavorite(item) {
   let list = getFavorites();
-  const exists = list.some((x) => x.type === item.type && x.id === item.id);
+  const exists = list.some((x) => x.type === item.type && String(x.id) === String(item.id));
   if (exists) {
-    list = list.filter((x) => !(x.type === item.type && x.id === item.id));
+    list = list.filter((x) => !(x.type === item.type && String(x.id) === String(item.id)));
   } else {
     list.unshift({
       type: item.type,
-      id: item.id,
-      title: item.title,
-      image: item.image,
+      id: String(item.id),
+      title: item.title || '',
+      image: item.image || '',
+      categoryId: item.categoryId ? String(item.categoryId) : '',
+      categoryName: item.categoryName || '',
       addedAt: Date.now(),
     });
+    if (list.length > 100) list = list.slice(0, 100);
   }
   write(KEYS.favorites, list);
   return !exists;
+}
+
+const RECENT_LIVE_MAX = 24;
+
+export function getRecentLive() {
+  const list = read(KEYS.recentLive, []);
+  const clean = (Array.isArray(list) ? list : []).filter(
+    (x) => x?.id && !isAdultContent(x.title, x.categoryName),
+  );
+  if (clean.length !== (list || []).length) write(KEYS.recentLive, clean);
+  return clean;
+}
+
+/** Record a live channel as recently watched. Adult titles/categories are ignored. */
+export function pushRecentLive({ id, title, image, categoryId, categoryName }) {
+  if (!id || isAdultContent(title, categoryName)) return;
+  let list = getRecentLive().filter((x) => String(x.id) !== String(id));
+  list.unshift({
+    id: String(id),
+    title: title || '',
+    image: image || '',
+    categoryId: categoryId ? String(categoryId) : '',
+    categoryName: categoryName || '',
+    playedAt: Date.now(),
+  });
+  if (list.length > RECENT_LIVE_MAX) list = list.slice(0, RECENT_LIVE_MAX);
+  write(KEYS.recentLive, list);
 }
 
 export function getLanguage() {

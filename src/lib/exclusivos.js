@@ -144,21 +144,34 @@ function buildCatalog(sourceDefs) {
     const name = String(def.name || def.id || 'Exclusivo');
     const type = (String(def.type || 'direct') || 'direct').toLowerCase();
     const logo = String(def.logo || '');
+    const category = String(def.category || '').trim();
     const urls = sourceUrls(def);
-    sources.push({ name, type, logo, sourceId: String(def.id || ''), urls });
+    sources.push({ name, type, logo, category, sourceId: String(def.id || ''), urls });
 
     // Flatten channel-list types at parse time so the UI just renders items.
     if (type === 'hls' || type === 'direct' || type === '') {
-      if (urls.length) channels.push(channel(name, urls[0], urls, logo, type, String(def.id || '')));
+      if (urls.length) {
+        channels.push(
+          channel(name, urls[0], urls, logo, type, String(def.id || ''), category),
+        );
+      }
     } else {
-      channels.push({ name, type, logo, urls, sourceId: String(def.id || ''), needsFetch: true });
+      channels.push({
+        name,
+        type,
+        logo,
+        urls,
+        category,
+        sourceId: String(def.id || ''),
+        needsFetch: true,
+      });
     }
   }
   return { sources, channels };
 }
 
-function channel(name, url, urls, logo, type, sourceId) {
-  return { name, url, mirrors: urls, logo, type, sourceId };
+function channel(name, url, urls, logo, type, sourceId, category = '') {
+  return { name, url, mirrors: urls, logo, type, sourceId, category };
 }
 
 function sourceUrls(src) {

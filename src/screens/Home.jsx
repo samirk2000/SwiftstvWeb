@@ -2,6 +2,7 @@ import { useMemo, useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { t } from '../lib/i18n.js';
 import { getContinueWatching, getFavorites, getSession, toggleFavorite } from '../lib/session.js';
+import { isAdultContent } from '../lib/adult.js';
 import { useSession } from '../context/SessionContext.jsx';
 import { useFocusable, setFocused, FocusScope } from '../components/Focusable.jsx';
 import { Row, Tile } from '../components/ui.jsx';
@@ -12,7 +13,6 @@ function OnboardingTips({ onDismiss }) {
   const ok = useFocusable('onboarding-ok');
 
   useEffect(() => {
-    // Beat useAutoFocus timers (30 / 120 / 400) so OK stays selected on TV remotes.
     const timers = [50, 150, 450].map((ms) =>
       window.setTimeout(() => setFocused(ok.ref.current, { native: false }), ms),
     );
@@ -41,7 +41,7 @@ function OnboardingTips({ onDismiss }) {
   );
 }
 
-function MenuItem({ to, icon, label, onNavigate, focus = false, hero = false, tone = '' }) {
+function MenuItem({ to, iconSrc, label, onNavigate, focus = false, hero = false, tone = '' }) {
   const { ref, tabIndex } = useFocusable(`menu-${to}`);
   return (
     <button
@@ -53,7 +53,9 @@ function MenuItem({ to, icon, label, onNavigate, focus = false, hero = false, to
       onClick={onNavigate}
       autoFocus={focus || undefined}
     >
-      <span className="icon">{icon}</span>
+      <span className="icon" aria-hidden="true">
+        <img className="menu-icon-img" src={iconSrc} alt="" draggable={false} />
+      </span>
       <span className="menu-item-label">{label}</span>
     </button>
   );
@@ -97,7 +99,10 @@ export default function Home() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session, tick, langTick]);
 
-  const favorites = useMemo(() => getFavorites().slice(0, 24), [tick, langTick]);
+  const favorites = useMemo(
+    () => getFavorites().filter((f) => !isAdultContent(f.title, f.categoryName)).slice(0, 24),
+    [tick, langTick],
+  );
 
   const go = (path) => navigate(path);
   const toFavorite = (f) => {
@@ -118,6 +123,8 @@ export default function Home() {
     if (c.position) qs.set('start', c.position);
     if (c.title) qs.set('title', c.title);
     if (c.url) qs.set('url', c.url);
+    if (c.seriesId) qs.set('seriesId', c.seriesId);
+    if (c.season) qs.set('season', c.season);
     navigate(`/player?${qs.toString()}`);
   };
 
@@ -126,7 +133,7 @@ export default function Home() {
     setShowTips(false);
     window.setTimeout(() => {
       const first =
-        document.querySelector('.home-hero .menu-item') ||
+        document.querySelector('.home-col .menu-item--hero') ||
         document.querySelector('.menu-item');
       if (first) setFocused(first, { native: false });
     }, 40);
@@ -143,117 +150,136 @@ export default function Home() {
         aria-hidden={showTips ? 'true' : undefined}
         style={showTips ? { pointerEvents: 'none', visibility: 'hidden' } : undefined}
       >
-        <section className="home-hero" aria-label={t('home.live')}>
-          <MenuItem
-            focus={!showTips}
-            to="live"
-            icon="📺"
-            label={t('home.live')}
-            hero
-            tone="live"
-            onNavigate={() => go('/live')}
-          />
-          <MenuItem
-            to="movies"
-            icon="🎬"
-            label={t('home.movies')}
-            hero
-            tone="movies"
-            onNavigate={() => go('/vod')}
-          />
-          <MenuItem
-            to="series"
-            icon="📚"
-            label={t('home.series')}
-            hero
-            tone="series"
-            onNavigate={() => go('/series')}
-          />
-        </section>
-
-        <section className="home-tools" aria-label={t('home.settings')}>
-          <MenuItem to="search" icon="🔎" label={t('home.search')} onNavigate={() => go('/search')} />
-          <MenuItem
-            to="exclusivos"
-            icon="⚡"
-            label={t('home.exclusivos')}
-            onNavigate={() => go('/exclusivos')}
-          />
-          <MenuItem
-            to="parental"
-            icon="🔒"
-            label={t('home.parental')}
-            onNavigate={() => go('/parental')}
-          />
-          <MenuItem
-            to="accounts"
-            icon="👤"
-            label={t('home.accounts')}
-            onNavigate={() => go('/accounts')}
-          />
-          <MenuItem
-            to="settings"
-            icon="⚙"
-            label={t('home.settings')}
-            onNavigate={() => go('/settings')}
-          />
-        </section>
-
-      {continueRow.length > 0 && (
-        <Row
-          title={t('home.continueWatching')}
-          items={continueRow}
-          itemKey={(c) => `${c.type}-${c.id}`}
-          renderItem={(c) => (
-            <div className="cw-tile" key={`${c.type}-${c.id}`}>
-              <Tile
-                focusKey={`cw-${c.type}-${c.id}`}
-                title={c.title}
-                poster={c.image}
-                aspect="16/9"
-                onActivate={() => openContinue(c)}
+        {/* 3 columns so ↓ from TV/Películas/Series lands on tools, not Continuar. */}
+        <div className="home-columns">
+          <div className="home-col">
+            <MenuItem
+              focus={!showTips}
+              to="live"
+              iconSrc="/brand/icon-live.png"
+              label={t('home.live')}
+              hero
+              tone="live"
+              onNavigate={() => go('/live')}
+            />
+            <div className="home-col-tools">
+              <MenuItem
+                to="search"
+                iconSrc="/brand/icon-search.png"
+                label={t('home.search')}
+                onNavigate={() => go('/search')}
               />
-              <button
-                tabIndex={0}
-                className="btn-ghost btn-xs btn-resume"
-                onClick={() => openContinue(c)}
-              >
-                ▶ {t('home.resume')}
-              </button>
-            </div>
-          )}
-        />
-      )}
-
-      {favorites.length > 0 && (
-        <Row
-          title={t('home.favorites')}
-          items={favorites}
-          itemKey={(f) => `${f.type}-${f.id}`}
-          renderItem={(f) => (
-            <div className="fav-tile" key={`${f.type}-${f.id}`}>
-              <Tile
-                focusKey={`fav-${f.type}-${f.id}`}
-                title={f.title}
-                poster={f.image}
-                aspect="2/3"
-                onActivate={() => toFavorite(f)}
+              <MenuItem
+                to="exclusivos"
+                iconSrc="/brand/icon-exclusivos.png"
+                label={t('home.exclusivos')}
+                onNavigate={() => go('/exclusivos')}
               />
-              <button
-                tabIndex={0}
-                className="btn-ghost btn-xs fav-btn fa tile-fav"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  removeFavorite(f);
-                }}
-                title={t('common.unfavorite')}
-              >
-                ★
-              </button>
             </div>
-          )}
-        />
-      )}
+          </div>
+          <div className="home-col">
+            <MenuItem
+              to="movies"
+              iconSrc="/brand/icon-movies.png"
+              label={t('home.movies')}
+              hero
+              tone="movies"
+              onNavigate={() => go('/vod')}
+            />
+            <div className="home-col-tools">
+              <MenuItem
+                to="parental"
+                iconSrc="/brand/icon-parental.png"
+                label={t('home.parental')}
+                onNavigate={() => go('/parental')}
+              />
+              <MenuItem
+                to="accounts"
+                iconSrc="/brand/icon-accounts.png"
+                label={t('home.accounts')}
+                onNavigate={() => go('/accounts')}
+              />
+            </div>
+          </div>
+          <div className="home-col">
+            <MenuItem
+              to="series"
+              iconSrc="/brand/icon-series.png"
+              label={t('home.series')}
+              hero
+              tone="series"
+              onNavigate={() => go('/series')}
+            />
+            <div className="home-col-tools">
+              <MenuItem
+                to="settings"
+                iconSrc="/brand/icon-settings.png"
+                label={t('home.settings')}
+                onNavigate={() => go('/settings')}
+              />
+            </div>
+          </div>
+        </div>
+
+        {continueRow.length > 0 && (
+          <Row
+            title={t('home.continueWatching')}
+            items={continueRow}
+            itemKey={(c) => `${c.type}-${c.id}`}
+            renderItem={(c) => (
+              <div className="cw-tile" key={`${c.type}-${c.id}`}>
+                <Tile
+                  focusKey={`cw-${c.type}-${c.id}`}
+                  title={c.title}
+                  poster={c.image}
+                  aspect="16/9"
+                  onActivate={() => openContinue(c)}
+                />
+                <button
+                  type="button"
+                  tabIndex={0}
+                  data-tv-secondary="true"
+                  className="btn-ghost btn-xs btn-resume"
+                  onClick={() => openContinue(c)}
+                >
+                  ▶ {t('home.resume')}
+                </button>
+              </div>
+            )}
+          />
+        )}
+
+        {favorites.length > 0 && (
+          <Row
+            title={t('home.favorites')}
+            items={favorites}
+            itemKey={(f) => `${f.type}-${f.id}`}
+            renderItem={(f) => (
+              <div className="fav-tile" key={`${f.type}-${f.id}`}>
+                <Tile
+                  focusKey={`fav-${f.type}-${f.id}`}
+                  title={f.title}
+                  poster={f.image}
+                  aspect="2/3"
+                  onActivate={() => toFavorite(f)}
+                />
+                <button
+                  type="button"
+                  tabIndex={0}
+                  data-tv-secondary="true"
+                  className="btn-ghost btn-xs fav-btn fa tile-fav"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    removeFavorite(f);
+                  }}
+                  title={t('common.unfavorite')}
+                >
+                  ★
+                </button>
+              </div>
+            )}
+          />
+        )}
       </div>
     </div>
   );

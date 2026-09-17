@@ -6,6 +6,8 @@ import { getSession } from '../lib/session.js';
 import { isFavorite, toggleFavorite } from '../lib/session.js';
 import { formatDuration } from '../lib/time.js';
 import { pickSynopsis } from '../lib/metaText.js';
+import { hasAdultPin, needsAdultGate, hasAdultBrowseUnlock } from '../lib/parental.js';
+import AdultPinDialog from '../components/AdultPinDialog.jsx';
 
 export default function VodDetail() {
   const { id } = useParams();
@@ -13,6 +15,8 @@ export default function VodDetail() {
   const [info, setInfo] = useState(null);
   const [server, setServer] = useState(null);
   const [fav, setFav] = useState(false);
+  const [pinOpen, setPinOpen] = useState(false);
+  const [adultOk, setAdultOk] = useState(() => hasAdultBrowseUnlock());
 
   useEffect(() => {
     const saved = getSession();
@@ -23,6 +27,7 @@ export default function VodDetail() {
     const srv = { baseUrl: saved.baseUrl, username: saved.username, password: saved.password };
     setServer(srv);
     setFav(isFavorite('vod', id));
+    setAdultOk(hasAdultBrowseUnlock());
     (async () => {
       // get_vod_info returns { info, movie_data }; keep the WHOLE object so the
       // detail reads both the stream (info.info) and its metadata (movie_data).
@@ -35,6 +40,9 @@ export default function VodDetail() {
   const streamData = info?.info || {};
   // Panels disagree on where metadata lives — check both bags.
   const meta = info?.movie_data || info?.info || {};
+  const title = streamData?.name || meta?.name || '';
+  const categoryName = streamData?.category_name || meta?.category_name || '';
+  const isAdult = needsAdultGate(title, categoryName);
   const synopsis = pickSynopsis(
     meta.plot,
     meta.description,
@@ -45,14 +53,20 @@ export default function VodDetail() {
     streamData.description
   );
 
-  const play = () => {
+  const doPlay = () => {
     const ext = meta?.container_extension || streamData?.container_extension || 'mp4';
     const url = vodStreamUrl(server, id, ext);
     navigate(
-      `/player?type=vod&id=${id}&url=${encodeURIComponent(url)}&title=${encodeURIComponent(
-        streamData?.name || meta?.name || ''
-      )}`
+      `/player?type=vod&id=${id}&url=${encodeURIComponent(url)}&title=${encodeURIComponent(title)}`
     );
+  };
+
+  const play = () => {
+    if (isAdult && !adultOk) {
+      setPinOpen(true);
+      return;
+    }
+    doPlay();
   };
 
   const poster =
@@ -70,6 +84,16 @@ export default function VodDetail() {
 
   return (
     <div>
+      <AdultPinDialog
+        open={pinOpen}
+        creating={!hasAdultPin()}
+        onDismiss={() => setPinOpen(false)}
+        onUnlocked={() => {
+          setAdultOk(true);
+          setPinOpen(false);
+          doPlay();
+        }}
+      />
       <div className="page-head">
         <button tabIndex={0} className="back-btn" onClick={() => navigate(-1)}>
           ← {t('common.back')}
@@ -124,8 +148,10 @@ export default function VodDetail() {
                   const added = toggleFavorite({
                     type: 'vod',
                     id,
-                    title: streamData?.name || meta?.name || '',
+                    title,
                     image: poster || '',
+                    categoryId: streamData?.category_id || meta?.category_id || '',
+                    categoryName,
                   });
                   setFav(added);
                 }}

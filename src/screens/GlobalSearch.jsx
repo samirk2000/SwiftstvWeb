@@ -6,6 +6,7 @@ import { loadCatalog } from '../lib/catalogCache.js';
 import { matchesSearch } from '../lib/searchText.js';
 import { liveStreamTsUrl } from '../lib/xtream.js';
 import { setLiveZapList, setLastLiveChannel } from '../lib/liveZap.js';
+import { isAdultContent } from '../lib/adult.js';
 import { useFocusable } from '../components/Focusable.jsx';
 
 const LIMIT = 24;
@@ -58,13 +59,13 @@ export default function GlobalSearch() {
   const results = useMemo(() => {
     if (q.length < 2) return { live: [], vod: [], series: [] };
     const live = (catalog.live || [])
-      .filter((c) => matchesSearch(c.name, q))
+      .filter((c) => matchesSearch(c.name, q) && !isAdultContent(c.name, c.category_name || ''))
       .slice(0, LIMIT);
     const vod = (catalog.vod || [])
-      .filter((v) => matchesSearch(v.name, q))
+      .filter((v) => matchesSearch(v.name, q) && !isAdultContent(v.name, v.category_name || ''))
       .slice(0, LIMIT);
     const series = (catalog.series || [])
-      .filter((s) => matchesSearch(s.name, q))
+      .filter((s) => matchesSearch(s.name, q) && !isAdultContent(s.name, s.category_name || ''))
       .slice(0, LIMIT);
     return { live, vod, series };
   }, [catalog, q]);
@@ -73,22 +74,21 @@ export default function GlobalSearch() {
 
   const playLive = (ch) => {
     if (!server) return;
-    const list = results.live.length
-      ? results.live
-      : catalog.live || [];
-    setLiveZapList(
-      list.map((c) => ({
+    const list = (results.live.length ? results.live : catalog.live || [])
+      .filter((c) => !isAdultContent(c.name, c.category_name || ''))
+      .map((c) => ({
         id: String(c.stream_id),
         name: c.name || '',
         url: liveStreamTsUrl(server, c.stream_id),
-      }))
-    );
+      }));
+    setLiveZapList(list);
     setLastLiveChannel(String(ch.stream_id));
     const url = liveStreamTsUrl(server, ch.stream_id);
     navigate(
       `/player?type=live&id=${ch.stream_id}&url=${encodeURIComponent(url)}&title=${encodeURIComponent(
         ch.name || ''
-      )}`
+      )}`,
+      { replace: true }
     );
   };
 

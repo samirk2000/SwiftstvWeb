@@ -1,33 +1,67 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { t } from '../lib/i18n.js';
 import { fetchCatalog, parseM3u, parseJsonList, extractM3u8 } from '../lib/exclusivos.js';
 import { corsFetch } from '../lib/cors.js';
-import { useFocusable } from '../components/Focusable.jsx';
+import { useFocusable, setFocused } from '../components/Focusable.jsx';
 
 // Resolve a catalog entry (m3u/json/extract may need a body fetch + parse).
 async function resolveChannels(entry) {
+  if (!entry) return [];
   if (entry.type === 'm3u') {
     const body = await fetchFirst(entry.urls);
-    return body ? parseM3u(body).map((c, i) => ({ ...c, type: 'direct', id: `${entry.name}-${i}` })) : [];
+    return body
+      ? parseM3u(body).map((c, i) => ({
+          ...c,
+          type: 'direct',
+          id: `${entry.id || entry.name}-${i}`,
+          category: entry.category || '',
+        }))
+      : [];
   }
   if (entry.type === 'json') {
     const body = await fetchFirst(entry.urls);
-    return body ? parseJsonList(body).map((c, i) => ({ ...c, type: 'direct', id: `${entry.name}-${i}` })) : [];
+    return body
+      ? parseJsonList(body).map((c, i) => ({
+          ...c,
+          type: 'direct',
+          id: `${entry.id || entry.name}-${i}`,
+          category: entry.category || '',
+        }))
+      : [];
   }
   if (entry.type === 'extract') {
-    for (const u of entry.urls) {
+    for (const u of entry.urls || []) {
       const body = await fetchText(u);
       const m3u8 = extractM3u8(body);
       if (m3u8) {
-        return [{ name: entry.name, url: m3u8, id: entry.name, mirrors: entry.urls, type: 'direct' }];
+        return [
+          {
+            name: entry.name,
+            url: m3u8,
+            id: entry.id || entry.name,
+            mirrors: entry.urls,
+            type: 'direct',
+            category: entry.category || '',
+          },
+        ];
       }
     }
     return [];
   }
-  // hls / direct
-  if (entry.url) {
-    return [{ name: entry.name, url: entry.url, id: entry.name, mirrors: entry.urls, type: 'direct' }];
+  // hls / direct — remote JSON usually has `urls[]`, not a lone `url`.
+  const url = entry.url || (Array.isArray(entry.urls) && entry.urls[0]) || '';
+  if (url) {
+    return [
+      {
+        name: entry.name,
+        url,
+        id: entry.id || entry.name,
+        mirrors: entry.urls || (entry.url ? [entry.url] : []),
+        type: 'direct',
+        category: entry.category || '',
+      },
+    ];
   }
   return [];
 }
@@ -46,21 +80,21 @@ async function fetchText(url) {
   return res.text;
 }
 
-function ExclTile({ entry, onActivate }) {
+function ExclTile({ entry, onActivate, showCategory = false }) {
   const { ref, tabIndex } = useFocusable(`excl-${entry.id || entry.name}`);
   return (
-    <div
+    <button
       ref={ref}
+      type="button"
       tabIndex={tabIndex}
-      className="tile"
-      style={{ width: 240 }}
+      className="excl-tile"
       onClick={() => onActivate(entry)}
-      onMouseEnter={() => ref.current && ref.current.focus()}
+      onMouseEnter={() => ref.current && setFocused(ref.current, { native: false })}
     >
-      <div className="tile-art">
-        <div className="tile-title">{entry.name}</div>
-      </div>
-    </div>
+      <span className="excl-tile-icon">⚡</span>
+      <span className="excl-tile-name">{entry.name}</span>
+      {showCategory && entry.category ? <span className="excl-tile-cat">{entry.category}</span> : null}
+    </button>
   );
 }
 
@@ -75,10 +109,25 @@ export default function Exclusivos() {
     setError(null);
     try {
       const cat = await fetchCatalog(force);
+      const sources = cat.channels || [];
       const resolvedList = [];
-      for (const src of cat.channels || []) {
-        const channels = await resolveChannels(src);
-        resolvedList.push(...channels);
+      for (const src of sources) {
+        if (src.needsFetch) {
+          const channels = await resolveChannels(src);
+          resolvedList.push(...channels);
+        } else if (src.url) {
+          resolvedList.push({
+            name: src.name,
+            url: src.url,
+            id: src.sourceId || src.name,
+            category: src.category || '',
+            mirrors: src.mirrors || [],
+            type: 'direct',
+          });
+        } else {
+          const channels = await resolveChannels(src);
+          resolvedList.push(...channels);
+        }
       }
       setResolved(resolvedList);
     } catch (err) {
@@ -92,10 +141,29 @@ export default function Exclusivos() {
     load();
   }, [load]);
 
+  // Land focus on the first channel card — not "Atrás" / "Actualizar".
+  useEffect(() => {
+    if (loading || !resolved.length) return undefined;
+    const timers = [100, 280, 550].map((ms) =>
+      window.setTimeout(() => {
+        const first = document.querySelector('.excl-tile');
+        if (first) setFocused(first, { native: false });
+      }, ms),
+    );
+    return () => timers.forEach((id) => window.clearTimeout(id));
+  }, [loading, resolved.length]);
+
+  const grouped = useMemo(() => {
+    const map = new Map();
+    for (const ch of resolved) {
+      const key = ch.category || t('exclusivos.module');
+      if (!map.has(key)) map.set(key, []);
+      map.get(key).push(ch);
+    }
+    return [...map.entries()];
+  }, [resolved]);
+
   const play = (entry) => {
-    // The player sets origin headers dynamically via needsOriginHeaders(url),
-    // which checks the published proxy_base_url / host / proxy_path + the
-    // origin CDN — no hardcoded hosts anywhere.
     navigate(
       `/player?type=exclusivo&id=${encodeURIComponent(entry.id || entry.name)}&url=${encodeURIComponent(
         entry.url
@@ -104,8 +172,11 @@ export default function Exclusivos() {
   };
 
   return (
-    <div>
+    <div className="exclusivos-page">
       <div className="page-head">
+        <button tabIndex={0} className="back-btn" onClick={() => navigate(-1)}>
+          ← {t('common.back')}
+        </button>
         <h1>{t('exclusivos.title')}</h1>
         <button tabIndex={0} className="btn-ghost" onClick={() => load(true)}>
           ↻ {t('exclusivos.refresh')}
@@ -118,13 +189,25 @@ export default function Exclusivos() {
           {t('exclusivos.loading')}
         </div>
       ) : error ? (
-        <div className="state">{t('common.error')}</div>
+        <div className="state">
+          {t('common.error')}
+          <button tabIndex={0} className="btn-primary" style={{ marginTop: 16 }} onClick={() => load(true)}>
+            {t('common.retry')}
+          </button>
+        </div>
       ) : resolved.length === 0 ? (
         <div className="state">{t('exclusivos.noActive')}</div>
       ) : (
-        <div className="menu-grid">
-          {resolved.map((entry) => (
-            <ExclTile key={entry.id || entry.name} entry={entry} onActivate={play} />
+        <div className="exclusivos-body">
+          {grouped.map(([cat, items]) => (
+            <section key={cat} className="exclusivos-section">
+              <h2 className="row-title">{cat}</h2>
+              <div className="exclusivos-grid">
+                {items.map((entry) => (
+                  <ExclTile key={entry.id || entry.name} entry={entry} onActivate={play} />
+                ))}
+              </div>
+            </section>
           ))}
         </div>
       )}

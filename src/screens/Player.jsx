@@ -1,7 +1,7 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { t } from '../lib/i18n.js';
-import { attachHls, attachTs, isUnsupportedContainer, mp4Variant, togglePip, wakeLockController } from '../lib/player.js';
+import { attachHls, attachTs, isUnsupportedContainer, mp4Variant, togglePip, wakeLockController, invalidatePlayback } from '../lib/player.js';
 import { needsOriginHeaders } from '../lib/exclusivos.js';
 import {
   updateContinueWatching,
@@ -10,7 +10,7 @@ import {
   clearHlsOnlyChannel,
   getSession,
 } from '../lib/session.js';
-import { setFocused } from '../components/Focusable.jsx';
+import { setFocused, getTvFocus, nearest } from '../components/Focusable.jsx';
 import { getPrefs } from '../lib/prefs.js';
 import {
   zapByNumber,
@@ -19,10 +19,47 @@ import {
   findZapIndex,
   getLiveZapMeta,
   setLiveZapList,
+  setLiveZapMeta,
   setLiveZapCatId,
-  zapCategoryRelative,
 } from '../lib/liveZap.js';
 import { getSeriesInfo, seriesStreamUrl, getLiveStreams, liveStreamTsUrl } from '../lib/xtream.js';
+import { isAdultCategory, isAdultContent } from '../lib/adult.js';
+import { hasAdultPin } from '../lib/parental.js';
+import AdultPinDialog from '../components/AdultPinDialog.jsx';
+import {
+  applyAudioTrack,
+  applyTextTrack,
+  collectTracks,
+  cycleNextId,
+  pickPreferredAudioId,
+} from '../lib/tracks.js';
+import {
+  attachRemuxedAudio,
+  cancelAllContainerAudioJobs,
+  pickPreferredContainerAudioId,
+  probeContainerAudioTracks,
+} from '../lib/containerAudio.js';
+
+/** PC/Mac (mouse + keyboard) vs TV remote — seek/click UX differs. */
+function useDesktopPointer() {
+  const [desktop, setDesktop] = useState(() => {
+    if (typeof window === 'undefined' || !window.matchMedia) return false;
+    return window.matchMedia('(hover: hover) and (pointer: fine)').matches;
+  });
+  useEffect(() => {
+    if (!window.matchMedia) return undefined;
+    const mq = window.matchMedia('(hover: hover) and (pointer: fine)');
+    const apply = () => setDesktop(mq.matches);
+    apply();
+    if (mq.addEventListener) mq.addEventListener('change', apply);
+    else mq.addListener?.(apply);
+    return () => {
+      if (mq.removeEventListener) mq.removeEventListener('change', apply);
+      else mq.removeListener?.(apply);
+    };
+  }, []);
+  return desktop;
+}
 
 export default function Player() {
   const location = useLocation();
@@ -81,9 +118,24 @@ export default function Player() {
   const [zapIndex, setZapIndex] = useState(0);
   const [zapCatTick, setZapCatTick] = useState(0); // re-render overlay after category swap
   const [zapLoading, setZapLoading] = useState(false);
+  const [adultPinOpen, setAdultPinOpen] = useState(false);
+  const [pendingZapCat, setPendingZapCat] = useState(null);
+  const [audioTracks, setAudioTracks] = useState([]);
+  const [textTracks, setTextTracks] = useState([]);
+  const [audioId, setAudioId] = useState(0);
+  const [textId, setTextId] = useState(-1);
+  const [trackBanner, setTrackBanner] = useState('');
+  const audioPreferDoneRef = useRef(false);
+  const containerAudioRef = useRef([]);
+  const containerAudioIdRef = useRef(null);
+  const remuxCtrlRef = useRef(null);
+  const playUrlRef = useRef('');
+  const resumeAtRef = useRef(null);
+  const trackBannerTimer = useRef(null);
   // Netflix-style "next episode" card near the end of a series episode.
   const [nextUp, setNextUp] = useState(null); // { title, secs } | null
   const nextEpRef = useRef(null); // cached next episode payload
+  const prevEpRef = useRef(null); // cached previous episode payload
   const nextUpDismissedRef = useRef(false);
   const nextUpPlayingRef = useRef(false);
   const nextUpRef = useRef(null);
@@ -91,6 +143,14 @@ export default function Player() {
   const zapOpenRef = useRef(false);
   const zapIndexRef = useRef(0);
   const zapLoadingRef = useRef(false);
+  /** While true, visibility/pagehide must NOT kill playback (episode/channel swap). */
+  const suppressSuspendRef = useRef(false);
+  /** Bumped to cancel in-flight zap / episode navigates after leave or a newer swap. */
+  const navGenRef = useRef(0);
+  const hardStopRef = useRef(() => {});
+  const leaveTimerRef = useRef(null);
+  /** False after leave/hardStop until the next intentional attach (zap/episode/Stay/mount). */
+  const allowAttachRef = useRef(true);
   zapOpenRef.current = zapOpen;
   zapIndexRef.current = zapIndex;
   zapLoadingRef.current = zapLoading;
@@ -102,6 +162,254 @@ export default function Player() {
   const lastSeekAtRef = useRef(0);
   const SEEK_COOLDOWN_MS = 650;
   const pauseBtnRef = useRef(null);
+  const desktopPointer = useDesktopPointer();
+  const desktopPointerRef = useRef(desktopPointer);
+  desktopPointerRef.current = desktopPointer;
+
+  const revealControls = useCallback(() => {
+    if (leaveOpen || nextUpRef.current) return;
+    setControlsVisible(true);
+    clearTimeout(hideTimer.current);
+    const hideMs = desktopPointerRef.current ? 5000 : 6000;
+    hideTimer.current = setTimeout(() => setControlsVisible(false), hideMs);
+  }, [leaveOpen]);
+
+  const showTrackBanner = useCallback((msg) => {
+    setTrackBanner(msg);
+    if (trackBannerTimer.current) clearTimeout(trackBannerTimer.current);
+    trackBannerTimer.current = window.setTimeout(() => setTrackBanner(''), 2800);
+  }, []);
+
+  const refreshTracks = useCallback(() => {
+    const snap = collectTracks(playerRef.current, videoRef.current);
+    const container = containerAudioRef.current;
+    // Chromium/TV browsers often expose 0 native audioTracks on MKV/MP4 dual
+    // titles — fall back to container probe (mediabunny) so Audio can cycle.
+    let audio = snap.audio;
+    let audioId = snap.audioId;
+    let source = snap.source;
+    if (container.length > 1 && audio.length < 2) {
+      audio = container.map((t) => ({ id: t.id, label: t.label, lang: t.lang }));
+      audioId =
+        containerAudioIdRef.current != null
+          ? containerAudioIdRef.current
+          : pickPreferredContainerAudioId(container) ?? audio[0]?.id;
+      source = 'container';
+    }
+    setAudioTracks(audio);
+    setTextTracks(snap.text);
+    setAudioId(audioId);
+    setTextId(snap.textId);
+    if (
+      isVodLike &&
+      !audioPreferDoneRef.current &&
+      audio.length > 1 &&
+      playerRef.current &&
+      source !== 'container'
+    ) {
+      const pref = pickPreferredAudioId(audio);
+      if (pref !== audioId) {
+        applyAudioTrack(playerRef.current, videoRef.current, pref);
+        setAudioId(pref);
+      }
+      audioPreferDoneRef.current = true;
+    }
+    return { audio, text: snap.text, audioId, textId: snap.textId, source };
+  }, [isVodLike]);
+  const refreshTracksRef = useRef(refreshTracks);
+  refreshTracksRef.current = refreshTracks;
+
+  const stopRemux = () => {
+    const ctrl = remuxCtrlRef.current;
+    remuxCtrlRef.current = null;
+    if (ctrl) {
+      try {
+        const p = ctrl.destroy();
+        if (p && typeof p.then === 'function') {
+          p.catch(() => {});
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+    // Always cancel probe/remux UrlSource jobs — even if remux wasn't active,
+    // a dual-audio probe can keep the previous episode "Online" on the panel.
+    void cancelAllContainerAudioJobs();
+  };
+
+  const switchContainerAudio = async (trackId) => {
+    const video = videoRef.current;
+    const src = playUrlRef.current || video?.currentSrc || '';
+    if (!video || !src) return false;
+    const abs =
+      remuxCtrlRef.current && typeof remuxCtrlRef.current.getAbsoluteTime === 'function'
+        ? remuxCtrlRef.current.getAbsoluteTime()
+        : video.currentTime || 0;
+    showTrackBanner(t('player.switchingAudio'));
+    suppressSuspendRef.current = true;
+    allowAttachRef.current = false;
+    stopRemux();
+    if (playerRef.current && playerRef.current !== remuxCtrlRef.current) {
+      try {
+        playerRef.current.destroy();
+      } catch {
+        /* ignore */
+      }
+      playerRef.current = null;
+    }
+    invalidatePlayback();
+    try {
+      video.pause();
+    } catch {
+      /* ignore */
+    }
+
+    const preferred = pickPreferredContainerAudioId(containerAudioRef.current);
+    // Default / preferred track → native demux (no remux tax).
+    if (trackId === preferred) {
+      resumeAtRef.current = abs;
+      allowAttachRef.current = true;
+      containerAudioIdRef.current = trackId;
+      setRestart((x) => x + 1);
+      window.setTimeout(() => {
+        suppressSuspendRef.current = false;
+      }, 1500);
+      return true;
+    }
+
+    const ctrl = attachRemuxedAudio(video, src, trackId, {
+      startPosition: abs,
+      onReady: () => {
+        setStarted(true);
+        startedRef.current = true;
+        setError(false);
+      },
+      onError: () => {
+        showTrackBanner(t('player.audioSwitchFailed'));
+        resumeAtRef.current = abs;
+        allowAttachRef.current = true;
+        stopRemux();
+        setRestart((x) => x + 1);
+      },
+      onProgress: () => {},
+    });
+    remuxCtrlRef.current = ctrl;
+    playerRef.current = ctrl;
+    containerAudioIdRef.current = trackId;
+    try {
+      await ctrl.ready;
+    } catch {
+      /* onError handles */
+    }
+    window.setTimeout(() => {
+      suppressSuspendRef.current = false;
+    }, 1500);
+    return true;
+  };
+
+  const cycleAudio = () => {
+    const snap = refreshTracks();
+    if (!snap.audio.length) {
+      showTrackBanner(t('player.noAudioTracks'));
+      return;
+    }
+    if (snap.audio.length < 2) {
+      showTrackBanner(`${t('player.audio')}: ${snap.audio[0]?.label || '—'}`);
+      return;
+    }
+    const next = cycleNextId(snap.audio, snap.audioId);
+    const label = snap.audio.find((a) => a.id === next)?.label || String(next);
+    if (snap.source === 'container' || containerAudioRef.current.length > 1) {
+      void switchContainerAudio(next).then(() => {
+        setAudioId(next);
+        showTrackBanner(`${t('player.audio')}: ${label}`);
+        revealControls();
+      });
+      return;
+    }
+    applyAudioTrack(playerRef.current, videoRef.current, next);
+    setAudioId(next);
+    showTrackBanner(`${t('player.audio')}: ${label}`);
+    revealControls();
+  };
+
+  const cycleSubs = () => {
+    const snap = refreshTracks();
+    if (!snap.text.length) {
+      showTrackBanner(t('player.noSubtitles'));
+      return;
+    }
+    const next = cycleNextId(snap.text, snap.textId, { includeOff: true });
+    applyTextTrack(playerRef.current, videoRef.current, next);
+    setTextId(next);
+    const label =
+      next < 0
+        ? t('player.subsOff')
+        : snap.text.find((x) => x.id === next)?.label || String(next);
+    showTrackBanner(`${t('player.subtitles')}: ${label}`);
+    revealControls();
+  };
+
+  // Refresh track lists once playback is actually running (manifest parsed).
+  useEffect(() => {
+    if (!started || !isVodLike) return undefined;
+    audioPreferDoneRef.current = false;
+    refreshTracks();
+    const timers = [800, 2000, 4500].map((ms) => window.setTimeout(() => refreshTracks(), ms));
+    const onTracks = () => refreshTracks();
+    const video = videoRef.current;
+    try {
+      video?.textTracks?.addEventListener?.('addtrack', onTracks);
+      video?.audioTracks?.addEventListener?.('addtrack', onTracks);
+    } catch {
+      /* ignore */
+    }
+    return () => {
+      timers.forEach((id) => window.clearTimeout(id));
+      try {
+        video?.textTracks?.removeEventListener?.('addtrack', onTracks);
+        video?.audioTracks?.removeEventListener?.('addtrack', onTracks);
+      } catch {
+        /* ignore */
+      }
+    };
+  }, [started, isVodLike, url, id, restart, refreshTracks]);
+
+  useEffect(() => {
+    audioPreferDoneRef.current = false;
+    setAudioTracks([]);
+    setTextTracks([]);
+    setAudioId(0);
+    setTextId(-1);
+    setTrackBanner('');
+    containerAudioRef.current = [];
+    containerAudioIdRef.current = null;
+    stopRemux();
+  }, [url, id, type]);
+
+  // Probe MKV/MP4 dual-audio tracks once playback has a real src (Chromium hides audioTracks).
+  useEffect(() => {
+    if (!started || !isVodLike) return undefined;
+    let cancelled = false;
+    const run = async () => {
+      const src = videoRef.current?.currentSrc || playUrlRef.current || '';
+      if (!src) return;
+      const tracks = await probeContainerAudioTracks(src);
+      if (cancelled || !tracks.length) return;
+      containerAudioRef.current = tracks;
+      if (containerAudioIdRef.current == null) {
+        containerAudioIdRef.current = pickPreferredContainerAudioId(tracks);
+      }
+      refreshTracksRef.current?.();
+    };
+    const t1 = window.setTimeout(run, 600);
+    const t2 = window.setTimeout(run, 2500);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(t1);
+      window.clearTimeout(t2);
+    };
+  }, [started, isVodLike, url, id, restart]);
 
   // Claim keys from global TV nav while player is active.
   useEffect(() => {
@@ -118,28 +426,119 @@ export default function Player() {
   }, [isVodLike, isLive, leaveOpen]);
 
   // When the transport bar appears, park focus on Pause — never on Atrás.
+  // Skip while the next-episode card owns the remote.
   useEffect(() => {
-    if (!isVodLike || !controlsVisible || leaveOpen) return undefined;
+    if (!isVodLike || !controlsVisible || leaveOpen || nextUp) return undefined;
     const timer = window.setTimeout(() => {
       if (pauseBtnRef.current) setFocused(pauseBtnRef.current, { native: false });
     }, 30);
     return () => window.clearTimeout(timer);
-  }, [isVodLike, controlsVisible, leaveOpen]);
+  }, [isVodLike, controlsVisible, leaveOpen, nextUp]);
 
-  const goLiveChannel = (ch) => {
-    if (!ch?.url) return;
+  const EPISODE_GAP_MS = 400;
+  const EPISODE_GAP_AFTER_REMUX_MS = 700;
+  const CHANNEL_GAP_MS = 500;
+  const LEAVE_GAP_MS = 400;
+
+  // Wipe the media element and abort any in-flight request, releasing the
+  // socket to the panel. Call on error, pause / unmount, or before a new stream.
+  const wipePlayback = () => {
+    if (abortRef.current) {
+      try {
+        abortRef.current.abort();
+      } catch {
+        /* ignore */
+      }
+      abortRef.current = null;
+    }
+    const video = videoRef.current;
+    if (video) {
+      try {
+        video.pause();
+      } catch {
+        /* ignore */
+      }
+      video.removeAttribute('src');
+      video.src = '';
+      try {
+        video.load();
+      } catch {
+        /* ignore */
+      }
+    }
+  };
+
+  /** Kill HLS/native + wipe BEFORE swapping episodes / leaving so the panel never sees overlapping streams. */
+  const hardStopPlayback = () => {
+    // Invalidate first so any delayed HLS fallback / native retry from this
+    // attach is dead even before destroy() finishes clearing timers.
+    invalidatePlayback();
+    allowAttachRef.current = false;
+    stopRemux();
     setZapOpen(false);
+    zapOpenRef.current = false;
+    setNumBuffer('');
+    setZapBanner('');
+    if (numTimer.current) clearTimeout(numTimer.current);
+    if (playerRef.current) {
+      try {
+        playerRef.current.destroy();
+      } catch {
+        /* ignore */
+      }
+      playerRef.current = null;
+    }
+    wipePlayback();
+    setStarted(false);
+    startedRef.current = false;
+    setError(false);
+    setErrorCode(null);
+    setPaused(false);
+    setNextUp(null);
+    setLeaveOpen(false);
+  };
+  hardStopRef.current = hardStopPlayback;
+
+  const goLiveChannel = async (ch) => {
+    if (!ch?.url) return;
+    // Same channel — just close the overlay, don't reopen the stream.
+    if (String(ch.id) === String(id) && String(ch.url) === String(url)) {
+      setZapOpen(false);
+      zapOpenRef.current = false;
+      setNumBuffer('');
+      return;
+    }
+    setZapOpen(false);
+    zapOpenRef.current = false;
     setNumBuffer('');
     if (numTimer.current) clearTimeout(numTimer.current);
+    if (leaveTimerRef.current) {
+      clearTimeout(leaveTimerRef.current);
+      leaveTimerRef.current = null;
+    }
     setLastLiveChannel(ch.id);
     setZapBanner(ch.name || ch.id);
     window.setTimeout(() => setZapBanner(''), 2500);
+    // Kill current stream FIRST. Cancel token so a Leave during the gap cannot
+    // leave a later navigate() opening a ghost channel after the user exited.
+    const gen = ++navGenRef.current;
+    suppressSuspendRef.current = true;
+    hardStopRef.current();
+    await new Promise((r) => setTimeout(r, CHANNEL_GAP_MS));
+    if (gen !== navGenRef.current) {
+      suppressSuspendRef.current = false;
+      return;
+    }
+    allowAttachRef.current = true;
     navigate(
       `/player?type=live&id=${encodeURIComponent(ch.id)}&url=${encodeURIComponent(ch.url)}&title=${encodeURIComponent(
         ch.name || ''
       )}`,
       { replace: true }
     );
+    window.setTimeout(() => {
+      if (gen === navGenRef.current) suppressSuspendRef.current = false;
+    }, 1500);
   };
 
   const openZapAt = (idx) => {
@@ -160,9 +559,11 @@ export default function Player() {
       openZapAt((cur < 0 ? 0 : cur) + delta);
       return;
     }
+    // Always advance from the REF (not React state) so rapid CH± never
+    // "bounces back" if a slow setState from an earlier press lands late.
     const next = (zapIndexRef.current + delta + list.length * 10) % list.length;
-    setZapIndex(next);
     zapIndexRef.current = next;
+    setZapIndex(next);
   };
 
   const confirmZap = () => {
@@ -172,19 +573,9 @@ export default function Player() {
     if (ch) goLiveChannel(ch);
   };
 
-  const shiftZapCategory = async (delta) => {
-    if (zapLoadingRef.current) return;
-    const nextCat = zapCategoryRelative(delta);
-    if (!nextCat) {
-      // No categories saved — still open overlay so user sees channels.
-      if (!zapOpenRef.current) {
-        const cur = findZapIndex(id);
-        openZapAt(cur < 0 ? 0 : cur);
-      }
-      return;
-    }
+  const loadZapCategory = async (nextCat, { adultSession } = {}) => {
     const saved = getSession();
-    if (!saved?.baseUrl) return;
+    if (!saved?.baseUrl || !nextCat) return;
     setZapOpen(true);
     zapOpenRef.current = true;
     setZapLoading(true);
@@ -196,13 +587,23 @@ export default function Player() {
         password: saved.password,
       };
       const streams = await getLiveStreams(srv, nextCat.id || undefined);
-      const list = (Array.isArray(streams) ? streams : []).map((c) => ({
-        id: String(c.stream_id),
-        name: c.name || '',
-        url: liveStreamTsUrl(srv, c.stream_id),
-      }));
+      const allowAdult = Boolean(adultSession);
+      const list = (Array.isArray(streams) ? streams : [])
+        .filter((c) => {
+          const adult = isAdultContent(c.name, '');
+          // Category itself may be adult — allow only in adultSession.
+          if (isAdultCategory(nextCat.name)) return allowAdult;
+          return allowAdult ? true : !adult;
+        })
+        .map((c) => ({
+          id: String(c.stream_id),
+          name: c.name || '',
+          url: liveStreamTsUrl(srv, c.stream_id),
+        }));
       setLiveZapList(list);
       setLiveZapCatId(nextCat.id);
+      const meta = getLiveZapMeta();
+      setLiveZapMeta({ ...meta, catId: nextCat.id, adultSession: allowAdult });
       setZapIndex(0);
       zapIndexRef.current = 0;
       setZapCatTick((x) => x + 1);
@@ -214,20 +615,90 @@ export default function Player() {
     }
   };
 
+  const shiftZapCategory = async (delta) => {
+    if (zapLoadingRef.current) return;
+    const meta = getLiveZapMeta();
+    const cats = (meta.categories || []).filter((c) => {
+      if (meta.adultSession) return true;
+      // Keep Favoritos / Recientes / Todos; skip adult panel folders in overlay.
+      if (c.id === '__favorites__' || c.id === '__recent__' || c.id === '') return true;
+      return !isAdultCategory(c.name);
+    });
+    if (cats.length < 2) {
+      if (!zapOpenRef.current) {
+        const cur = findZapIndex(id);
+        openZapAt(cur < 0 ? 0 : cur);
+      }
+      return;
+    }
+    let idx = cats.findIndex((c) => String(c.id) === String(meta.catId));
+    if (idx < 0) idx = 0;
+    const nextCat = cats[(idx + delta + cats.length * 10) % cats.length];
+    if (!nextCat) return;
+
+    if (isAdultCategory(nextCat.name) && !meta.adultSession) {
+      setPendingZapCat(nextCat);
+      setAdultPinOpen(true);
+      return;
+    }
+    await loadZapCategory(nextCat, { adultSession: meta.adultSession || isAdultCategory(nextCat.name) });
+  };
+
   const playNextEpisode = async () => {
     if (type !== 'series' || !seriesId) return false;
     if (nextUpPlayingRef.current) return true;
+
+    const go = async (epId, season, epUrl, epTitle) => {
+      nextUpPlayingRef.current = true;
+      nextUpDismissedRef.current = true;
+      // Close the current stream FIRST — switching episodes without this left
+      // 2–3 panel connections alive and the next ep stuck on "Cargando…".
+      // Suppress visibility/pagehide: wiping <video> on webOS/Tizen can fire
+      // those events and hardStop would kill the NEXT episode mid-attach.
+      // navGen cancels this navigate if the user Leaves during the gap.
+      if (leaveTimerRef.current) {
+        clearTimeout(leaveTimerRef.current);
+        leaveTimerRef.current = null;
+      }
+      const hadRemux = Boolean(remuxCtrlRef.current);
+      const gen = ++navGenRef.current;
+      suppressSuspendRef.current = true;
+      try {
+        // Kill remux/probe panel sockets before the navigate gap.
+        stopRemux();
+        hardStopRef.current();
+        await cancelAllContainerAudioJobs();
+        await new Promise((r) =>
+          setTimeout(r, hadRemux ? EPISODE_GAP_AFTER_REMUX_MS : EPISODE_GAP_MS)
+        );
+        // Second wipe after the gap — delayed UrlSource retries must not revive.
+        hardStopRef.current();
+        await cancelAllContainerAudioJobs();
+        if (gen !== navGenRef.current) {
+          suppressSuspendRef.current = false;
+          return false;
+        }
+        allowAttachRef.current = true;
+        navigate(
+          `/player?type=series&id=${encodeURIComponent(String(epId))}&seriesId=${encodeURIComponent(
+            String(seriesId)
+          )}&season=${encodeURIComponent(String(season))}&url=${encodeURIComponent(epUrl)}&title=${encodeURIComponent(
+            epTitle
+          )}`,
+          { replace: true }
+        );
+      } finally {
+        window.setTimeout(() => {
+          if (gen === navGenRef.current) suppressSuspendRef.current = false;
+          nextUpPlayingRef.current = false;
+        }, 1200);
+      }
+      return true;
+    };
+
     const cached = nextEpRef.current;
     if (cached?.url) {
-      nextUpPlayingRef.current = true;
-      setNextUp(null);
-      navigate(
-        `/player?type=series&id=${cached.id}&seriesId=${seriesId}&season=${encodeURIComponent(
-          String(cached.season)
-        )}&url=${encodeURIComponent(cached.url)}&title=${encodeURIComponent(cached.title)}`,
-        { replace: true }
-      );
-      return true;
+      return go(cached.id, cached.season, cached.url, cached.title);
     }
     const saved = getSession();
     if (!saved) return false;
@@ -261,22 +732,99 @@ export default function Player() {
       url: nextUrl,
       title: nextTitle,
     };
-    nextUpPlayingRef.current = true;
-    setNextUp(null);
-    navigate(
-      `/player?type=series&id=${next.id}&seriesId=${seriesId}&season=${encodeURIComponent(
-        String(season)
-      )}&url=${encodeURIComponent(nextUrl)}&title=${encodeURIComponent(nextTitle)}`,
-      { replace: true }
-    );
-    return true;
+    return go(next.id, season, nextUrl, nextTitle);
   };
 
-  // Prefetch next episode so the end-card is instant.
+  const playPrevEpisode = async () => {
+    if (type !== 'series' || !seriesId) return false;
+    if (nextUpPlayingRef.current) return true;
+
+    const go = async (epId, season, epUrl, epTitle) => {
+      nextUpPlayingRef.current = true;
+      nextUpDismissedRef.current = true;
+      if (leaveTimerRef.current) {
+        clearTimeout(leaveTimerRef.current);
+        leaveTimerRef.current = null;
+      }
+      const hadRemux = Boolean(remuxCtrlRef.current);
+      const gen = ++navGenRef.current;
+      suppressSuspendRef.current = true;
+      try {
+        stopRemux();
+        hardStopRef.current();
+        await cancelAllContainerAudioJobs();
+        await new Promise((r) =>
+          setTimeout(r, hadRemux ? EPISODE_GAP_AFTER_REMUX_MS : EPISODE_GAP_MS)
+        );
+        hardStopRef.current();
+        await cancelAllContainerAudioJobs();
+        if (gen !== navGenRef.current) {
+          suppressSuspendRef.current = false;
+          return false;
+        }
+        allowAttachRef.current = true;
+        navigate(
+          `/player?type=series&id=${encodeURIComponent(String(epId))}&seriesId=${encodeURIComponent(
+            String(seriesId)
+          )}&season=${encodeURIComponent(String(season))}&url=${encodeURIComponent(epUrl)}&title=${encodeURIComponent(
+            epTitle
+          )}`,
+          { replace: true }
+        );
+      } finally {
+        window.setTimeout(() => {
+          if (gen === navGenRef.current) suppressSuspendRef.current = false;
+          nextUpPlayingRef.current = false;
+        }, 1200);
+      }
+      return true;
+    };
+
+    const cached = prevEpRef.current;
+    if (cached?.url) {
+      return go(cached.id, cached.season, cached.url, cached.title);
+    }
+    const saved = getSession();
+    if (!saved) return false;
+    const srv = { baseUrl: saved.baseUrl, username: saved.username, password: saved.password };
+    const info = await getSeriesInfo(srv, seriesId);
+    if (!info?.episodes) return false;
+    const seasons = Object.keys(info.episodes || {}).sort((a, b) => Number(a) - Number(b));
+    let season = seasonParam || seasons[0];
+    let list = info.episodes[season] || [];
+    let idx = list.findIndex((ep) => String(ep.id) === String(id));
+    let prev = idx > 0 ? list[idx - 1] : null;
+    if (!prev) {
+      const sIdx = seasons.indexOf(String(season));
+      if (sIdx > 0) {
+        season = seasons[sIdx - 1];
+        list = info.episodes[season] || [];
+        prev = list.length ? list[list.length - 1] : null;
+      }
+    }
+    if (!prev) return false;
+    const container = prev.container_extension || info.container_extension || 'mp4';
+    const prevUrl = seriesStreamUrl(srv, container, prev, season, seriesId);
+    const epNum = prev.episode_num ? `E${prev.episode_num}` : '';
+    const prevTitle =
+      prev.title ||
+      [info.info?.name, `T${season}`, epNum].filter(Boolean).join(' · ') ||
+      String(prev.id);
+    prevEpRef.current = {
+      id: prev.id,
+      season,
+      url: prevUrl,
+      title: prevTitle,
+    };
+    return go(prev.id, season, prevUrl, prevTitle);
+  };
+
+  // Prefetch prev/next episode so transport buttons are instant.
   useEffect(() => {
     nextUpDismissedRef.current = false;
     nextUpPlayingRef.current = false;
     nextEpRef.current = null;
+    prevEpRef.current = null;
     setNextUp(null);
     if (type !== 'series' || !seriesId) return undefined;
     let cancelled = false;
@@ -291,29 +839,41 @@ export default function Player() {
         let season = seasonParam || seasons[0];
         let list = info.episodes[season] || [];
         let idx = list.findIndex((ep) => String(ep.id) === String(id));
+
+        const pack = (ep, seasonKey) => {
+          const container = ep.container_extension || info.container_extension || 'mp4';
+          const epUrl = seriesStreamUrl(srv, container, ep, seasonKey, seriesId);
+          const epNum = ep.episode_num ? `E${ep.episode_num}` : '';
+          const epTitle =
+            ep.title ||
+            [info.info?.name, `T${seasonKey}`, epNum].filter(Boolean).join(' · ') ||
+            String(ep.id);
+          return { id: ep.id, season: seasonKey, url: epUrl, title: epTitle };
+        };
+
         let next = idx >= 0 ? list[idx + 1] : null;
+        let nextSeason = season;
         if (!next) {
           const sIdx = seasons.indexOf(String(season));
           if (sIdx >= 0 && sIdx < seasons.length - 1) {
-            season = seasons[sIdx + 1];
-            list = info.episodes[season] || [];
-            next = list[0];
+            nextSeason = seasons[sIdx + 1];
+            const nList = info.episodes[nextSeason] || [];
+            next = nList[0];
           }
         }
-        if (!next || cancelled) return;
-        const container = next.container_extension || info.container_extension || 'mp4';
-        const nextUrl = seriesStreamUrl(srv, container, next, season, seriesId);
-        const epNum = next.episode_num ? `E${next.episode_num}` : '';
-        const nextTitle =
-          next.title ||
-          [info.info?.name, `T${season}`, epNum].filter(Boolean).join(' · ') ||
-          String(next.id);
-        nextEpRef.current = {
-          id: next.id,
-          season,
-          url: nextUrl,
-          title: nextTitle,
-        };
+        if (next && !cancelled) nextEpRef.current = pack(next, nextSeason);
+
+        let prev = idx > 0 ? list[idx - 1] : null;
+        let prevSeason = season;
+        if (!prev) {
+          const sIdx = seasons.indexOf(String(season));
+          if (sIdx > 0) {
+            prevSeason = seasons[sIdx - 1];
+            const pList = info.episodes[prevSeason] || [];
+            prev = pList.length ? pList[pList.length - 1] : null;
+          }
+        }
+        if (prev && !cancelled) prevEpRef.current = pack(prev, prevSeason);
       } catch {
         /* ignore */
       }
@@ -338,25 +898,44 @@ export default function Player() {
   const alternateUrls = mp4Alt && mp4Alt !== url ? [mp4Alt] : [];
   const unsupportedContainer = isUnsupportedContainer(url);
 
-  // Wipe the media element and abort any in-flight request, releasing the
-  // socket to the panel. Call on error, pause / unmount, or before a new stream.
-  const wipePlayback = () => {
-    if (abortRef.current) {
-      try { abortRef.current.abort(); } catch {}
-      abortRef.current = null;
+  /** Destroy stream first, brief gap for TCP close, then leave — never navigate while HLS/native still fetching.
+   * Bumps navGen so an in-flight overlay zap / episode swap cannot reopen a stream after exit. */
+  const leavePlayer = () => {
+    const gen = ++navGenRef.current;
+    if (leaveTimerRef.current) {
+      clearTimeout(leaveTimerRef.current);
+      leaveTimerRef.current = null;
     }
-    const video = videoRef.current;
-    if (video) {
-      try { video.pause(); } catch {}
-      // Force the element to drop the source AND forget it — the connection to
-      // the proxy/origin is closed so the panel stops marking it "Online".
-      // removeAttribute('src') before load() cancels any active download,
-      // incl. byte-range (206) requests of VOD/movies/series.
-      video.removeAttribute('src');
-      video.src = '';
-      try { video.load(); } catch {}
-    }
+    if (numTimer.current) clearTimeout(numTimer.current);
+    // Leaving the player: never suppress suspend — any hide must keep the socket dead.
+    suppressSuspendRef.current = false;
+    stopRemux();
+    hardStopRef.current();
+    void cancelAllContainerAudioJobs();
+    leaveTimerRef.current = window.setTimeout(() => {
+      leaveTimerRef.current = null;
+      if (gen !== navGenRef.current) return;
+      // Second kill after the gap — delayed HLS fallback / native retry must not revive the socket.
+      hardStopRef.current();
+      void cancelAllContainerAudioJobs();
+      if (type === 'live') {
+        // Back to Live guide (same adult category stays via persisted cat + unlock).
+        navigate('/live', { replace: true });
+        return;
+      }
+      if (type === 'series' && seriesId) {
+        navigate(`/series/${seriesId}`, { replace: true });
+        return;
+      }
+      if (type === 'vod' && id) {
+        navigate(`/vod/${id}`, { replace: true });
+        return;
+      }
+      navigate(-1);
+    }, LEAVE_GAP_MS);
   };
+  const leavePlayerRef = useRef(leavePlayer);
+  leavePlayerRef.current = leavePlayer;
 
   // 'p' toggles PiP. VOD is intentionally "slow": first D-pad/OK only opens the
   // bar; seek/pause need the bar visible. Ignores key-repeat so holding ←/→
@@ -368,11 +947,12 @@ export default function Player() {
       hideTimer.current = setTimeout(() => setControlsVisible(false), 6000);
     };
 
-    const seekBy = (delta) => {
+    const seekBy = (delta, opts = {}) => {
       const v = videoRef.current;
       if (!v || !isVodLike) return;
       const now = Date.now();
-      if (now - lastSeekAtRef.current < SEEK_COOLDOWN_MS) return;
+      const cooldown = opts.fast ? 120 : SEEK_COOLDOWN_MS;
+      if (now - lastSeekAtRef.current < cooldown) return;
       lastSeekAtRef.current = now;
       const dur = Number.isFinite(v.duration) ? v.duration : 0;
       const next = Math.max(0, Math.min(dur || Infinity, (v.currentTime || 0) + delta));
@@ -405,24 +985,38 @@ export default function Player() {
 
     const requestLeave = () => {
       if (isVodLike) {
+        // Kill the download immediately on Back — leaving the dialog open used
+        // to keep the panel "Online" (and wipe-without-destroy on Confirm even
+        // re-armed native retries → 2–3 ghost connections). Stay remounts.
+        navGenRef.current += 1;
+        hardStopRef.current();
         setLeaveOpen(true);
         setControlsVisible(true);
         return;
       }
-      // Live: first Back closes the zap overlay; second Back returns to the guide.
+      // Live: first Back closes zap overlay; second leaves cleanly to the guide.
+      // If a zap navigate is in-flight (CHANNEL_GAP), still leave — don't only
+      // close the overlay and let goLiveChannel reopen a ghost stream.
       if (zapOpenRef.current) {
         setZapOpen(false);
         zapOpenRef.current = false;
         setNumBuffer('');
+        setZapBanner('');
         if (numTimer.current) clearTimeout(numTimer.current);
         return;
       }
-      navigate(-1);
+      leavePlayerRef.current();
     };
 
     /** First press only wakes the OSD — no seek/pause yet. */
     const wakeOnly = () => {
       bumpControls();
+      window.setTimeout(() => {
+        const pauseBtn =
+          document.querySelector('.player-transport [data-player-pause="1"]') ||
+          document.querySelector('.player-transport-btn');
+        if (pauseBtn) setFocused(pauseBtn, { native: false });
+      }, 30);
     };
 
     const onKey = (e) => {
@@ -442,9 +1036,19 @@ export default function Player() {
         code === 461 ||
         code === 27;
 
-      // Netflix next-episode card owns OK / Back while visible.
+      // Netflix next-episode card owns the remote while visible (trap).
       if (nextUpRef.current && type === 'series') {
-        const isOk = e.key === 'Enter' || code === 13 || code === 23;
+        const isOk =
+          e.key === 'Enter' ||
+          e.key === 'MediaPlayPause' ||
+          e.key === ' ' ||
+          code === 13 ||
+          code === 23 ||
+          code === 179;
+        const isLeft = e.key === 'ArrowLeft' || code === 37;
+        const isRight = e.key === 'ArrowRight' || code === 39;
+        const isUp = e.key === 'ArrowUp' || code === 38;
+        const isDown = e.key === 'ArrowDown' || code === 40;
         if (isBack) {
           e.preventDefault();
           e.stopImmediatePropagation();
@@ -455,9 +1059,39 @@ export default function Player() {
         if (isOk) {
           e.preventDefault();
           e.stopImmediatePropagation();
-          playNextEpisode().catch(() => {});
+          const el = getTvFocus();
+          if (el?.closest?.('.next-up') && typeof el.click === 'function') {
+            el.click();
+          } else {
+            playNextEpisode().catch(() => {});
+          }
           return;
         }
+        if (isLeft || isRight || isUp || isDown) {
+          e.preventDefault();
+          e.stopImmediatePropagation();
+          const btns = Array.from(document.querySelectorAll('.next-up button')).filter((el) => {
+            const r = el.getBoundingClientRect();
+            return r.width > 0 && r.height > 0;
+          });
+          if (!btns.length) return;
+          let active = getTvFocus();
+          if (!active || !btns.includes(active)) {
+            active = btns[0];
+            setFocused(active, { native: false });
+            return;
+          }
+          if (btns.length < 2) return;
+          const dx = isLeft || isUp ? -1 : 1;
+          const idx = btns.indexOf(active);
+          const next = btns[(idx + dx + btns.length) % btns.length];
+          if (next) setFocused(next, { native: false });
+          return;
+        }
+        // Swallow any other transport key so the OSD underneath can't steal focus.
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        return;
       }
 
       if (isBack) {
@@ -554,8 +1188,10 @@ export default function Player() {
       if (!isVodLike) return;
 
       const osdUp = controlsVisibleRef.current;
-      const isLeft = e.key === 'MediaRewind' || e.key === 'ArrowLeft' || code === 412 || code === 37;
-      const isRight = e.key === 'MediaFastForward' || e.key === 'ArrowRight' || code === 417 || code === 39;
+      const isSeekLeft = e.key === 'MediaRewind' || code === 412;
+      const isSeekRight = e.key === 'MediaFastForward' || code === 417;
+      const isLeft = e.key === 'ArrowLeft' || code === 37;
+      const isRight = e.key === 'ArrowRight' || code === 39;
       const isUp = e.key === 'ArrowUp' || code === 38;
       const isDown = e.key === 'ArrowDown' || code === 40;
       const isOk =
@@ -568,15 +1204,54 @@ export default function Player() {
       const isMediaPlay = e.key === 'MediaPlay' || code === 415;
       const isMediaPause = e.key === 'MediaPause' || code === 19;
 
-      // Holding the remote fires key-repeat — ignore those entirely for VOD.
-      if (e.repeat && (isLeft || isRight || isUp || isDown || isOk || isMediaPlay || isMediaPause)) {
+      // Holding the remote fires key-repeat — ignore those entirely for VOD,
+      // except while scrubbing the progress bar (power-user fast seek).
+      const onProgress =
+        getTvFocus()?.classList?.contains('player-progress') ||
+        document.activeElement?.classList?.contains('player-progress');
+      if (
+        e.repeat &&
+        !(onProgress && (isLeft || isRight || isSeekLeft || isSeekRight)) &&
+        (isLeft || isRight || isUp || isDown || isOk || isMediaPlay || isMediaPause || isSeekLeft || isSeekRight)
+      ) {
         claim();
         return;
       }
 
-      // OSD closed: any transport key only reveals controls (Netflix/TV pattern).
-      if (!osdUp && (isLeft || isRight || isUp || isDown || isOk || isMediaPlay || isMediaPause)) {
+      // OSD closed:
+      //  - TV remote: first press only reveals controls (Netflix pattern).
+      //  - PC/Mac: ←→ seek and Space/OK play-pause immediately, and show the bar.
+      if (
+        !osdUp &&
+        (isLeft || isRight || isUp || isDown || isOk || isMediaPlay || isMediaPause || isSeekLeft || isSeekRight)
+      ) {
         claim();
+        if (desktopPointerRef.current && isVodLike) {
+          bumpControls();
+          if (isLeft || isSeekLeft) {
+            seekBy(-seekJump, { fast: true });
+            return;
+          }
+          if (isRight || isSeekRight) {
+            seekBy(seekJump, { fast: true });
+            return;
+          }
+          if (isOk || isMediaPlay || isMediaPause) {
+            if (isMediaPlay) {
+              const v = videoRef.current;
+              if (v?.paused) togglePlay();
+            } else if (isMediaPause) {
+              const v = videoRef.current;
+              if (v && !v.paused) togglePlay();
+            } else {
+              togglePlay();
+            }
+            return;
+          }
+          // ↑↓ on desktop still just reveal / focus transport
+          wakeOnly();
+          return;
+        }
         wakeOnly();
         return;
       }
@@ -596,30 +1271,83 @@ export default function Player() {
         else bumpControls();
         return;
       }
-
-      // ← → only seek when the bar is already visible (+ cooldown).
-      if (isLeft) {
+      // Hardware FF/Rewind still seek; D-pad arrows navigate the OSD buttons.
+      if (isSeekLeft) {
         claim();
         seekBy(-seekJump);
         return;
       }
-      if (isRight) {
+      if (isSeekRight) {
         claim();
         seekBy(seekJump);
         return;
       }
 
-      // ↑ ↓ never seek/pause — only keep the bar visible.
-      if (isUp || isDown) {
+      // OSD open: arrows move across progress bar + transport. On the bar,
+      // ←→ scrub (repeat allowed). Elsewhere they only move focus.
+      if (isLeft || isRight || isUp || isDown) {
         claim();
+        const progressEl = document.querySelector('.player-progress');
+        const transportRoot = document.querySelector('.player-transport');
+        const transportBtns = transportRoot
+          ? Array.from(transportRoot.querySelectorAll('button.player-transport-btn:not([disabled])')).filter(
+              (el) => {
+                const r = el.getBoundingClientRect();
+                return r.width > 0 && r.height > 0;
+              },
+            )
+          : [];
+        const list = [progressEl, ...transportBtns].filter(Boolean);
+        let active = getTvFocus();
+        if (!active || !list.includes(active)) {
+          active = transportBtns.find((el) => el.dataset?.playerPause === '1') || transportBtns[0] || progressEl;
+          if (active) setFocused(active, { native: false });
+        }
+
+        const scrubbing = active?.classList?.contains('player-progress');
+        if (scrubbing && (isLeft || isRight)) {
+          seekBy(isLeft ? -seekJump : seekJump, { fast: true });
+          bumpControls();
+          return;
+        }
+
+        if (active && list.length > 1) {
+          const dx = isLeft ? -1 : isRight ? 1 : 0;
+          const dy = isUp ? -1 : isDown ? 1 : 0;
+          const target = nearest(
+            dx,
+            dy,
+            active.getBoundingClientRect(),
+            list.filter((el) => el !== active),
+          );
+          if (target) setFocused(target, { native: false });
+        }
         bumpControls();
         return;
       }
 
-      // OK / Enter / Space ALWAYS pause/play (never activate Atrás).
+      // OK activates the focused control (Pause / ±30s / progreso no-op / episodio).
       if (isOk) {
         claim();
-        togglePlay();
+        const el = getTvFocus();
+        if (el?.classList?.contains('player-progress')) {
+          bumpControls();
+          return;
+        }
+        if (el && el.closest?.('.player-transport') && typeof el.click === 'function') {
+          el.click();
+        } else {
+          const pauseBtn =
+            document.querySelector('.player-transport [data-player-pause="1"]') ||
+            document.querySelector('.player-transport-btn');
+          if (pauseBtn) {
+            setFocused(pauseBtn, { native: false });
+            pauseBtn.click();
+          } else {
+            togglePlay();
+          }
+        }
+        bumpControls();
       }
     };
 
@@ -681,15 +1409,21 @@ export default function Player() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [type, seriesId, id, url, restart, leaveOpen]);
 
-  // Park focus on "Ver ahora" when the next-episode card appears.
+  // Park focus on "Ver ahora" when the next-episode card appears — and keep
+  // re-asserting briefly so the Pause-button autofocus can't win the race.
+  const nextUpVisible = Boolean(nextUp);
   useEffect(() => {
-    if (!nextUp || leaveOpen) return undefined;
-    const timer = window.setTimeout(() => {
-      const btn = document.querySelector('.next-up .btn-primary');
-      if (btn) setFocused(btn, { native: false });
-    }, 40);
-    return () => window.clearTimeout(timer);
-  }, [nextUp?.title, leaveOpen]);
+    if (!nextUpVisible || leaveOpen) return undefined;
+    setControlsVisible(false);
+    const focusNow = () => {
+      const preferred =
+        document.querySelector('.next-up .btn-primary') ||
+        document.querySelector('.next-up button');
+      if (preferred) setFocused(preferred, { native: false });
+    };
+    const timers = [30, 120, 350, 700].map((ms) => window.setTimeout(focusNow, ms));
+    return () => timers.forEach((id) => window.clearTimeout(id));
+  }, [nextUpVisible, leaveOpen]);
 
   // Keep progress UI in sync for VOD-like streams.
   useEffect(() => {
@@ -722,6 +1456,12 @@ export default function Player() {
   // orders are idempotent (destroy() is safe to call once the ref is null).
   useEffect(
     () => () => {
+      navGenRef.current += 1;
+      if (leaveTimerRef.current) {
+        clearTimeout(leaveTimerRef.current);
+        leaveTimerRef.current = null;
+      }
+      invalidatePlayback();
       if (playerRef.current) {
         try {
           playerRef.current.destroy();
@@ -733,20 +1473,75 @@ export default function Player() {
     []
   );
 
+  // No background streams: if the TV/browser hides this page (app switch, sleep,
+  // another tab), kill playback immediately. Resume only if we are still on the
+  // player when focus returns — browsing Live/Home must never keep sockets open.
+  // Skip while swapping episodes/channels: wiping <video> often fires pagehide
+  // on webOS/Tizen and used to kill the next episode right after attach.
+  useEffect(() => {
+    const suspendedRef = { current: false };
+    const onVis = () => {
+      if (suppressSuspendRef.current) return;
+      if (document.hidden || document.visibilityState === 'hidden') {
+        hardStopRef.current();
+        suspendedRef.current = true;
+        return;
+      }
+      if (suspendedRef.current) {
+        suspendedRef.current = false;
+        allowAttachRef.current = true;
+        setRestart((x) => x + 1);
+      }
+    };
+    const onPageHide = () => {
+      if (suppressSuspendRef.current) return;
+      hardStopRef.current();
+      suspendedRef.current = true;
+    };
+    document.addEventListener('visibilitychange', onVis);
+    window.addEventListener('pagehide', onPageHide);
+    window.addEventListener('freeze', onPageHide);
+    return () => {
+      document.removeEventListener('visibilitychange', onVis);
+      window.removeEventListener('pagehide', onPageHide);
+      window.removeEventListener('freeze', onPageHide);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !url) {
       setError(true);
       return undefined;
     }
+    if (!allowAttachRef.current) {
+      return undefined;
+    }
     setMutedHint(false);
+    setError(false);
+    setErrorCode(null);
     startedRef.current = false;
     hlsClearedRef.current = false;
+
+    // Belt-and-suspenders: never attach on top of a leftover controller.
+    if (playerRef.current) {
+      try {
+        playerRef.current.destroy();
+      } catch {
+        /* ignore */
+      }
+      playerRef.current = null;
+    }
 
     // Strict serialization: only one live request load. Abort any previous
     // controller BEFORE starting this stream so the previous socket closes.
     if (abortRef.current) {
-      try { abortRef.current.abort(); } catch {}
+      try {
+        abortRef.current.abort();
+      } catch {
+        /* ignore */
+      }
     }
     const controller = new AbortController();
     abortRef.current = controller;
@@ -818,8 +1613,29 @@ export default function Player() {
           isExclusive,
           alternateUrls,
           onError: onPlaybackError,
+          onTracksUpdate: () => refreshTracksRef.current?.(),
         });
     playerRef.current = player;
+
+    // Remember the proxied media URL for dual-audio remux (currentSrc after attach).
+    window.setTimeout(() => {
+      if (video?.currentSrc) playUrlRef.current = video.currentSrc;
+    }, 400);
+
+    // Resume after switching back from remuxed alternate audio → preferred track.
+    if (resumeAtRef.current != null && isVodLike) {
+      const resumeAt = resumeAtRef.current;
+      resumeAtRef.current = null;
+      const seekResume = () => {
+        try {
+          if (Number.isFinite(resumeAt) && resumeAt > 0) video.currentTime = resumeAt;
+        } catch {
+          /* ignore */
+        }
+      };
+      video.addEventListener('loadedmetadata', seekResume, { once: true });
+      video.addEventListener('playing', seekResume, { once: true });
+    }
 
     // Once mpegts TS demonstrably reproduces this channel (currentTime advancing),
     // forget any "HLS-only" memory from an earlier session. That flag forces the
@@ -892,8 +1708,9 @@ export default function Player() {
         // webviews that never fire `playing` still clear the HLS-only memory.
         rememberTsWorks();
       }
-      if (video.duration > 0) {
+      if (video.duration > 0 && type !== 'live' && type !== 'catchup') {
         // Best-effort continue-watching: persist position periodically.
+        // Live channels go to Recientes inside Live TV (never Home).
         updateContinueWatching({
           type,
           id,
@@ -903,6 +1720,8 @@ export default function Player() {
           url: url || '',
           position: Math.floor(video.currentTime || 0),
           duration: Math.floor(video.duration || 0),
+          seriesId: seriesId || '',
+          season: seasonParam || '',
         });
       }
     };
@@ -959,14 +1778,31 @@ export default function Player() {
       video.removeEventListener('loadedmetadata', onCanPlay);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [url, restart]);
+  }, [url, restart, id, type]);
 
-  // Auto-hide controls after inactivity. Any remote key reveals them again.
+  // If a new episode never leaves "Cargando…", surface Retry instead of spinning forever
+  // (usually the panel still had the previous connection open).
+  useEffect(() => {
+    if (!url || error || started || !isVodLike) return undefined;
+    const t = window.setTimeout(() => {
+      if (!startedRef.current) {
+        setError(true);
+        setErrorCode(2);
+      }
+    }, 35000);
+    return () => window.clearTimeout(t);
+  }, [url, id, restart, error, started, isVodLike]);
+
+  // Auto-hide controls after inactivity. Keys / mouse reveal them again.
   useEffect(() => {
     const show = () => {
+      if (nextUpRef.current || leaveOpen) return;
       setControlsVisible(true);
       clearTimeout(hideTimer.current);
-      hideTimer.current = setTimeout(() => setControlsVisible(false), 4000);
+      hideTimer.current = setTimeout(
+        () => setControlsVisible(false),
+        desktopPointerRef.current ? 5000 : 4000,
+      );
     };
     show();
     const onKey = () => show();
@@ -975,7 +1811,7 @@ export default function Player() {
       clearTimeout(hideTimer.current);
       window.removeEventListener('keydown', onKey, true);
     };
-  }, []);
+  }, [leaveOpen]);
 
   const formatClock = (secs) => {
     const s = Math.max(0, Math.floor(Number(secs) || 0));
@@ -988,14 +1824,17 @@ export default function Player() {
 
   const seekToRatio = (ratio) => {
     const v = videoRef.current;
-    if (!v || !duration) return;
-    const next = Math.max(0, Math.min(duration, duration * ratio));
+    if (!v || !isVodLike) return;
+    const dur = Number.isFinite(v.duration) ? v.duration : duration;
+    if (!dur) return;
+    const next = Math.max(0, Math.min(dur, dur * Math.max(0, Math.min(1, ratio))));
     try {
       v.currentTime = next;
     } catch {
       /* ignore */
     }
     setCurrentTime(next);
+    revealControls();
   };
 
   const togglePlayClick = (e) => {
@@ -1014,16 +1853,15 @@ export default function Player() {
       }
       setPaused(true);
     }
-    setControlsVisible(true);
+    revealControls();
   };
 
   const seekByClick = (delta, e) => {
     e?.stopPropagation?.();
+    e?.preventDefault?.();
     const v = videoRef.current;
-    if (!v) return;
-    const now = Date.now();
-    if (now - lastSeekAtRef.current < SEEK_COOLDOWN_MS) return;
-    lastSeekAtRef.current = now;
+    if (!v || !isVodLike) return;
+    // Mouse clicks skip the remote seek cooldown so ± buttons always respond.
     const dur = Number.isFinite(v.duration) ? v.duration : 0;
     const next = Math.max(0, Math.min(dur || Infinity, (v.currentTime || 0) + delta));
     try {
@@ -1032,9 +1870,8 @@ export default function Player() {
       /* ignore */
     }
     setCurrentTime(next);
-    setControlsVisible(true);
-    clearTimeout(hideTimer.current);
-    hideTimer.current = setTimeout(() => setControlsVisible(false), 6000);
+    lastSeekAtRef.current = Date.now();
+    revealControls();
   };
 
   if (error || !url) {
@@ -1060,6 +1897,7 @@ export default function Player() {
             className="btn-ghost"
             style={{ position: 'absolute', bottom: 96, left: '50%', transform: 'translateX(-50%)' }}
             onClick={() => {
+              allowAttachRef.current = true;
               setError(false);
               setErrorCode(null);
               setStarted(false);
@@ -1074,7 +1912,9 @@ export default function Player() {
           tabIndex={0}
           className="btn-ghost"
           style={{ position: 'absolute', top: 24, left: 24 }}
-          onClick={() => navigate(-1)}
+          onClick={() => {
+            leavePlayer();
+          }}
         >
           ← {t('common.back')}
         </button>
@@ -1086,19 +1926,31 @@ export default function Player() {
 
   return (
     <div
-      className="player-screen"
+      className={`player-screen${desktopPointer ? ' player-screen--desktop' : ''}`}
       onClick={() => {
-        if (leaveOpen) return;
-        setControlsVisible((v) => !v);
+        if (leaveOpen || nextUp) return;
+        // TV: click toggles OSD. Desktop uses mousemove / video click instead.
+        if (!desktopPointer) setControlsVisible((v) => !v);
+      }}
+      onMouseMove={() => {
+        if (desktopPointer) revealControls();
+      }}
+      onMouseEnter={() => {
+        if (desktopPointer) revealControls();
       }}
     >
       <video
-        key={restart}
+        key={`${type}-${id}-${restart}`}
         ref={videoRef}
         autoPlay
         playsInline
         preload="none"
-        onClick={(e) => e.stopPropagation()}
+        onClick={(e) => {
+          e.stopPropagation();
+          if (leaveOpen || nextUp) return;
+          revealControls();
+          if (isVodLike) togglePlayClick(e);
+        }}
       />
       {!started && !error && (
         <div className="player-loading">
@@ -1139,15 +1991,18 @@ export default function Player() {
         </button>
       )}
 
-      {controlsVisible && !leaveOpen && (
+      {controlsVisible && !leaveOpen && !nextUp && (
         <div className="player-controls" onClick={(e) => e.stopPropagation()}>
           <div className="player-controls-top">
             <button
               tabIndex={0}
               className="back-btn"
               onClick={() => {
-                if (isVodLike) setLeaveOpen(true);
-                else navigate(-1);
+                if (isVodLike) {
+                  navGenRef.current += 1;
+                  hardStopRef.current();
+                  setLeaveOpen(true);
+                } else leavePlayer();
               }}
             >
               ← {t('common.back')}
@@ -1164,6 +2019,7 @@ export default function Player() {
                 className="player-progress"
                 role="slider"
                 tabIndex={0}
+                data-focusable="true"
                 aria-valuemin={0}
                 aria-valuemax={Math.floor(duration || 0)}
                 aria-valuenow={Math.floor(currentTime || 0)}
@@ -1171,16 +2027,6 @@ export default function Player() {
                   const rect = e.currentTarget.getBoundingClientRect();
                   const ratio = rect.width ? (e.clientX - rect.left) / rect.width : 0;
                   seekToRatio(ratio);
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === 'ArrowLeft') {
-                    e.preventDefault();
-                    seekByClick(-seekJump, e);
-                  }
-                  if (e.key === 'ArrowRight') {
-                    e.preventDefault();
-                    seekByClick(seekJump, e);
-                  }
                 }}
               >
                 <div className="player-progress-bar">
@@ -1193,15 +2039,28 @@ export default function Player() {
               </div>
 
               <div className="player-transport">
+                {type === 'series' && seriesId ? (
+                  <button
+                    type="button"
+                    tabIndex={0}
+                    className="btn-ghost player-transport-btn"
+                    onClick={() => playPrevEpisode().catch(() => {})}
+                  >
+                    ⏮ {t('player.prevEpisode')}
+                  </button>
+                ) : null}
                 <button
+                  type="button"
                   tabIndex={0}
                   className="btn-ghost player-transport-btn"
+                  onMouseDown={(e) => e.preventDefault()}
                   onClick={(e) => seekByClick(-seekJump, e)}
                 >
                   ⏪ -{seekJump}s
                 </button>
                 <button
                   ref={pauseBtnRef}
+                  type="button"
                   tabIndex={0}
                   data-player-pause="1"
                   className="btn-primary player-transport-btn"
@@ -1210,14 +2069,17 @@ export default function Player() {
                   {paused ? `▶ ${t('player.play')}` : `⏸ ${t('player.pause')}`}
                 </button>
                 <button
+                  type="button"
                   tabIndex={0}
                   className="btn-ghost player-transport-btn"
+                  onMouseDown={(e) => e.preventDefault()}
                   onClick={(e) => seekByClick(seekJump, e)}
                 >
                   +{seekJump}s ⏩
                 </button>
                 {type === 'series' && seriesId ? (
                   <button
+                    type="button"
                     tabIndex={0}
                     className="btn-ghost player-transport-btn"
                     onClick={() => playNextEpisode().catch(() => {})}
@@ -1225,8 +2087,38 @@ export default function Player() {
                     {t('player.nextEpisode')} ⏭
                   </button>
                 ) : null}
+                <button
+                  type="button"
+                  tabIndex={0}
+                  className="btn-ghost player-transport-btn"
+                  onClick={cycleAudio}
+                >
+                  🔊 {t('player.audio')}
+                  {audioTracks.length > 1
+                    ? ` (${audioTracks.find((a) => a.id === audioId)?.label || ''})`
+                    : ''}
+                </button>
+                <button
+                  type="button"
+                  tabIndex={0}
+                  className="btn-ghost player-transport-btn"
+                  onClick={cycleSubs}
+                >
+                  CC {t('player.subtitles')}
+                  {textTracks.length
+                    ? ` (${
+                        textId < 0
+                          ? t('player.subsOff')
+                          : textTracks.find((x) => x.id === textId)?.label || ''
+                      })`
+                    : ''}
+                </button>
               </div>
-              <p className="player-hint">{t('player.vodHint', { seek: seekJump })}</p>
+              <p className="player-hint">
+                {desktopPointer
+                  ? t('player.vodHintDesktop', seekJump)
+                  : t('player.vodHint', seekJump)}
+              </p>
             </>
           )}
 
@@ -1236,10 +2128,12 @@ export default function Player() {
         </div>
       )}
 
-      {(zapBanner || numBuffer) && !zapOpen && (
+      {(zapBanner || numBuffer || trackBanner) && !zapOpen && (
         <div className="zap-banner" aria-live="polite">
           {numBuffer ? (
             <span className="zap-num">{numBuffer}_</span>
+          ) : trackBanner ? (
+            <span>{trackBanner}</span>
           ) : (
             <span>{zapBanner}</span>
           )}
@@ -1247,7 +2141,13 @@ export default function Player() {
       )}
 
       {nextUp && type === 'series' && !leaveOpen && (
-        <div className="next-up" role="dialog" aria-live="polite">
+        <div
+          className="next-up"
+          role="dialog"
+          aria-modal="true"
+          aria-live="polite"
+          onClick={(e) => e.stopPropagation()}
+        >
           <div className="next-up-label">{t('player.nextUpTitle')}</div>
           <div className="next-up-title">{nextUp.title}</div>
           <div className="next-up-count">{t('player.nextUpIn', nextUp.secs)}</div>
@@ -1255,7 +2155,7 @@ export default function Player() {
             <button
               tabIndex={0}
               className="btn-primary"
-              data-tv-focused="true"
+              data-focusable="true"
               onClick={() => playNextEpisode().catch(() => {})}
             >
               {t('player.nextUpNow')}
@@ -1263,6 +2163,7 @@ export default function Player() {
             <button
               tabIndex={0}
               className="btn-ghost"
+              data-focusable="true"
               onClick={() => {
                 nextUpDismissedRef.current = true;
                 setNextUp(null);
@@ -1330,14 +2231,19 @@ export default function Player() {
                 tabIndex={0}
                 className="btn-primary"
                 autoFocus
-                onClick={() => setLeaveOpen(false)}
+                onClick={() => {
+                  setLeaveOpen(false);
+                  // Stream was killed when the dialog opened — remount to resume.
+                  allowAttachRef.current = true;
+                  setRestart((x) => x + 1);
+                }}
               >
                 {t('player.leaveStay')}
               </button>
               <button
                 tabIndex={0}
                 className="btn-ghost"
-                onClick={() => navigate(-1)}
+                onClick={() => leavePlayer()}
               >
                 {t('player.leaveConfirm')}
               </button>
@@ -1345,6 +2251,21 @@ export default function Player() {
           </div>
         </div>
       )}
+
+      <AdultPinDialog
+        open={adultPinOpen}
+        creating={!hasAdultPin()}
+        onDismiss={() => {
+          setAdultPinOpen(false);
+          setPendingZapCat(null);
+        }}
+        onUnlocked={() => {
+          const cat = pendingZapCat;
+          setAdultPinOpen(false);
+          setPendingZapCat(null);
+          if (cat) loadZapCategory(cat, { adultSession: true });
+        }}
+      />
     </div>
   );
 }

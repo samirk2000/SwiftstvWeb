@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "hls.js": "^1.5.13",
+    "mediabunny": "^1.57.0",
     "mpegts.js": "^1.8.2",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",

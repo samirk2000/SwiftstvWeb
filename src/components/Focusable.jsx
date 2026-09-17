@@ -46,6 +46,8 @@ const FocusCtx = createContext(null);
 let currentFocused = null;
 /** Ignore MutationObserver focus restores while setFocused is painting the ring. */
 let focusPaintLock = false;
+/** Stable key so remounted channel/tile rows can reclaim the ring instead of jumping to #1. */
+let lastFocusKey = '';
 
 /** While opening the IME, ignore blur restores that would kill the keyboard. */
 let imeGuardEl = null;
@@ -217,6 +219,7 @@ export function setFocused(newEl, opts = {}) {
   newEl.classList.add('focused');
   newEl.setAttribute('data-tv-focused', 'true');
   currentFocused = newEl;
+  if (newEl.dataset?.focusKey) lastFocusKey = String(newEl.dataset.focusKey);
 
   // eslint-disable-next-line no-console
   console.log('[Focus] ->', newEl.id || newEl.dataset?.loginField || newEl.dataset?.focusKey || newEl.tagName);
@@ -261,6 +264,11 @@ export function setFocused(newEl, opts = {}) {
   return true;
 }
 
+if (import.meta.env.DEV && typeof window !== 'undefined') {
+  window.__tvSetFocused = (el) => setFocused(el, { native: false });
+  window.__tvGetFocused = () => currentFocused;
+}
+
 /** @deprecated use setFocused — kept as alias so existing imports keep working. */
 export function setTvFocus(el, opts = {}) {
   if (!el) return setFocused(null);
@@ -291,7 +299,8 @@ export function focusFirst(root) {
   // Exit / onboarding / leave confirm must win over menu tiles behind the overlay.
   const modal =
     document.querySelector('.exit-overlay[role="dialog"]') ||
-    document.querySelector('.player-leave[role="dialog"]');
+    document.querySelector('.player-leave[role="dialog"]') ||
+    document.querySelector('.next-up[role="dialog"]');
   if (modal && isVisible(modal)) {
     const btn =
       modal.querySelector('.btn-primary') ||
@@ -305,6 +314,7 @@ export function focusFirst(root) {
   const preferred =
     scope.querySelector?.('#login-user') ||
     scope.querySelector?.('.channel-list .channel') ||
+    scope.querySelector?.('.excl-tile') ||
     scope.querySelector?.('.grid .tile') ||
     // While Live/VOD lists are loading, do NOT land on category chips / search.
     (document.querySelector('.state .spinner')
@@ -430,9 +440,20 @@ export function FocusRoot({ children }) {
     const mo = new MutationObserver(() => {
       if (focusPaintLock) return;
       stampTabIndex(root);
-      // If virtual target was unmounted, pick a new one.
+      // If virtual target was unmounted, reclaim the SAME row by focusKey
+      // (channel lists remount often). Never jump to channel #1 mid-zap.
       const cur = getTvFocus();
-      if (!cur || !cur.isConnected) tryFocus();
+      if (!cur || !cur.isConnected) {
+        if (lastFocusKey) {
+          const safe = String(lastFocusKey).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+          const again = document.querySelector(`[data-focus-key="${safe}"]`);
+          if (again && isVisible(again)) {
+            setFocused(again, { native: false });
+            return;
+          }
+        }
+        tryFocus();
+      }
     });
     mo.observe(root, {
       childList: true,
@@ -796,7 +817,56 @@ export function useGlobalTvKeys({ onEscape, onEnter } = {}) {
           }
         }
         const candidates = list.filter((el) => el !== active);
-        const target = nearest(dir.dx, dir.dy, fromRect, candidates);
+        // Home menu: stay inside .menu-item while any remain in that direction
+        // (otherwise ↓ from Películas/Series jumps to Continuar / Favoritos).
+        // Horizontal ←→ on heroes must cross columns (TV→Películas→Series), never
+        // drop into Buscar/Exclusivos/Cuentas in the same column.
+        let target = null;
+
+        // Live / VOD / Series: Favoritos sits on the far left, so ↑ would score the
+        // TopBar "Swiftstv" brand (also left) over the search box (wider center).
+        // Always park on .search-box above the cat-bar first.
+        if (!target && active.classList?.contains('cat-chip') && dir.dy < 0) {
+          const searches = candidates.filter(
+            (el) =>
+              el.classList?.contains('search-box') ||
+              (el.tagName === 'INPUT' && el.classList?.contains('search-box')),
+          );
+          if (searches.length) {
+            target = nearest(0, -1, fromRect, searches) || searches[0];
+          }
+        }
+        // Symmetric: ↓ from search lands on the selected (or first) category chip.
+        if (
+          !target &&
+          dir.dy > 0 &&
+          (active.classList?.contains('search-box') ||
+            (active.tagName === 'INPUT' && active.classList?.contains('search-box')))
+        ) {
+          const chips = candidates.filter((el) => el.classList?.contains('cat-chip'));
+          const selected = chips.find((el) => el.classList.contains('selected'));
+          target = selected || nearest(0, 1, fromRect, chips) || chips[0] || null;
+        }
+
+        if (active.classList?.contains('menu-item')) {
+          const col = active.closest('.home-col');
+          const menuOnly = candidates.filter((el) => el.classList?.contains('menu-item'));
+          if (dir.dy !== 0 && col) {
+            const sameCol = menuOnly.filter((el) => col.contains(el));
+            target = nearest(dir.dx, dir.dy, fromRect, sameCol);
+          }
+          if (!target && dir.dx !== 0) {
+            if (active.classList.contains('menu-item--hero')) {
+              const heroes = menuOnly.filter((el) => el.classList.contains('menu-item--hero'));
+              target = nearest(dir.dx, 0, fromRect, heroes);
+            } else if (active.classList.contains('menu-item--tool')) {
+              const tools = menuOnly.filter((el) => el.classList.contains('menu-item--tool'));
+              target = nearest(dir.dx, 0, fromRect, tools);
+            }
+          }
+          if (!target) target = nearest(dir.dx, dir.dy, fromRect, menuOnly);
+        }
+        if (!target) target = nearest(dir.dx, dir.dy, fromRect, candidates);
         if (target) {
           const native = !isTypingTarget(target);
           setFocused(target, { native });

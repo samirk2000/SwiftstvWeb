@@ -27,6 +27,7 @@ import Accounts from './screens/Accounts.jsx';
 import Settings from './screens/Settings.jsx';
 import GlobalSearch from './screens/GlobalSearch.jsx';
 import { applyUiScale } from './lib/prefs.js';
+import BrandLogo from './components/BrandLogo.jsx';
 
 function TopBar() {
   const { logout, toggleLanguage, lang, session } = useSession();
@@ -53,7 +54,7 @@ function TopBar() {
           if (e.key === 'Enter' && loggedIn && !isLogin) navigate('/');
         }}
       >
-        Swift<em>tv</em>
+        <BrandLogo size="sm" showWordmark />
       </div>
       <div className="topbar-actions">
         <button
@@ -134,6 +135,7 @@ function ExitConfirm({ open, onCancel, onConfirm }) {
   return (
     <div className="exit-overlay" role="dialog" aria-modal="true" aria-labelledby="exit-title">
       <FocusScope trap autoFocus className="exit-dialog">
+        <BrandLogo size="md" className="exit-brand" />
         <h2 id="exit-title">{t('exit.title')}</h2>
         <p>{t('exit.message')}</p>
         <div className="exit-actions">
@@ -196,6 +198,12 @@ function AppShell() {
       }
       // Player owns its Back (leave confirm for VOD/series).
       if (location.pathname === '/player') return;
+      // Adult PIN dialog: Back dismisses the gate — don't leave Live/VOD to Home.
+      if (document.documentElement.dataset.tvAdultPin === '1') {
+        const cancel = document.querySelector('.adult-pin-overlay .btn-ghost');
+        if (cancel && typeof cancel.click === 'function') cancel.click();
+        return;
+      }
       // Accidental Back on Home/Login → ask before quitting the app.
       if (isRootRoute) {
         setExitOpen(true);

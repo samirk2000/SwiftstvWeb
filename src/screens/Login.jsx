@@ -7,6 +7,7 @@ import { useSession } from '../context/SessionContext.jsx';
 import { serverInfoLabel } from '../lib/accountText.js';
 import { setFocused, getTvFocus, openIme, isImeGuarded, markImeOpening, clearImeGuard } from '../components/Focusable.jsx';
 import { getAccount } from '../lib/session.js';
+import BrandLogo from '../components/BrandLogo.jsx';
 
 // Login field chain for webOS D-pad: Usuario → Contraseña → Iniciar sesión.
 // Modes: default | add (?add=1) | edit (?edit=<accountId>)
@@ -324,7 +325,11 @@ export default function Login() {
             ← {t('common.back')}
           </button>
         )}
-        <h1>{t('appName')}</h1>
+        <div className="login-brand">
+          <BrandLogo size="lg" />
+          <h1 className="login-brand-name">{t('appName')}</h1>
+          <p className="login-brand-tag">{t('brandTagline')}</p>
+        </div>
         <p className="login-hint">{titleHint}</p>
 
         <label htmlFor="login-user">
