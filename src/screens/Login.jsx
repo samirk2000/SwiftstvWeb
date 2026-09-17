@@ -5,7 +5,7 @@ import { tryRestoreSession } from '../lib/xtream.js';
 import { t, getLang } from '../lib/i18n.js';
 import { useSession } from '../context/SessionContext.jsx';
 import { serverInfoLabel } from '../lib/accountText.js';
-import { setFocused, getTvFocus, openIme, isImeGuarded, markImeOpening } from '../components/Focusable.jsx';
+import { setFocused, getTvFocus, openIme, isImeGuarded, markImeOpening, clearImeGuard } from '../components/Focusable.jsx';
 import { getAccount } from '../lib/session.js';
 
 // Login field chain for webOS D-pad: Usuario → Contraseña → Iniciar sesión.
@@ -171,6 +171,7 @@ export default function Login() {
       clearBlurTimer();
       navLockRef.current = true;
       imeOpenRef.current = false;
+      clearImeGuard();
       try {
         current.blur();
       } catch {
@@ -251,8 +252,9 @@ export default function Login() {
     const u = username.trim();
     const p = password;
     if (!u || !p) {
-      setStatus({ text: t('login.empty'), kind: 'err' });
+      // OK on an empty field should open the keyboard — not look like a hard error.
       const target = u ? passRef.current : userRef.current;
+      setStatus({ text: t('login.pressOkType'), kind: '' });
       openFieldIme(target);
       return;
     }
@@ -298,6 +300,16 @@ export default function Login() {
         data-focus-scope="trap"
         onSubmit={(e) => {
           e.preventDefault();
+          // Enter/OK on an empty field means "open keyboard", not "login failed".
+          const painted = getTvFocus();
+          if (painted === passRef.current && !password) {
+            openFieldIme(passRef.current);
+            return;
+          }
+          if (painted === userRef.current && !username.trim()) {
+            openFieldIme(userRef.current);
+            return;
+          }
           doLogin();
         }}
       >

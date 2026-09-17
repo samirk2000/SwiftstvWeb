@@ -48,11 +48,15 @@ let currentFocused = null;
 /** While opening the IME, ignore blur restores that would kill the keyboard. */
 let imeGuardEl = null;
 let imeGuardUntil = 0;
+/** Last input we tried to open the keyboard on (retry when window regains focus). */
+let pendingImeEl = null;
+let imeListenersInstalled = false;
 
 export function markImeOpening(el, ms = 700) {
   if (!el) return;
   imeGuardEl = el;
   imeGuardUntil = Date.now() + ms;
+  pendingImeEl = el;
 }
 
 export function isImeGuarded(el) {
@@ -62,6 +66,79 @@ export function isImeGuarded(el) {
 export function clearImeGuard() {
   imeGuardEl = null;
   imeGuardUntil = 0;
+  pendingImeEl = null;
+}
+
+function showPlatformKeyboard() {
+  try {
+    const kb = window.webOS && window.webOS.keyboard;
+    if (kb && typeof kb.show === 'function') kb.show();
+  } catch {
+    /* ignore */
+  }
+  try {
+    if (window.PalmSystem && typeof window.PalmSystem.keyboardShow === 'function') {
+      window.PalmSystem.keyboardShow(1);
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
+function kickIme(realInput) {
+  if (!realInput || !realInput.isConnected || realInput.disabled) return;
+  try {
+    window.focus();
+  } catch {
+    /* ignore */
+  }
+  try {
+    realInput.readOnly = false;
+    realInput.removeAttribute('readonly');
+  } catch {
+    /* ignore */
+  }
+  try {
+    realInput.focus({ preventScroll: false });
+  } catch {
+    try {
+      realInput.focus();
+    } catch {
+      /* ignore */
+    }
+  }
+  // If focus didn't stick, one click can help; avoid clicking when already
+  // focused (that can toggle the keyboard closed on some webOS builds).
+  if (document.activeElement !== realInput) {
+    try {
+      if (typeof realInput.click === 'function') realInput.click();
+    } catch {
+      /* ignore */
+    }
+  }
+  showPlatformKeyboard();
+}
+
+function flushPendingIme() {
+  const el = pendingImeEl;
+  if (!el || !el.isConnected) return;
+  markImeOpening(el, 1200);
+  setFocused(el, { native: false });
+  kickIme(el);
+  // One more kick after the window focus settles (simulator minimize case).
+  window.setTimeout(() => kickIme(el), 80);
+  window.setTimeout(() => kickIme(el), 200);
+}
+
+function ensureImeListeners() {
+  if (imeListenersInstalled || typeof window === 'undefined') return;
+  imeListenersInstalled = true;
+  // Simulator often only paints the keyboard after the window is re-activated.
+  window.addEventListener('focus', flushPendingIme);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') flushPendingIme();
+  });
+  window.addEventListener('pageshow', flushPendingIme);
 }
 
 function isVisible(el) {
@@ -502,72 +579,30 @@ export function resolveEditable(el) {
 }
 
 /**
- * Open the platform IME on an input. webOS needs a real DOM focus() during a
- * user gesture. Retries + an IME guard avoid the common race where a blur
- * handler / second Enter handler immediately closes the keyboard again.
+ * Open the platform IME on an input.
+ *
+ * webOS (and especially the TV simulator) often IGNORES a synchronous
+ * focus()/keyboard.show() in the middle of a keydown. The keyboard then only
+ * appears after the window is minimized/restored. So we:
+ *  1) defer kicks until after the key event finishes
+ *  2) keep a pending target and retry on window focus / visibilitychange
  */
 export function openIme(el) {
   const realInput = resolveEditable(el) || (isTypingTarget(el) ? el : null);
   if (!realInput || realInput.disabled) return false;
 
-  // Never leave readOnly stuck on (blocks the keyboard on some webOS builds).
-  try {
-    realInput.readOnly = false;
-    realInput.removeAttribute('readonly');
-  } catch {
-    /* ignore */
-  }
-
-  markImeOpening(realInput, 800);
-  // Paint cyan ring without blurring this input after we focus it.
+  ensureImeListeners();
+  markImeOpening(realInput, 1500);
   setFocused(realInput, { native: false });
 
-  const kick = () => {
-    try {
-      realInput.focus({ preventScroll: false });
-    } catch {
-      try {
-        realInput.focus();
-      } catch {
-        /* ignore */
-      }
-    }
-    // Only click if still not focused — a second click on a focused input can
-    // dismiss the webOS keyboard on some firmware.
-    if (document.activeElement !== realInput) {
-      try {
-        if (typeof realInput.click === 'function') realInput.click();
-      } catch {
-        /* ignore */
-      }
-    }
-    try {
-      const kb = window.webOS && window.webOS.keyboard;
-      if (kb && typeof kb.show === 'function') kb.show();
-    } catch {
-      /* ignore */
-    }
-    try {
-      if (window.PalmSystem && typeof window.PalmSystem.keyboardShow === 'function') {
-        window.PalmSystem.keyboardShow(1);
-      }
-    } catch {
-      /* ignore */
-    }
-  };
-
-  kick();
-  // Re-assert ring WITHOUT another focus cycle that could fight the IME.
-  if (currentFocused !== realInput) setFocused(realInput, { native: false });
-
-  requestAnimationFrame(() => {
-    if (document.activeElement !== realInput) kick();
+  // Defer past the current keydown/OK — critical for webOS simulator IME.
+  const delays = [0, 30, 80, 160, 320, 600];
+  delays.forEach((ms) => {
     window.setTimeout(() => {
-      if (document.activeElement !== realInput) kick();
-    }, 60);
-    window.setTimeout(() => {
-      if (document.activeElement !== realInput) kick();
-    }, 180);
+      if (pendingImeEl !== realInput) return;
+      kickIme(realInput);
+      if (currentFocused !== realInput) setFocused(realInput, { native: false });
+    }, ms);
   });
 
   return true;
@@ -577,7 +612,6 @@ function activate(el, onEnterRef) {
   const target = el || getTvFocus();
   if (!target) return;
 
-  // OK on an input / data-input host → open native IME (do not skip / click past it).
   const editable = resolveEditable(target) || (isTypingTarget(target) ? target : null);
   if (editable) {
     openIme(editable);
@@ -606,10 +640,20 @@ export function useGlobalTvKeys({ onEscape, onEnter } = {}) {
   }, [onEscape, onEnter]);
 
   useEffect(() => {
+    let pendingOkInput = null;
+
     const handle = (e) => {
-      // Only react once per physical key (keydown). Ignore repeats from keyup
-      // listeners or bubbled duplicates.
-      if (e.type !== 'keydown') return;
+      if (e.type === 'keyup') {
+        // webOS often only raises the IME after OK is released.
+        if (pendingOkInput && isEnterKey(e)) {
+          const el = pendingOkInput;
+          pendingOkInput = null;
+          openIme(el);
+        }
+        return;
+      }
+
+      // keydown
       if (e._tvNavHandled) return;
       e._tvNavHandled = true;
 
@@ -619,7 +663,6 @@ export function useGlobalTvKeys({ onEscape, onEnter } = {}) {
       const list = queryFocusables(scope);
       let active = getTvFocus();
 
-      // No painted selection yet → put one on the first control BEFORE moving.
       if (!active || !list.includes(active)) {
         const seed =
           list.find((el) => el.classList?.contains('menu-item')) ||
@@ -633,8 +676,6 @@ export function useGlobalTvKeys({ onEscape, onEnter } = {}) {
 
       const dir = arrowDirection(e);
       if (dir) {
-        // Single-line inputs: Left/Right keep caret; Up/Down leave the field
-        // (TV IME closed or still focused — otherwise Login gets stuck).
         const typing = isTypingTarget(active) && document.activeElement === active;
         if (typing) {
           const leaveField =
@@ -645,6 +686,7 @@ export function useGlobalTvKeys({ onEscape, onEnter } = {}) {
         }
         e.preventDefault();
         e.stopPropagation();
+        pendingImeEl = null;
         if (!active) {
           focusFirst(scope);
           return;
@@ -653,7 +695,6 @@ export function useGlobalTvKeys({ onEscape, onEnter } = {}) {
         const candidates = list.filter((el) => el !== active);
         const target = nearest(dir.dx, dir.dy, fromRect, candidates);
         if (target) {
-          // Don't native-focus inputs on arrow (reopens webOS IME). OK opens it.
           const native = !isTypingTarget(target);
           setFocused(target, { native });
         }
@@ -661,28 +702,33 @@ export function useGlobalTvKeys({ onEscape, onEnter } = {}) {
       }
 
       if (isEnterKey(e)) {
-        // Already typing in the IME — let the key reach the input / form.
         if (isTypingTarget(active) && document.activeElement === active) return;
         e.preventDefault();
         e.stopPropagation();
+        const editable = resolveEditable(active) || (isTypingTarget(active) ? active : null);
+        if (editable) {
+          pendingOkInput = editable;
+          openIme(editable);
+          return;
+        }
         activate(active, onEnterRef);
         return;
       }
 
       if (isBackKey(e) || isRemoteBackKey(e) || isTextBackspace(e)) {
         const typing = isTypingTarget(active) && document.activeElement === active;
-        // IME delete: never steal Backspace while the input has native focus.
         if (typing && isTextBackspace(e)) return;
 
         if (typing && isRemoteBackKey(e)) {
           e.preventDefault();
           e.stopPropagation();
+          pendingImeEl = null;
+          clearImeGuard();
           try {
             active.blur();
           } catch {
             /* ignore */
           }
-          // Stay on the same field that had the IME — never yank to #login-user.
           setFocused(active, { native: false });
           return;
         }
@@ -698,8 +744,10 @@ export function useGlobalTvKeys({ onEscape, onEnter } = {}) {
     };
 
     window.addEventListener('keydown', handle, true);
+    window.addEventListener('keyup', handle, true);
     return () => {
       window.removeEventListener('keydown', handle, true);
+      window.removeEventListener('keyup', handle, true);
     };
   }, [ctx]);
 }
