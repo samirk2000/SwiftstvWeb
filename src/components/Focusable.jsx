@@ -45,6 +45,25 @@ const FocusCtx = createContext(null);
 /** Module-level virtual cursor — survives React re-renders, works without native focus. */
 let currentFocused = null;
 
+/** While opening the IME, ignore blur restores that would kill the keyboard. */
+let imeGuardEl = null;
+let imeGuardUntil = 0;
+
+export function markImeOpening(el, ms = 700) {
+  if (!el) return;
+  imeGuardEl = el;
+  imeGuardUntil = Date.now() + ms;
+}
+
+export function isImeGuarded(el) {
+  return Boolean(el && imeGuardEl === el && Date.now() < imeGuardUntil);
+}
+
+export function clearImeGuard() {
+  imeGuardEl = null;
+  imeGuardUntil = 0;
+}
+
 function isVisible(el) {
   if (!el || !el.isConnected) return false;
   if (el.getAttribute('aria-hidden') === 'true') return false;
@@ -305,7 +324,20 @@ export function FocusRoot({ children }) {
       const t = e.target;
       if (t && t !== document.body && t !== document.documentElement) {
         if (t.matches?.(FOCUSABLE_SELECTOR) || t.closest?.('[tabindex]')) {
-          // Re-enter through setFocused so we never stack cyan rings.
+          // During IME open, only refresh the ring — avoid extra blur cycles.
+          if (isImeGuarded(t)) {
+            document.querySelectorAll('.tv-focused, .focused, [data-tv-focused]').forEach((n) => {
+              if (n === t) return;
+              n.classList.remove('tv-focused');
+              n.classList.remove('focused');
+              n.removeAttribute('data-tv-focused');
+            });
+            currentFocused = t;
+            t.classList.add('tv-focused');
+            t.classList.add('focused');
+            t.setAttribute('data-tv-focused', 'true');
+            return;
+          }
           setFocused(t, { native: false });
         }
       }
@@ -470,58 +502,75 @@ export function resolveEditable(el) {
 }
 
 /**
- * Open the platform IME on an input. webOS needs a real DOM focus() (and often
- * a synthetic click); virtual tv-focused alone is not enough.
+ * Open the platform IME on an input. webOS needs a real DOM focus() during a
+ * user gesture. Retries + an IME guard avoid the common race where a blur
+ * handler / second Enter handler immediately closes the keyboard again.
  */
 export function openIme(el) {
   const realInput = resolveEditable(el) || (isTypingTarget(el) ? el : null);
-  if (!realInput || realInput.disabled || realInput.readOnly) return false;
+  if (!realInput || realInput.disabled) return false;
 
-  // Single cyan ring on the editable, then native focus to open the keyboard.
+  // Never leave readOnly stuck on (blocks the keyboard on some webOS builds).
+  try {
+    realInput.readOnly = false;
+    realInput.removeAttribute('readonly');
+  } catch {
+    /* ignore */
+  }
+
+  markImeOpening(realInput, 800);
+  // Paint cyan ring without blurring this input after we focus it.
   setFocused(realInput, { native: false });
 
-  try {
-    realInput.focus();
-  } catch {
+  const kick = () => {
     try {
       realInput.focus({ preventScroll: false });
     } catch {
-      /* continue with click / webOS API */
+      try {
+        realInput.focus();
+      } catch {
+        /* ignore */
+      }
     }
-  }
-
-  // Re-assert ring after focus (focusin also calls setFocused).
-  setFocused(realInput, { native: false });
-
-  try {
-    if (typeof realInput.click === 'function') realInput.click();
-  } catch {
-    /* ignore */
-  }
-
-  try {
-    realInput.dispatchEvent(
-      new MouseEvent('click', { bubbles: true, cancelable: true, view: window })
-    );
-  } catch {
-    /* ignore */
-  }
-
-  try {
-    const kb = window.webOS && window.webOS.keyboard;
-    if (kb && typeof kb.show === 'function') kb.show();
-  } catch {
-    /* ignore */
-  }
-  try {
-    if (window.PalmSystem && typeof window.PalmSystem.keyboardShow === 'function') {
-      window.PalmSystem.keyboardShow(1);
+    // Only click if still not focused — a second click on a focused input can
+    // dismiss the webOS keyboard on some firmware.
+    if (document.activeElement !== realInput) {
+      try {
+        if (typeof realInput.click === 'function') realInput.click();
+      } catch {
+        /* ignore */
+      }
     }
-  } catch {
-    /* ignore */
-  }
+    try {
+      const kb = window.webOS && window.webOS.keyboard;
+      if (kb && typeof kb.show === 'function') kb.show();
+    } catch {
+      /* ignore */
+    }
+    try {
+      if (window.PalmSystem && typeof window.PalmSystem.keyboardShow === 'function') {
+        window.PalmSystem.keyboardShow(1);
+      }
+    } catch {
+      /* ignore */
+    }
+  };
 
-  return document.activeElement === realInput || realInput === getTvFocus();
+  kick();
+  // Re-assert ring WITHOUT another focus cycle that could fight the IME.
+  if (currentFocused !== realInput) setFocused(realInput, { native: false });
+
+  requestAnimationFrame(() => {
+    if (document.activeElement !== realInput) kick();
+    window.setTimeout(() => {
+      if (document.activeElement !== realInput) kick();
+    }, 60);
+    window.setTimeout(() => {
+      if (document.activeElement !== realInput) kick();
+    }, 180);
+  });
+
+  return true;
 }
 
 function activate(el, onEnterRef) {

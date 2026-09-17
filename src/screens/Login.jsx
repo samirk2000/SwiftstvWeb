@@ -5,7 +5,7 @@ import { tryRestoreSession } from '../lib/xtream.js';
 import { t, getLang } from '../lib/i18n.js';
 import { useSession } from '../context/SessionContext.jsx';
 import { serverInfoLabel } from '../lib/accountText.js';
-import { setFocused, getTvFocus, openIme } from '../components/Focusable.jsx';
+import { setFocused, getTvFocus, openIme, isImeGuarded, markImeOpening } from '../components/Focusable.jsx';
 import { getAccount } from '../lib/session.js';
 
 // Login field chain for webOS D-pad: Usuario → Contraseña → Iniciar sesión.
@@ -44,18 +44,55 @@ export default function Login() {
 
   const openFieldIme = (el) => {
     if (!el || el.disabled) return;
-    navLockRef.current = false;
+    navLockRef.current = true; // block blur restore while keyboard opens
     imeOpenRef.current = true;
-    setFocused(el, { native: false });
+    markImeOpening(el, 800);
+    clearBlurTimer();
     openIme(el);
+    window.setTimeout(() => {
+      navLockRef.current = false;
+    }, 850);
+  };
+
+  // Mouse / remote click sometimes focuses without raising the IME — nudge it.
+  const onFieldPointer = (el) => {
+    if (!el || el.disabled) return;
+    markImeOpening(el, 800);
+    window.setTimeout(() => {
+      if (document.activeElement === el) {
+        try {
+          const kb = window.webOS && window.webOS.keyboard;
+          if (kb && typeof kb.show === 'function') kb.show();
+        } catch {
+          /* ignore */
+        }
+        try {
+          if (window.PalmSystem && typeof window.PalmSystem.keyboardShow === 'function') {
+            window.PalmSystem.keyboardShow(1);
+          }
+        } catch {
+          /* ignore */
+        }
+      } else {
+        openFieldIme(el);
+      }
+    }, 40);
   };
 
   const onFieldBlur = (el) => {
+    // webOS often fires a transient blur while raising the IME — ignore it.
+    if (isImeGuarded(el) || navLockRef.current) return;
     clearBlurTimer();
     blurTimer.current = window.setTimeout(() => {
       blurTimer.current = null;
+      if (isImeGuarded(el) || navLockRef.current) return;
+      // Still natively focused → IME is up; keep ring, don't fight it.
+      if (document.activeElement === el) {
+        imeOpenRef.current = true;
+        setFocused(el, { native: false });
+        return;
+      }
       imeOpenRef.current = false;
-      if (navLockRef.current) return;
       const painted = getTvFocus();
       if (painted && painted !== el) return;
       const active = document.activeElement;
@@ -69,11 +106,16 @@ export default function Login() {
         return;
       }
       if (el && el.isConnected) setFocused(el, { native: false });
-    }, 80);
+    }, 120);
   };
 
   const onFieldFocus = (el) => {
     clearBlurTimer();
+    imeOpenRef.current = true;
+    if (isImeGuarded(el)) {
+      setFocused(el, { native: false });
+      return;
+    }
     navLockRef.current = false;
     setFocused(el, { native: false });
   };
@@ -142,7 +184,8 @@ export default function Login() {
     }
 
     if (enter && current && isLoginInput(current)) {
-      if (document.activeElement === current && imeOpenRef.current) return;
+      // Already typing — don't re-openIme (second kick can dismiss webOS IME).
+      if (document.activeElement === current) return;
       e.preventDefault();
       e.stopPropagation();
       openFieldIme(current);
@@ -289,6 +332,8 @@ export default function Login() {
             onFocus={() => onFieldFocus(userRef.current)}
             onBlur={() => onFieldBlur(userRef.current)}
             onKeyDown={(e) => onFieldKeyDown(e, 0)}
+            onMouseDown={() => markImeOpening(userRef.current, 800)}
+            onClick={() => onFieldPointer(userRef.current)}
             autoComplete="username"
             autoCapitalize="none"
             autoCorrect="off"
@@ -317,6 +362,8 @@ export default function Login() {
             onFocus={() => onFieldFocus(passRef.current)}
             onBlur={() => onFieldBlur(passRef.current)}
             onKeyDown={(e) => onFieldKeyDown(e, 1)}
+            onMouseDown={() => markImeOpening(passRef.current, 800)}
+            onClick={() => onFieldPointer(passRef.current)}
             autoComplete="current-password"
             autoCapitalize="none"
             autoCorrect="off"
