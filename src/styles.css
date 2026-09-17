@@ -101,6 +101,16 @@ article.tile.tv-focused,
   border-color: var(--accent);
 }
 
+/* Primary is already cyan — cyan outline disappears. White ring so OK is obvious. */
+.btn-primary.tv-focused,
+.btn-primary[data-tv-focused='true'] {
+  outline: 3px solid #fff !important;
+  outline-offset: 5px;
+  box-shadow: 0 0 0 6px rgba(255, 255, 255, 0.28), 0 0 28px rgba(0, 209, 255, 0.55);
+  transform: scale(1.06);
+  border-color: #fff;
+}
+
 /* Subtle border while typing in IME — not a second full ring. */
 input:focus:not(.tv-focused):not([data-tv-focused='true']),
 .search-box:focus:not(.tv-focused):not([data-tv-focused='true']) {
@@ -1308,7 +1318,8 @@ article.tile,
   font-size: 15px;
 }
 .onboarding-overlay {
-  z-index: 40;
+  /* Must stay above content; .exit-overlay is 9999 — do not drop below it. */
+  z-index: 10000;
 }
 
 /* UI scale for 10-ft TVs vs desktop */

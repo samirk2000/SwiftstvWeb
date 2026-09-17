@@ -3,10 +3,43 @@ import { useNavigate } from 'react-router-dom';
 import { t } from '../lib/i18n.js';
 import { getContinueWatching, getFavorites, getSession, toggleFavorite } from '../lib/session.js';
 import { useSession } from '../context/SessionContext.jsx';
-import { useFocusable, setFocused } from '../components/Focusable.jsx';
+import { useFocusable, setFocused, FocusScope } from '../components/Focusable.jsx';
 import { Row, Tile } from '../components/ui.jsx';
 import { getPrefs, setPrefs } from '../lib/prefs.js';
 import { formatExpiry } from '../lib/time.js';
+
+function OnboardingTips({ onDismiss }) {
+  const ok = useFocusable('onboarding-ok');
+
+  useEffect(() => {
+    // Beat useAutoFocus timers (30 / 120 / 400) so OK stays selected on TV remotes.
+    const timers = [50, 150, 450].map((ms) =>
+      window.setTimeout(() => setFocused(ok.ref.current, { native: false }), ms),
+    );
+    return () => timers.forEach((id) => window.clearTimeout(id));
+  }, [ok.ref]);
+
+  return (
+    <div className="exit-overlay onboarding-overlay" role="dialog" aria-modal="true">
+      <FocusScope trap autoFocus className="exit-dialog">
+        <h2>{t('onboarding.title')}</h2>
+        <p>{t('onboarding.body')}</p>
+        <div className="exit-actions">
+          <button
+            ref={ok.ref}
+            tabIndex={0}
+            className="btn-primary"
+            data-focusable="true"
+            data-focus-key="onboarding-ok"
+            onClick={onDismiss}
+          >
+            {t('onboarding.gotIt')}
+          </button>
+        </div>
+      </FocusScope>
+    </div>
+  );
+}
 
 function MenuItem({ to, icon, label, onNavigate, focus = false }) {
   const { ref, tabIndex } = useFocusable(`menu-${to}`);
@@ -99,22 +132,21 @@ export default function Home() {
     <div>
       {expiryMsg ? <div className="expiry-banner">{expiryMsg}</div> : null}
 
-      {showTips && (
-        <div className="exit-overlay onboarding-overlay" role="dialog" aria-modal="true">
-          <div className="exit-dialog">
-            <h2>{t('onboarding.title')}</h2>
-            <p>{t('onboarding.body')}</p>
-            <div className="exit-actions">
-              <button tabIndex={0} className="btn-primary" autoFocus onClick={dismissTips}>
-                {t('onboarding.gotIt')}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {showTips ? <OnboardingTips onDismiss={dismissTips} /> : null}
 
+      <div
+        className="home-main"
+        aria-hidden={showTips ? 'true' : undefined}
+        style={showTips ? { pointerEvents: 'none', visibility: 'hidden' } : undefined}
+      >
       <div className="menu-grid">
-        <MenuItem focus to="live" icon="📺" label={t('home.live')} onNavigate={() => go('/live')} />
+        <MenuItem
+          focus={!showTips}
+          to="live"
+          icon="📺"
+          label={t('home.live')}
+          onNavigate={() => go('/live')}
+        />
         <MenuItem to="movies" icon="🎬" label={t('home.movies')} onNavigate={() => go('/vod')} />
         <MenuItem to="series" icon="📚" label={t('home.series')} onNavigate={() => go('/series')} />
         <MenuItem to="search" icon="🔎" label={t('home.search')} onNavigate={() => go('/search')} />
@@ -179,6 +211,7 @@ export default function Home() {
           )}
         />
       )}
+      </div>
     </div>
   );
 }

@@ -268,9 +268,23 @@ export function focusElement(el) {
   return setFocused(el, { native: true });
 }
 
-/** Prefer main content controls over the topbar brand on first paint. */
+/** Prefer modal dialogs, then main content — never topbar brand on first paint. */
 export function focusFirst(root) {
   const scope = root && root.querySelectorAll ? root : document;
+  // Exit / onboarding / leave confirm must win over menu tiles behind the overlay.
+  const modal =
+    document.querySelector('.exit-overlay[role="dialog"]') ||
+    document.querySelector('.player-leave[role="dialog"]');
+  if (modal && isVisible(modal)) {
+    const btn =
+      modal.querySelector('.btn-primary') ||
+      modal.querySelector('button:not([disabled])') ||
+      null;
+    if (btn && isVisible(btn)) {
+      setFocused(btn, { native: false });
+      return btn;
+    }
+  }
   const preferred =
     scope.querySelector?.('#login-user') ||
     scope.querySelector?.('.menu-item') ||

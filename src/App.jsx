@@ -188,6 +188,12 @@ function AppShell() {
         closeExit();
         return;
       }
+      // Onboarding tips: Back = dismiss (same as Entendido).
+      const tipsOk = document.querySelector('.onboarding-overlay .btn-primary');
+      if (tipsOk) {
+        tipsOk.click();
+        return;
+      }
       // Player owns its Back (leave confirm for VOD/series).
       if (location.pathname === '/player') return;
       // Accidental Back on Home/Login → ask before quitting the app.

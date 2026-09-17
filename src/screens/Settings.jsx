@@ -147,7 +147,8 @@ export default function Settings() {
             className="btn-ghost"
             onClick={() => {
               patchPrefs({ onboardingDone: false });
-              navigate('/');
+              // Force Home remount so tips overlay mounts and grabs TV focus.
+              navigate('/', { replace: true, state: { showTips: true } });
             }}
           >
             {t('settings.showTips')}
