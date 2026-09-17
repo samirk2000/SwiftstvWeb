@@ -3,8 +3,10 @@ import { useNavigate } from 'react-router-dom';
 import { t } from '../lib/i18n.js';
 import { getContinueWatching, getFavorites, getSession, toggleFavorite } from '../lib/session.js';
 import { useSession } from '../context/SessionContext.jsx';
-import { useFocusable } from '../components/Focusable.jsx';
+import { useFocusable, setFocused } from '../components/Focusable.jsx';
 import { Row, Tile } from '../components/ui.jsx';
+import { getPrefs, setPrefs } from '../lib/prefs.js';
+import { formatExpiry } from '../lib/time.js';
 
 function MenuItem({ to, icon, label, onNavigate, focus = false }) {
   const { ref, tabIndex } = useFocusable(`menu-${to}`);
@@ -22,12 +24,27 @@ function MenuItem({ to, icon, label, onNavigate, focus = false }) {
   );
 }
 
+function expiryBannerText(userInfo) {
+  if (!userInfo) return '';
+  const raw = userInfo.exp_date;
+  if (!raw || raw === '0') return '';
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return '';
+  const ms = n * 1000;
+  const days = (ms - Date.now()) / (1000 * 60 * 60 * 24);
+  const label = formatExpiry(raw);
+  if (days < 0) return t('expiry.expired');
+  if (days <= 7) return t('expiry.soon', label || String(raw));
+  return '';
+}
+
 export default function Home() {
   const navigate = useNavigate();
   const { session, langTick } = useSession();
-  // Bumped on mount / when returning so continue-watching / favorites refresh
-  // without stealing focus on every focus event (that broke D-pad nav).
   const [tick, setTick] = useState(0);
+  const [showTips, setShowTips] = useState(() => !getPrefs().onboardingDone);
+  const saved = getSession();
+  const expiryMsg = expiryBannerText(saved?.user_info || session?.info || session?.session?.user_info);
 
   useEffect(() => {
     setTick((x) => x + 1);
@@ -69,12 +86,38 @@ export default function Home() {
     navigate(`/player?${qs.toString()}`);
   };
 
+  const dismissTips = () => {
+    setPrefs({ onboardingDone: true });
+    setShowTips(false);
+    window.setTimeout(() => {
+      const first = document.querySelector('.menu-item');
+      if (first) setFocused(first, { native: false });
+    }, 40);
+  };
+
   return (
     <div>
+      {expiryMsg ? <div className="expiry-banner">{expiryMsg}</div> : null}
+
+      {showTips && (
+        <div className="exit-overlay onboarding-overlay" role="dialog" aria-modal="true">
+          <div className="exit-dialog">
+            <h2>{t('onboarding.title')}</h2>
+            <p>{t('onboarding.body')}</p>
+            <div className="exit-actions">
+              <button tabIndex={0} className="btn-primary" autoFocus onClick={dismissTips}>
+                {t('onboarding.gotIt')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="menu-grid">
         <MenuItem focus to="live" icon="📺" label={t('home.live')} onNavigate={() => go('/live')} />
         <MenuItem to="movies" icon="🎬" label={t('home.movies')} onNavigate={() => go('/vod')} />
         <MenuItem to="series" icon="📚" label={t('home.series')} onNavigate={() => go('/series')} />
+        <MenuItem to="search" icon="🔎" label={t('home.search')} onNavigate={() => go('/search')} />
         <MenuItem to="exclusivos" icon="⚡" label={t('home.exclusivos')} onNavigate={() => go('/exclusivos')} />
         <MenuItem to="parental" icon="🔒" label={t('home.parental')} onNavigate={() => go('/parental')} />
         <MenuItem to="accounts" icon="👤" label={t('home.accounts')} onNavigate={() => go('/accounts')} />

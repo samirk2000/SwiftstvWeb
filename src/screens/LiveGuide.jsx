@@ -8,6 +8,7 @@ import { isCategoryLocked } from '../lib/parental.js';
 import { isFavorite, toggleFavorite } from '../lib/session.js';
 import { useFocusable, FocusScope } from '../components/Focusable.jsx';
 import { formatEpgTime, currentProgramme, epochAtLocal, shortDayLabel } from '../lib/time.js';
+import { setLiveZapList, setLastLiveChannel } from '../lib/liveZap.js';
 import { matchesSearch } from '../lib/searchText.js';
 
 // Days offered by the catch-up manual selector (today + N days back).
@@ -301,8 +302,19 @@ export default function LiveGuide() {
   const playChannel = (ch) => {
     // Continuous MPEG-TS live: /live/U/P/id.ts → the proxy keeps ONE shared
     // upstream connection per channel and the player decodes it with mpegts.js.
+    const list = (filtered || []).map((c) => ({
+      id: String(c.stream_id),
+      name: c.name || '',
+      url: liveStreamTsUrl(server, c.stream_id),
+    }));
+    setLiveZapList(list);
+    setLastLiveChannel(String(ch.stream_id));
     const url = liveStreamTsUrl(server, ch.stream_id);
-    navigate(`/player?type=live&id=${ch.stream_id}&url=${encodeURIComponent(url)}`);
+    navigate(
+      `/player?type=live&id=${ch.stream_id}&url=${encodeURIComponent(url)}&title=${encodeURIComponent(
+        ch.name || ''
+      )}`
+    );
   };
 
   const playCatchup = (url, startPosition) => {

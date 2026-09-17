@@ -25,6 +25,8 @@ import Exclusivos from './screens/Exclusivos.jsx';
 import Parental from './screens/Parental.jsx';
 import Accounts from './screens/Accounts.jsx';
 import Settings from './screens/Settings.jsx';
+import GlobalSearch from './screens/GlobalSearch.jsx';
+import { applyUiScale } from './lib/prefs.js';
 
 function TopBar() {
   const { logout, toggleLanguage, lang, session } = useSession();
@@ -164,6 +166,10 @@ function AppShell() {
   const location = useLocation();
   const [exitOpen, setExitOpen] = useState(false);
 
+  useEffect(() => {
+    applyUiScale();
+  }, []);
+
   const isRootRoute =
     location.pathname === '/' ||
     location.pathname === '/login' ||
@@ -266,6 +272,14 @@ function AppShell() {
               element={
                 <RequireSession>
                   <Player />
+                </RequireSession>
+              }
+            />
+            <Route
+              path="/search"
+              element={
+                <RequireSession>
+                  <GlobalSearch />
                 </RequireSession>
               }
             />

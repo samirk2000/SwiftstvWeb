@@ -1,6 +1,9 @@
 import { createRoot } from 'react-dom/client';
 import App from './App.jsx';
 import './styles.css';
+import { applyUiScale } from './lib/prefs.js';
+
+applyUiScale();
 
 // NOTA: NO usamos <React.StrictMode>. En desarrollo React monta, desmonta y
 // re-monta cada componente, lo que dispara el efecto de reproducción del Player

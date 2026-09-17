@@ -657,8 +657,12 @@ export function useGlobalTvKeys({ onEscape, onEnter } = {}) {
       if (e._tvNavHandled) return;
 
       // VOD/series/catchup player owns D-pad + OK (leave dialog clears this flag).
-      // Without this, global nav focuses "Atrás" and OK exits instead of pausing.
-      if (document.documentElement.dataset.tvPlayerKeys === 'vod') {
+      // Live player owns CH+/− (arrows) + digits while zapping.
+      // Without this, global nav steals keys from the player.
+      if (
+        document.documentElement.dataset.tvPlayerKeys === 'vod' ||
+        document.documentElement.dataset.tvPlayerKeys === 'live'
+      ) {
         const dir = arrowDirection(e);
         if (
           dir ||
@@ -668,7 +672,12 @@ export function useGlobalTvKeys({ onEscape, onEnter } = {}) {
           e.key === 'MediaPlay' ||
           e.key === 'MediaPause' ||
           e.key === 'MediaRewind' ||
-          e.key === 'MediaFastForward'
+          e.key === 'MediaFastForward' ||
+          e.key === 'ChannelUp' ||
+          e.key === 'ChannelDown' ||
+          e.key === 'PageUp' ||
+          e.key === 'PageDown' ||
+          (e.key && /^[0-9]$/.test(e.key))
         ) {
           return;
         }

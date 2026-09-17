@@ -8,8 +8,12 @@ import {
   isHlsOnlyChannel,
   markHlsOnlyChannel,
   clearHlsOnlyChannel,
+  getSession,
 } from '../lib/session.js';
 import { setFocused } from '../components/Focusable.jsx';
+import { getPrefs } from '../lib/prefs.js';
+import { zapRelative, zapByNumber, setLastLiveChannel } from '../lib/liveZap.js';
+import { getSeriesInfo, seriesStreamUrl } from '../lib/xtream.js';
 
 export default function Player() {
   const location = useLocation();
@@ -21,6 +25,8 @@ export default function Player() {
   const id = params.get('id') || '';
   const title = params.get('title') || (type === 'live' ? t('live.title') : '');
   const startPosition = Number(params.get('start') || 0) || 0;
+  const seriesId = params.get('seriesId') || '';
+  const seasonParam = params.get('season') || '';
 
   const videoRef = useRef(null);
   const playerRef = useRef(null);
@@ -54,41 +60,94 @@ export default function Player() {
 
   // VOD / series / catchup get scrubber + pause/seek. Live stays zap-only.
   const isVodLike = type === 'vod' || type === 'series' || type === 'catchup';
+  const isLive = type === 'live';
   const [paused, setPaused] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [leaveOpen, setLeaveOpen] = useState(false);
-  // Big, obvious jumps — one press = 30s. No tiny ±10s on Up/Down (too easy to
-  // hit by accident on a TV remote and feels "broken" to average users).
-  const seekJump = 30;
+  const [zapBanner, setZapBanner] = useState('');
+  const [numBuffer, setNumBuffer] = useState('');
+  const numTimer = useRef(null);
+  const prefs = getPrefs();
+  const seekJump = Number(prefs.seekJump) || 30;
   const controlsVisibleRef = useRef(controlsVisible);
   controlsVisibleRef.current = controlsVisible;
   const lastSeekAtRef = useRef(0);
   const SEEK_COOLDOWN_MS = 650;
   const pauseBtnRef = useRef(null);
 
-  // Claim D-pad/OK from global TV nav while VOD-like playback is active.
-  // Cleared during leave dialog so Seguir viendo / Salir remain OK-activatable.
+  // Claim keys from global TV nav while player is active.
   useEffect(() => {
-    if (!isVodLike) return undefined;
     if (leaveOpen) {
       delete document.documentElement.dataset.tvPlayerKeys;
       return undefined;
     }
-    document.documentElement.dataset.tvPlayerKeys = 'vod';
+    if (isVodLike) document.documentElement.dataset.tvPlayerKeys = 'vod';
+    else if (isLive) document.documentElement.dataset.tvPlayerKeys = 'live';
+    else delete document.documentElement.dataset.tvPlayerKeys;
     return () => {
       delete document.documentElement.dataset.tvPlayerKeys;
     };
-  }, [isVodLike, leaveOpen]);
+  }, [isVodLike, isLive, leaveOpen]);
 
   // When the transport bar appears, park focus on Pause — never on Atrás.
   useEffect(() => {
     if (!isVodLike || !controlsVisible || leaveOpen) return undefined;
-    const id = window.setTimeout(() => {
+    const timer = window.setTimeout(() => {
       if (pauseBtnRef.current) setFocused(pauseBtnRef.current, { native: false });
     }, 30);
-    return () => window.clearTimeout(id);
+    return () => window.clearTimeout(timer);
   }, [isVodLike, controlsVisible, leaveOpen]);
+
+  const goLiveChannel = (ch) => {
+    if (!ch?.url) return;
+    setLastLiveChannel(ch.id);
+    setZapBanner(ch.name || ch.id);
+    window.setTimeout(() => setZapBanner(''), 2500);
+    navigate(
+      `/player?type=live&id=${encodeURIComponent(ch.id)}&url=${encodeURIComponent(ch.url)}&title=${encodeURIComponent(
+        ch.name || ''
+      )}`,
+      { replace: true }
+    );
+  };
+
+  const playNextEpisode = async () => {
+    if (type !== 'series' || !seriesId) return false;
+    const saved = getSession();
+    if (!saved) return false;
+    const srv = { baseUrl: saved.baseUrl, username: saved.username, password: saved.password };
+    const info = await getSeriesInfo(srv, seriesId);
+    if (!info?.episodes) return false;
+    const seasons = Object.keys(info.episodes || {}).sort((a, b) => Number(a) - Number(b));
+    let season = seasonParam || seasons[0];
+    let list = info.episodes[season] || [];
+    let idx = list.findIndex((ep) => String(ep.id) === String(id));
+    let next = idx >= 0 ? list[idx + 1] : null;
+    if (!next) {
+      const sIdx = seasons.indexOf(String(season));
+      if (sIdx >= 0 && sIdx < seasons.length - 1) {
+        season = seasons[sIdx + 1];
+        list = info.episodes[season] || [];
+        next = list[0];
+      }
+    }
+    if (!next) return false;
+    const container = next.container_extension || info.container_extension || 'mp4';
+    const nextUrl = seriesStreamUrl(srv, container, next, season, seriesId);
+    const epNum = next.episode_num ? `E${next.episode_num}` : '';
+    const nextTitle =
+      next.title ||
+      [info.info?.name, `T${season}`, epNum].filter(Boolean).join(' · ') ||
+      String(next.id);
+    navigate(
+      `/player?type=series&id=${next.id}&seriesId=${seriesId}&season=${encodeURIComponent(
+        String(season)
+      )}&url=${encodeURIComponent(nextUrl)}&title=${encodeURIComponent(nextTitle)}`,
+      { replace: true }
+    );
+    return true;
+  };
 
   // Live channel memory: once a channel fell back to HLS (mpegts can't play its
   // .ts on this browser), remember it so the next zap goes straight to HLS —
@@ -208,6 +267,67 @@ export default function Player() {
         return;
       }
 
+      const claim = () => {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+      };
+
+      // ---- LIVE: CH+/−, numbers, OK shows OSD ----
+      if (isLive) {
+        const isChUp =
+          e.key === 'ChannelUp' ||
+          e.key === 'PageUp' ||
+          e.key === 'ArrowUp' ||
+          code === 427 ||
+          code === 33 ||
+          code === 38;
+        const isChDown =
+          e.key === 'ChannelDown' ||
+          e.key === 'PageDown' ||
+          e.key === 'ArrowDown' ||
+          code === 428 ||
+          code === 34 ||
+          code === 40;
+        const digit = /^[0-9]$/.test(e.key || '') ? e.key : code >= 48 && code <= 57 ? String(code - 48) : '';
+
+        if (e.repeat && (isChUp || isChDown || digit)) {
+          claim();
+          return;
+        }
+        if (isChUp) {
+          claim();
+          const next = zapRelative(id, 1);
+          if (next) goLiveChannel(next);
+          return;
+        }
+        if (isChDown) {
+          claim();
+          const next = zapRelative(id, -1);
+          if (next) goLiveChannel(next);
+          return;
+        }
+        if (digit) {
+          claim();
+          setNumBuffer((prev) => {
+            const next = `${prev}${digit}`.slice(-4);
+            clearTimeout(numTimer.current);
+            numTimer.current = setTimeout(() => {
+              const ch = zapByNumber(next);
+              setNumBuffer('');
+              if (ch) goLiveChannel(ch);
+            }, 1200);
+            return next;
+          });
+          return;
+        }
+        if (e.key === 'Enter' || code === 13 || code === 23) {
+          claim();
+          setControlsVisible(true);
+          return;
+        }
+        return;
+      }
+
       if (!isVodLike) return;
 
       const osdUp = controlsVisibleRef.current;
@@ -224,11 +344,6 @@ export default function Player() {
         code === 179;
       const isMediaPlay = e.key === 'MediaPlay' || code === 415;
       const isMediaPause = e.key === 'MediaPause' || code === 19;
-
-      const claim = () => {
-        e.preventDefault();
-        e.stopImmediatePropagation();
-      };
 
       // Holding the remote fires key-repeat — ignore those entirely for VOD.
       if (e.repeat && (isLeft || isRight || isUp || isDown || isOk || isMediaPlay || isMediaPause)) {
@@ -287,7 +402,21 @@ export default function Player() {
 
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
-  }, [isVodLike, leaveOpen, navigate, seekJump]);
+  }, [isVodLike, isLive, leaveOpen, navigate, seekJump, id]);
+
+  // Auto-play next episode when a series finishes (pref).
+  useEffect(() => {
+    if (type !== 'series' || !seriesId) return undefined;
+    const v = videoRef.current;
+    if (!v) return undefined;
+    const onEnded = () => {
+      if (!getPrefs().autoplayNext) return;
+      playNextEpisode().catch(() => {});
+    };
+    v.addEventListener('ended', onEnded);
+    return () => v.removeEventListener('ended', onEnded);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [type, seriesId, id, url, restart]);
 
   // Keep progress UI in sync for VOD-like streams.
   useEffect(() => {
@@ -645,10 +774,20 @@ export default function Player() {
 
   if (error || !url) {
     const formatIssue = errorCode === 4 || unsupportedContainer;
+    const signalIssue = isLive && !formatIssue;
     return (
       <div className="player-screen">
-        <div style={{ color: 'var(--text)', padding: '0 24px', textAlign: 'center' }}>
-          {formatIssue ? t('player.formatError') : error ? t('player.error') : t('common.error')}
+        <div style={{ color: 'var(--text)', padding: '0 24px', textAlign: 'center', maxWidth: 640, margin: '0 auto' }}>
+          {formatIssue
+            ? t('player.formatError')
+            : signalIssue
+              ? t('player.signalError')
+              : error
+                ? t('player.error')
+                : t('common.error')}
+          <p className="hint" style={{ marginTop: 12 }}>
+            {formatIssue ? t('player.formatHint') : signalIssue ? t('player.signalHint') : t('player.errorHint')}
+          </p>
         </div>
         {error && (
           <button
@@ -812,9 +951,32 @@ export default function Player() {
                 >
                   +{seekJump}s ⏩
                 </button>
+                {type === 'series' && seriesId ? (
+                  <button
+                    tabIndex={0}
+                    className="btn-ghost player-transport-btn"
+                    onClick={() => playNextEpisode().catch(() => {})}
+                  >
+                    {t('player.nextEpisode')} ⏭
+                  </button>
+                ) : null}
               </div>
-              <p className="player-hint">{t('player.vodHint')}</p>
+              <p className="player-hint">{t('player.vodHint', { seek: seekJump })}</p>
             </>
+          )}
+
+          {isLive && (
+            <p className="player-hint">{t('player.liveHint')}</p>
+          )}
+        </div>
+      )}
+
+      {(zapBanner || numBuffer) && (
+        <div className="zap-banner" aria-live="polite">
+          {numBuffer ? (
+            <span className="zap-num">{numBuffer}_</span>
+          ) : (
+            <span>{zapBanner}</span>
           )}
         </div>
       )}

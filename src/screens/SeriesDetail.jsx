@@ -72,9 +72,9 @@ export default function SeriesDetail() {
       meta?.name ||
       String(ep?.id || '');
     navigate(
-      `/player?type=series&id=${ep?.id}&url=${encodeURIComponent(url)}&title=${encodeURIComponent(
-        title
-      )}`
+      `/player?type=series&id=${ep?.id}&seriesId=${id}&season=${encodeURIComponent(
+        String(activeSeason || '')
+      )}&url=${encodeURIComponent(url)}&title=${encodeURIComponent(title)}`
     );
   };
 
