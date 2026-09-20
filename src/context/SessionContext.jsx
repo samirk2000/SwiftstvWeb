@@ -6,6 +6,8 @@ import {
   ensureActiveAccountListed,
   upsertAccount,
 } from '../lib/session.js';
+import { clearCatalogCache } from '../lib/catalogCache.js';
+import { clearExclusiveCatalogCache } from '../lib/exclusivos.js';
 import { setLang as setI18nLang, getLang } from '../lib/i18n.js';
 
 const SessionContext = createContext(null);
@@ -24,6 +26,9 @@ export function SessionProvider({ children }) {
 
   const loginSuccess = useCallback(
     (s) => {
+      // New credentials → drop catalogs from the previous user/panel.
+      clearCatalogCache();
+      clearExclusiveCatalogCache();
       setSession(s);
       // dns/xtream already saveSession (which upserts); re-upsert for safety.
       const creds = s?.session || s;
@@ -41,6 +46,8 @@ export function SessionProvider({ children }) {
   );
 
   const logout = useCallback(() => {
+    clearCatalogCache();
+    clearExclusiveCatalogCache();
     clearStored();
     setSession(null);
   }, []);

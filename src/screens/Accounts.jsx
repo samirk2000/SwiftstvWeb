@@ -8,7 +8,7 @@ import {
   accountIdFor,
   ensureActiveAccountListed,
 } from '../lib/session.js';
-import { login } from '../lib/xtream.js';
+import { loginWithFailover } from '../lib/dns.js';
 import { useSession } from '../context/SessionContext.jsx';
 import { FocusScope, useFocusable } from '../components/Focusable.jsx';
 
@@ -36,10 +36,6 @@ function AccountRow({ account, active, busyId, onSwitch, onEdit, onDelete }) {
         <div className="account-label">
           {account.label || account.username}
           {active ? <span className="account-badge">{t('accounts.active')}</span> : null}
-        </div>
-        <div className="account-meta">
-          <span>{account.username}</span>
-          <span className="account-host">{account.host || account.baseUrl}</span>
         </div>
         {switching ? <div className="hint">{t('accounts.switching')}</div> : null}
       </div>
@@ -80,9 +76,7 @@ export default function Accounts() {
 
   const accounts = useMemo(() => listAccounts(), [tick, accountsTick]);
   const active = getSession();
-  const activeId = active
-    ? accountIdFor(active.baseUrl, active.username)
-    : '';
+  const activeId = active ? accountIdFor(active.baseUrl, active.username) : '';
 
   const refresh = () => {
     bumpAccounts?.();
@@ -99,16 +93,10 @@ export default function Accounts() {
       setError('');
       setBusyId(account.id);
       try {
-        const result = await login({
-          baseUrl: account.baseUrl,
-          username: account.username,
-          password: account.password,
-        });
+        // DNS / panel selection is automatic (multi-DNS failover).
+        const result = await loginWithFailover(account.username, account.password);
         if (result?.ok) {
-          loginSuccess({
-            ...result,
-            workingBaseUrl: result.session?.baseUrl || account.baseUrl,
-          });
+          loginSuccess(result);
           navigate('/', { replace: true });
         } else {
           setError(t('accounts.switchFailed'));

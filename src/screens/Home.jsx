@@ -101,7 +101,9 @@ export default function Home() {
 
   const favorites = useMemo(
     () => getFavorites().filter((f) => !isAdultContent(f.title, f.categoryName)).slice(0, 24),
-    [tick, langTick],
+    // session: re-read when switching accounts so rails never leak across users
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [session, tick, langTick],
   );
 
   const go = (path) => navigate(path);
@@ -125,6 +127,7 @@ export default function Home() {
     if (c.url) qs.set('url', c.url);
     if (c.seriesId) qs.set('seriesId', c.seriesId);
     if (c.season) qs.set('season', c.season);
+    if (c.image) qs.set('image', c.image);
     navigate(`/player?${qs.toString()}`);
   };
 

@@ -53,12 +53,25 @@ export default function VodDetail() {
     streamData.description
   );
 
+  const poster =
+    meta?.cover_big ||
+    streamData?.cover_big ||
+    streamData?.backdrop_path ||
+    meta?.cover ||
+    meta?.movie_image ||
+    '';
+
   const doPlay = () => {
     const ext = meta?.container_extension || streamData?.container_extension || 'mp4';
     const url = vodStreamUrl(server, id, ext);
-    navigate(
-      `/player?type=vod&id=${id}&url=${encodeURIComponent(url)}&title=${encodeURIComponent(title)}`
-    );
+    const qs = new URLSearchParams({
+      type: 'vod',
+      id: String(id),
+      url,
+      title,
+    });
+    if (poster) qs.set('image', String(poster));
+    navigate(`/player?${qs.toString()}`);
   };
 
   const play = () => {
@@ -68,13 +81,6 @@ export default function VodDetail() {
     }
     doPlay();
   };
-
-  const poster =
-    meta?.cover_big ||
-    streamData?.cover_big ||
-    streamData?.backdrop_path ||
-    meta?.cover ||
-    meta?.movie_image;
 
   const durationLabel = meta?.duration
     ? formatDuration(meta.duration)

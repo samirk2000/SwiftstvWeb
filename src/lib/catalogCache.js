@@ -5,14 +5,23 @@ const TTL_MS = 10 * 60 * 1000;
 let cache = {
   at: 0,
   baseUrl: '',
+  username: '',
   live: [],
   vod: [],
   series: [],
 };
 
+function cacheKey(server) {
+  return `${String(server?.baseUrl || '').trim()}|${String(server?.username || '')
+    .trim()
+    .toLowerCase()}`;
+}
+
 export async function loadCatalog(server) {
   if (!server?.baseUrl) return cache;
-  const same = cache.baseUrl === server.baseUrl && Date.now() - cache.at < TTL_MS;
+  const key = cacheKey(server);
+  const same =
+    `${cache.baseUrl}|${cache.username}` === key && Date.now() - cache.at < TTL_MS;
   if (same && (cache.live.length || cache.vod.length || cache.series.length)) {
     return cache;
   }
@@ -24,6 +33,9 @@ export async function loadCatalog(server) {
   cache = {
     at: Date.now(),
     baseUrl: server.baseUrl,
+    username: String(server.username || '')
+      .trim()
+      .toLowerCase(),
     live: Array.isArray(live) ? live : [],
     vod: Array.isArray(vod) ? vod : [],
     series: Array.isArray(series) ? series : [],
@@ -32,5 +44,5 @@ export async function loadCatalog(server) {
 }
 
 export function clearCatalogCache() {
-  cache = { at: 0, baseUrl: '', live: [], vod: [], series: [] };
+  cache = { at: 0, baseUrl: '', username: '', live: [], vod: [], series: [] };
 }

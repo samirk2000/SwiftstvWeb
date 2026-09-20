@@ -70,11 +70,13 @@ export default function Player() {
   const type = params.get('type') || 'live';
   const id = params.get('id') || '';
   const title = params.get('title') || (type === 'live' ? t('live.title') : '');
+  const image = params.get('image') || '';
   const startPosition = Number(params.get('start') || 0) || 0;
   const seriesId = params.get('seriesId') || '';
   const seasonParam = params.get('season') || '';
 
   const videoRef = useRef(null);
+  const screenRef = useRef(null);
   const playerRef = useRef(null);
   const wakeRef = useRef(null);
   const hideTimer = useRef(null);
@@ -165,6 +167,73 @@ export default function Player() {
   const desktopPointer = useDesktopPointer();
   const desktopPointerRef = useRef(desktopPointer);
   desktopPointerRef.current = desktopPointer;
+
+  // Lock page chrome while the player is open.
+  useEffect(() => {
+    const html = document.documentElement;
+    const body = document.body;
+    html.classList.add('player-active');
+    body?.classList.add('player-active');
+    return () => {
+      html.classList.remove('player-active');
+      body?.classList.remove('player-active');
+    };
+  }, []);
+
+  // Force the player to the real TV/browser viewport. Some Smart TV WebKits
+  // ignore CSS `inset` / mis-report % heights, leaving the video in a corner.
+  useEffect(() => {
+    const html = document.documentElement;
+    const body = document.body;
+
+    const measure = () => {
+      const w = Math.max(
+        1,
+        window.innerWidth || html.clientWidth || body?.clientWidth || 0
+      );
+      const h = Math.max(
+        1,
+        window.innerHeight || html.clientHeight || body?.clientHeight || 0
+      );
+      const screen = screenRef.current;
+      if (screen) {
+        screen.style.top = '0px';
+        screen.style.left = '0px';
+        screen.style.right = 'auto';
+        screen.style.bottom = 'auto';
+        screen.style.width = `${w}px`;
+        screen.style.height = `${h}px`;
+        screen.style.maxWidth = `${w}px`;
+        screen.style.maxHeight = `${h}px`;
+      }
+      const video = videoRef.current;
+      if (video) {
+        video.style.width = '100%';
+        video.style.height = '100%';
+      }
+    };
+
+    measure();
+    const t1 = window.setTimeout(measure, 50);
+    const t2 = window.setTimeout(measure, 300);
+    window.addEventListener('resize', measure);
+    window.addEventListener('orientationchange', measure);
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener('resize', measure);
+      window.visualViewport.addEventListener('scroll', measure);
+    }
+
+    return () => {
+      window.clearTimeout(t1);
+      window.clearTimeout(t2);
+      window.removeEventListener('resize', measure);
+      window.removeEventListener('orientationchange', measure);
+      if (window.visualViewport) {
+        window.visualViewport.removeEventListener('resize', measure);
+        window.visualViewport.removeEventListener('scroll', measure);
+      }
+    };
+  }, [error, url, restart]);
 
   const revealControls = useCallback(() => {
     if (leaveOpen || nextUpRef.current) return;
@@ -679,14 +748,16 @@ export default function Player() {
           return false;
         }
         allowAttachRef.current = true;
-        navigate(
-          `/player?type=series&id=${encodeURIComponent(String(epId))}&seriesId=${encodeURIComponent(
-            String(seriesId)
-          )}&season=${encodeURIComponent(String(season))}&url=${encodeURIComponent(epUrl)}&title=${encodeURIComponent(
-            epTitle
-          )}`,
-          { replace: true }
-        );
+        const qs = new URLSearchParams({
+          type: 'series',
+          id: String(epId),
+          seriesId: String(seriesId),
+          season: String(season),
+          url: epUrl,
+          title: epTitle,
+        });
+        if (image) qs.set('image', image);
+        navigate(`/player?${qs.toString()}`, { replace: true });
       } finally {
         window.setTimeout(() => {
           if (gen === navGenRef.current) suppressSuspendRef.current = false;
@@ -763,14 +834,16 @@ export default function Player() {
           return false;
         }
         allowAttachRef.current = true;
-        navigate(
-          `/player?type=series&id=${encodeURIComponent(String(epId))}&seriesId=${encodeURIComponent(
-            String(seriesId)
-          )}&season=${encodeURIComponent(String(season))}&url=${encodeURIComponent(epUrl)}&title=${encodeURIComponent(
-            epTitle
-          )}`,
-          { replace: true }
-        );
+        const qs = new URLSearchParams({
+          type: 'series',
+          id: String(epId),
+          seriesId: String(seriesId),
+          season: String(season),
+          url: epUrl,
+          title: epTitle,
+        });
+        if (image) qs.set('image', image);
+        navigate(`/player?${qs.toString()}`, { replace: true });
       } finally {
         window.setTimeout(() => {
           if (gen === navGenRef.current) suppressSuspendRef.current = false;
@@ -1715,7 +1788,7 @@ export default function Player() {
           type,
           id,
           title: title || '',
-          image: '',
+          image: image || '',
           // Keep the RAW (pre-proxy) URL so Home's resume can rebuild it.
           url: url || '',
           position: Math.floor(video.currentTime || 0),
@@ -1878,7 +1951,7 @@ export default function Player() {
     const formatIssue = errorCode === 4 || unsupportedContainer;
     const signalIssue = isLive && !formatIssue;
     return (
-      <div className="player-screen">
+      <div className="player-screen" ref={screenRef}>
         <div style={{ color: 'var(--text)', padding: '0 24px', textAlign: 'center', maxWidth: 640, margin: '0 auto' }}>
           {formatIssue
             ? t('player.formatError')
@@ -1926,6 +1999,7 @@ export default function Player() {
 
   return (
     <div
+      ref={screenRef}
       className={`player-screen${desktopPointer ? ' player-screen--desktop' : ''}`}
       onClick={() => {
         if (leaveOpen || nextUp) return;

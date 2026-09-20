@@ -42,6 +42,11 @@ let publishedConfig = {
 let catalogPromise = null;
 let cachedCatalog = null;
 
+export function clearExclusiveCatalogCache() {
+  cachedCatalog = null;
+  catalogPromise = null;
+}
+
 function normalizeHeaders(hdrs) {
   const out = { referer: '', origin: '', user_agent: '' };
   if (!hdrs) return out;

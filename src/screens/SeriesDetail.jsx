@@ -79,11 +79,17 @@ export default function SeriesDetail() {
       [meta?.name, `T${activeSeason}`, epNum].filter(Boolean).join(' · ') ||
       meta?.name ||
       String(ep?.id || '');
-    navigate(
-      `/player?type=series&id=${ep?.id}&seriesId=${id}&season=${encodeURIComponent(
-        String(activeSeason || '')
-      )}&url=${encodeURIComponent(url)}&title=${encodeURIComponent(title)}`
-    );
+    const cover = meta?.cover_big || meta?.cover || '';
+    const qs = new URLSearchParams({
+      type: 'series',
+      id: String(ep?.id || ''),
+      seriesId: String(id),
+      season: String(activeSeason || ''),
+      url,
+      title,
+    });
+    if (cover) qs.set('image', cover);
+    navigate(`/player?${qs.toString()}`);
   };
 
   const play = (ep) => {

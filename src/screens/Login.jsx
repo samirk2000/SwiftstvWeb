@@ -5,12 +5,39 @@ import { tryRestoreSession } from '../lib/xtream.js';
 import { t, getLang } from '../lib/i18n.js';
 import { useSession } from '../context/SessionContext.jsx';
 import { serverInfoLabel } from '../lib/accountText.js';
-import { setFocused, getTvFocus, openIme, isImeGuarded, markImeOpening, clearImeGuard } from '../components/Focusable.jsx';
-import { getAccount } from '../lib/session.js';
+import {
+  setFocused,
+  getTvFocus,
+  openIme,
+  isImeGuarded,
+  markImeOpening,
+  clearImeGuard,
+  useFocusable,
+} from '../components/Focusable.jsx';
+import { getAccount, listAccounts } from '../lib/session.js';
 import BrandLogo from '../components/BrandLogo.jsx';
 
-// Login field chain for webOS D-pad: Usuario → Contraseña → Iniciar sesión.
-// Modes: default | add (?add=1) | edit (?edit=<accountId>)
+// Modes: picker (saved accounts) | form (user/pass). DNS is always failover —
+// the user never picks a server. Query: ?add=1 | ?edit=<accountId> | ?form=1
+
+function SavedAccountRow({ account, busyId, onPick }) {
+  const row = useFocusable(`login-acc-${account.id}`);
+  const switching = busyId === account.id;
+  return (
+    <button
+      type="button"
+      ref={row.ref}
+      tabIndex={row.tabIndex}
+      className={`login-account-row ${switching ? 'busy' : ''}`}
+      data-focusable="true"
+      disabled={Boolean(busyId)}
+      onClick={() => onPick(account)}
+    >
+      <span className="login-account-name">{account.label || account.username}</span>
+      {switching ? <span className="hint">{t('accounts.switching')}</span> : null}
+    </button>
+  );
+}
 
 export default function Login() {
   const navigate = useNavigate();
@@ -18,17 +45,24 @@ export default function Login() {
   const { loginSuccess } = useSession();
 
   const isAdd = params.get('add') === '1';
+  const forceForm = params.get('form') === '1';
   const editId = params.get('edit') || '';
   const isEdit = Boolean(editId);
 
+  const [phase, setPhase] = useState(() =>
+    isAdd || isEdit || forceForm ? 'form' : 'boot'
+  );
+  const [accounts, setAccounts] = useState(() => listAccounts());
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [status, setStatus] = useState({ text: '', kind: '' });
   const [busy, setBusy] = useState(false);
+  const [busyId, setBusyId] = useState('');
   const attemptRef = useRef(0);
   const userRef = useRef(null);
   const passRef = useRef(null);
   const submitRef = useRef(null);
+  const addBtn = useFocusable('login-add-account');
   const blurTimer = useRef(null);
   const imeOpenRef = useRef(false);
   const navLockRef = useRef(false);
@@ -45,7 +79,7 @@ export default function Login() {
 
   const openFieldIme = (el) => {
     if (!el || el.disabled) return;
-    navLockRef.current = true; // block blur restore while keyboard opens
+    navLockRef.current = true;
     imeOpenRef.current = true;
     markImeOpening(el, 800);
     clearBlurTimer();
@@ -55,7 +89,6 @@ export default function Login() {
     }, 850);
   };
 
-  // Mouse / remote click sometimes focuses without raising the IME — nudge it.
   const onFieldPointer = (el) => {
     if (!el || el.disabled) return;
     markImeOpening(el, 800);
@@ -81,13 +114,11 @@ export default function Login() {
   };
 
   const onFieldBlur = (el) => {
-    // webOS often fires a transient blur while raising the IME — ignore it.
     if (isImeGuarded(el) || navLockRef.current) return;
     clearBlurTimer();
     blurTimer.current = window.setTimeout(() => {
       blurTimer.current = null;
       if (isImeGuarded(el) || navLockRef.current) return;
-      // Still natively focused → IME is up; keep ring, don't fight it.
       if (document.activeElement === el) {
         imeOpenRef.current = true;
         setFocused(el, { native: false });
@@ -160,8 +191,6 @@ export default function Login() {
     const fields = fieldOrder();
     const current = fields[index];
 
-    // While the IME has the input focused, Backspace must delete characters —
-    // only the TV Back key (461) / Escape closes the keyboard.
     if (isBs && isLoginInput(current) && document.activeElement === current) {
       return;
     }
@@ -186,7 +215,6 @@ export default function Login() {
     }
 
     if (enter && current && isLoginInput(current)) {
-      // Already typing — don't re-openIme (second kick can dismiss webOS IME).
       if (document.activeElement === current) return;
       e.preventDefault();
       e.stopPropagation();
@@ -211,9 +239,35 @@ export default function Login() {
     if (!acc) return;
     setUsername(acc.username || '');
     setPassword(acc.password || '');
+    setPhase('form');
   }, [isEdit, editId]);
 
   useEffect(() => {
+    if (isAdd || isEdit || forceForm) {
+      setPhase('form');
+      return undefined;
+    }
+    let cancelled = false;
+    (async () => {
+      const res = await tryRestoreSession();
+      if (cancelled) return;
+      if (res && res.ok) {
+        loginSuccess(res);
+        navigate('/', { replace: true });
+        return;
+      }
+      const list = listAccounts();
+      setAccounts(list);
+      setPhase(list.length ? 'picker' : 'form');
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAdd, isEdit, forceForm]);
+
+  useEffect(() => {
+    if (phase !== 'form') return undefined;
     const kick = () => setFocused(userRef.current, { native: false });
     const t1 = window.setTimeout(kick, 40);
     const t2 = window.setTimeout(() => {
@@ -224,36 +278,85 @@ export default function Login() {
       window.clearTimeout(t2);
       clearBlurTimer();
     };
-  }, []);
+  }, [phase]);
 
   useEffect(() => {
-    if (isAdd || isEdit) return undefined;
-    let cancelled = false;
-    (async () => {
-      const res = await tryRestoreSession();
-      if (cancelled) return;
-      if (res && res.ok) {
-        loginSuccess(res);
-        navigate('/', { replace: true });
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isAdd, isEdit]);
+    if (phase !== 'picker') return undefined;
+    const first = document.querySelector('[data-focusable="true"].login-account-row');
+    const t1 = window.setTimeout(() => {
+      setFocused(first || addBtn.ref.current, { native: false });
+    }, 60);
+    return () => window.clearTimeout(t1);
+  }, [phase, accounts, addBtn.ref]);
+
+  const applyLoginResult = (result) => {
+    if (result.ok) {
+      loginSuccess(result);
+      setStatus({ text: t('login.success'), kind: 'ok' });
+      setTimeout(() => navigate('/', { replace: true }), 350);
+      return true;
+    }
+    if (result.reason === 'empty') {
+      setStatus({ text: t('login.empty'), kind: 'err' });
+    } else if (result.reason === 'account') {
+      setStatus({ text: serverInfoLabel(result.status), kind: 'err' });
+    } else {
+      // eslint-disable-next-line no-console
+      console.warn('[login] all servers failed', result.results);
+      const blocked = (result.results || []).filter((r) => r.httpStatus === 403).length;
+      const text =
+        blocked && blocked === (result.results || []).length
+          ? t('login.blocked')
+          : t('login.failed');
+      setStatus({ text, kind: 'err' });
+    }
+    return false;
+  };
+
+  const pickAccount = async (account) => {
+    if (!account || busyId || busy) return;
+    setStatus({ text: t('login.findingServer'), kind: '' });
+    setBusyId(account.id);
+    const my = ++attemptRef.current;
+    const result = await loginWithFailover(account.username, account.password);
+    if (my !== attemptRef.current) return;
+    setBusyId('');
+    if (!applyLoginResult(result)) {
+      setFocused(
+        document.querySelector(`[data-focus-key="login-acc-${account.id}"]`) ||
+          document.querySelector('.login-account-row'),
+        { native: false }
+      );
+    }
+  };
 
   const leaveLogin = () => {
-    if (isAdd || isEdit) navigate('/accounts');
-    else navigate(-1);
+    if (isAdd || isEdit) {
+      navigate('/accounts');
+      return;
+    }
+    const list = listAccounts();
+    if (list.length && phase === 'form') {
+      setAccounts(list);
+      setStatus({ text: '', kind: '' });
+      setPhase('picker');
+      return;
+    }
+    navigate(-1);
+  };
+
+  const openNewAccountForm = () => {
+    setUsername('');
+    setPassword('');
+    setStatus({ text: '', kind: '' });
+    setPhase('form');
   };
 
   const doLogin = async () => {
-    if (busy) return;
+    if (busy || busyId) return;
     const u = username.trim();
     const p = password;
     if (!u || !p) {
-      // OK on an empty field should open the keyboard — not look like a hard error.
       const target = u ? passRef.current : userRef.current;
       setStatus({ text: t('login.pressOkType'), kind: '' });
       openFieldIme(target);
@@ -267,32 +370,73 @@ export default function Login() {
     if (my !== attemptRef.current) return;
     setBusy(false);
 
-    if (result.ok) {
-      loginSuccess(result);
-      setStatus({ text: t('login.success'), kind: 'ok' });
-      setTimeout(() => navigate('/', { replace: true }), 350);
-    } else if (result.reason === 'empty') {
-      setStatus({ text: t('login.empty'), kind: 'err' });
-    } else if (result.reason === 'account') {
-      setStatus({ text: serverInfoLabel(result.status), kind: 'err' });
-    } else {
-      // eslint-disable-next-line no-console
-      console.warn('[login] all servers failed', result.results);
-      const blocked = (result.results || []).filter((r) => r.httpStatus === 403).length;
-      const text =
-        blocked && blocked === (result.results || []).length
-          ? t('login.blocked')
-          : t('login.failed');
-      setStatus({ text, kind: 'err' });
+    if (!applyLoginResult(result)) {
       setFocused(submitRef.current, { native: false });
     }
   };
 
   const titleHint = isEdit
     ? t('accounts.editHint')
-    : isAdd
-      ? t('accounts.addHint')
+    : isAdd || phase === 'form'
+      ? accounts.length || isAdd
+        ? t('accounts.addHint')
+        : t('login.typeHint')
       : t('login.typeHint');
+
+  if (phase === 'boot') {
+    return (
+      <div className="login-wrap">
+        <div className="login-card">
+          <div className="login-brand">
+            <BrandLogo size="lg" />
+            <h1 className="login-brand-name">{t('appName')}</h1>
+          </div>
+          <p className="login-status">{t('login.findingServer')}</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (phase === 'picker') {
+    return (
+      <div className="login-wrap">
+        <div className="login-card login-picker" data-focus-scope="trap">
+          <div className="login-brand">
+            <BrandLogo size="lg" />
+            <h1 className="login-brand-name">{t('appName')}</h1>
+            <p className="login-brand-tag">{t('brandTagline')}</p>
+          </div>
+          <p className="login-hint">{t('accounts.pickHint')}</p>
+          <div className="login-account-list">
+            {accounts.map((a) => (
+              <SavedAccountRow
+                key={a.id}
+                account={a}
+                busyId={busyId}
+                onPick={pickAccount}
+              />
+            ))}
+          </div>
+          <div className="login-actions">
+            <button
+              type="button"
+              ref={addBtn.ref}
+              tabIndex={addBtn.tabIndex}
+              className="btn-primary"
+              data-focusable="true"
+              disabled={Boolean(busyId)}
+              onClick={openNewAccountForm}
+            >
+              + {t('accounts.add')}
+            </button>
+          </div>
+          {status.text ? (
+            <p className={`login-status ${status.kind}`}>{status.text}</p>
+          ) : null}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="login-wrap">
@@ -301,7 +445,6 @@ export default function Login() {
         data-focus-scope="trap"
         onSubmit={(e) => {
           e.preventDefault();
-          // Enter/OK on an empty field means "open keyboard", not "login failed".
           const painted = getTvFocus();
           if (painted === passRef.current && !password) {
             openFieldIme(passRef.current);
@@ -314,7 +457,7 @@ export default function Login() {
           doLogin();
         }}
       >
-        {(isAdd || isEdit) && (
+        {(isAdd || isEdit || accounts.length > 0) && (
           <button
             type="button"
             tabIndex={0}

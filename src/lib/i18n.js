@@ -161,7 +161,8 @@ export const STRINGS = {
     },
     accounts: {
       title: 'Cuentas',
-      hint: 'Cambia entre usuarios o servidores guardados. OK para usar una cuenta.',
+      hint: 'Cambia o agrega cuentas. Solo usuario y contraseña; el servidor se elige solo.',
+      pickHint: 'Elige una cuenta guardada o agrega una nueva.',
       add: 'Agregar cuenta',
       edit: 'Editar',
       delete: 'Eliminar',
@@ -171,7 +172,7 @@ export const STRINGS = {
       active: 'Activa',
       switching: 'Cambiando de cuenta…',
       switchFailed: 'No se pudo iniciar con esa cuenta. Edítala o agrégala de nuevo.',
-      addHint: 'Inicia sesión con la nueva cuenta. La actual se mantiene si cancelas.',
+      addHint: 'Ingresa usuario y contraseña. El servidor se busca automáticamente.',
       editHint: 'Actualiza usuario/contraseña y vuelve a iniciar sesión.',
     },
     parental: {
@@ -380,7 +381,8 @@ export const STRINGS = {
     },
     accounts: {
       title: 'Accounts',
-      hint: 'Switch between saved users or servers. Press OK to use an account.',
+      hint: 'Switch or add accounts. Username and password only — the server is chosen automatically.',
+      pickHint: 'Pick a saved account or add a new one.',
       add: 'Add account',
       edit: 'Edit',
       delete: 'Delete',
@@ -390,7 +392,7 @@ export const STRINGS = {
       active: 'Active',
       switching: 'Switching account…',
       switchFailed: 'Could not sign in with that account. Edit it or add it again.',
-      addHint: 'Sign in with the new account. Your current one stays if you cancel.',
+      addHint: 'Enter username and password. The server is found automatically.',
       editHint: 'Update username/password and sign in again.',
     },
     parental: {

@@ -1,4 +1,5 @@
 import { isAdultContent, isAdultTitle } from './adult.js';
+import { purgeParentalForAccount } from './parental.js';
 
 // Session + local persistence (localStorage). Mirrors the Roku registry:
 // WorkingUrl / Username / Password, plus continue-watching and favorites.
@@ -7,9 +8,13 @@ import { isAdultContent, isAdultTitle } from './adult.js';
 const KEYS = {
   session: 'swiftstv.session.v1',
   accounts: 'swiftstv.accounts.v1',
-  continueWatching: 'swiftstv.continueWatching.v1',
-  favorites: 'swiftstv.favorites.v1',
-  recentLive: 'swiftstv.recentLive.v1',
+  // v2 = { [accountId]: Item[] }. Legacy v1 flat arrays are migrated once.
+  continueWatching: 'swiftstv.continueWatching.v2',
+  continueWatchingLegacy: 'swiftstv.continueWatching.v1',
+  favorites: 'swiftstv.favorites.v2',
+  favoritesLegacy: 'swiftstv.favorites.v1',
+  recentLive: 'swiftstv.recentLive.v2',
+  recentLiveLegacy: 'swiftstv.recentLive.v1',
   language: 'swiftstv.language.v1',
   hlsOnly: 'swiftstv.hlsOnlyChannels.v1',
 };
@@ -142,6 +147,77 @@ export function getAccount(id) {
 
 export function removeAccount(id) {
   writeAccounts(listAccounts().filter((a) => a.id !== id));
+  purgeAccountPersonalData(id);
+  purgeParentalForAccount(id);
+}
+
+/** Drop favorites / continue / recent for a removed account. */
+function purgeAccountPersonalData(accountId) {
+  const id = String(accountId || '').trim().toLowerCase();
+  if (!id) return;
+  for (const key of [KEYS.continueWatching, KEYS.favorites, KEYS.recentLive]) {
+    const store = readAccountStore(key);
+    if (!store[id]) continue;
+    const next = { ...store };
+    delete next[id];
+    write(key, next);
+  }
+}
+
+/**
+ * Active account id for personal lists. Empty when logged out —
+ * readers must return [] so another user's rails never leak.
+ */
+export function activeAccountId() {
+  const s = getSession();
+  if (!s?.username) return '';
+  return accountIdFor(s.baseUrl, s.username);
+}
+
+/** Read { [accountId]: list }. Migrates legacy flat arrays into the active account. */
+function readAccountStore(key, legacyKey) {
+  let store = read(key, null);
+  if (Array.isArray(store)) {
+    const aid = activeAccountId();
+    store = aid ? { [aid]: store } : {};
+    write(key, store);
+  }
+  if (!store || typeof store !== 'object' || Array.isArray(store)) {
+    store = {};
+  }
+
+  // One-shot: move old v1 flat list into the currently logged-in account only.
+  if (legacyKey) {
+    const legacy = read(legacyKey, null);
+    if (Array.isArray(legacy) && legacy.length) {
+      const aid = activeAccountId();
+      if (aid && !store[aid]?.length) {
+        store = { ...store, [aid]: legacy };
+        write(key, store);
+      }
+      try {
+        localStorage.removeItem(legacyKey);
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+  return store;
+}
+
+function readAccountList(key, legacyKey) {
+  const aid = activeAccountId();
+  if (!aid) return [];
+  const store = readAccountStore(key, legacyKey);
+  const list = store[aid];
+  return Array.isArray(list) ? list : [];
+}
+
+function writeAccountList(key, list) {
+  const aid = activeAccountId();
+  if (!aid) return;
+  const store = readAccountStore(key);
+  write(key, { ...store, [aid]: list });
 }
 
 export function updateAccount(id, patch) {
@@ -171,31 +247,35 @@ export function ensureActiveAccountListed() {
 }
 
 export function getContinueWatching() {
-  const list = read(KEYS.continueWatching, []);
+  const list = readAccountList(KEYS.continueWatching, KEYS.continueWatchingLegacy);
   // Drop adult / live that may have been stored before the filters existed.
   // Live history lives in recentLive, not Home's "Seguir viendo".
-  const clean = (Array.isArray(list) ? list : []).filter(
+  const clean = list.filter(
     (x) =>
       x?.id &&
       x.type !== 'live' &&
       x.type !== 'catchup' &&
       !isAdultContent(x.title, x.categoryName),
   );
-  if (clean.length !== (list || []).length) write(KEYS.continueWatching, clean);
+  if (clean.length !== list.length) writeAccountList(KEYS.continueWatching, clean);
   return clean;
 }
 
 export function updateContinueWatching(item) {
   // Live → Recientes (LiveGuide). Adult → never on Home rails.
   if (!item || item.type === 'live' || item.type === 'catchup') return;
+  if (!activeAccountId()) return;
   if (isAdultContent(item.title, item.categoryName) || isAdultTitle(item.title)) return;
   let list = getContinueWatching();
-  list = list.filter((x) => !(x.type === item.type && x.id === item.id));
+  const prev = list.find((x) => x.type === item.type && String(x.id) === String(item.id));
+  list = list.filter((x) => !(x.type === item.type && String(x.id) === String(item.id)));
+  // Keep a prior poster if this update forgot/omitted image (Player timeupdate).
+  const image = item.image || prev?.image || '';
   list.unshift({
     type: item.type,
     id: item.id,
     title: item.title,
-    image: item.image,
+    image,
     url: item.url || '',
     baseUrl: item.baseUrl,
     position: item.position || 0,
@@ -206,17 +286,16 @@ export function updateContinueWatching(item) {
     playedAt: Date.now(),
   });
   if (list.length > 20) list = list.slice(0, 20);
-  write(KEYS.continueWatching, list);
+  writeAccountList(KEYS.continueWatching, list);
 }
 
 export function removeContinueWatching(type, id) {
   const list = getContinueWatching().filter((x) => !(x.type === type && x.id === id));
-  write(KEYS.continueWatching, list);
+  writeAccountList(KEYS.continueWatching, list);
 }
 
 export function getFavorites() {
-  const list = read(KEYS.favorites, []);
-  return Array.isArray(list) ? list : [];
+  return readAccountList(KEYS.favorites, KEYS.favoritesLegacy);
 }
 
 /** Favorites for one section (`live` | `vod` | `series`), adult-safe for Home rails. */
@@ -231,6 +310,7 @@ export function isFavorite(type, id) {
 }
 
 export function toggleFavorite(item) {
+  if (!item || !activeAccountId()) return false;
   let list = getFavorites();
   const exists = list.some((x) => x.type === item.type && String(x.id) === String(item.id));
   if (exists) {
@@ -247,24 +327,25 @@ export function toggleFavorite(item) {
     });
     if (list.length > 100) list = list.slice(0, 100);
   }
-  write(KEYS.favorites, list);
+  writeAccountList(KEYS.favorites, list);
   return !exists;
 }
 
 const RECENT_LIVE_MAX = 24;
 
 export function getRecentLive() {
-  const list = read(KEYS.recentLive, []);
-  const clean = (Array.isArray(list) ? list : []).filter(
+  const list = readAccountList(KEYS.recentLive, KEYS.recentLiveLegacy);
+  const clean = list.filter(
     (x) => x?.id && !isAdultContent(x.title, x.categoryName),
   );
-  if (clean.length !== (list || []).length) write(KEYS.recentLive, clean);
+  if (clean.length !== list.length) writeAccountList(KEYS.recentLive, clean);
   return clean;
 }
 
 /** Record a live channel as recently watched. Adult titles/categories are ignored. */
 export function pushRecentLive({ id, title, image, categoryId, categoryName }) {
   if (!id || isAdultContent(title, categoryName)) return;
+  if (!activeAccountId()) return;
   let list = getRecentLive().filter((x) => String(x.id) !== String(id));
   list.unshift({
     id: String(id),
@@ -275,7 +356,7 @@ export function pushRecentLive({ id, title, image, categoryId, categoryName }) {
     playedAt: Date.now(),
   });
   if (list.length > RECENT_LIVE_MAX) list = list.slice(0, RECENT_LIVE_MAX);
-  write(KEYS.recentLive, list);
+  writeAccountList(KEYS.recentLive, list);
 }
 
 export function getLanguage() {

@@ -1,15 +1,20 @@
 import { isAdultCategory, isAdultTitle } from './adult.js';
+import { activeAccountId } from './session.js';
 
 // Parental gate by PIN. Two layers:
 //  1) Optional profile + blocked category_ids (Settings / Control parental screen).
 //  2) Adult content PIN (Android ParentalGate parity): ALWAYS required to open
 //     adult/XXX categories or play adult titles. First visit creates a 4-digit
 //     PIN; master unlock is 0000 (never shown in UI — support only).
+//
+// All of the above is scoped per Xtream account so switching users never
+// reuses another account's PIN / blocked categories.
 
 const KEYS = {
-  profiles: 'swiftstv.parental.profiles.v1',
-  active: 'swiftstv.parental.active.v1',
-  adultPin: 'swiftstv.parentalPin.v1',
+  profiles: 'swiftstv.parental.profiles.v2',
+  profilesLegacy: 'swiftstv.parental.profiles.v1',
+  adultPin: 'swiftstv.parentalPin.v2',
+  adultPinLegacy: 'swiftstv.parentalPin.v1',
 };
 
 /** Internal only — never surface in Settings / dialogs. */
@@ -40,22 +45,85 @@ function write(key, value) {
   }
 }
 
+function accountKey() {
+  return activeAccountId() || '';
+}
+
+function readAccountMap(key, legacyKey) {
+  let store = read(key, null);
+  if (!store || typeof store !== 'object' || Array.isArray(store)) store = {};
+
+  if (legacyKey) {
+    const legacy = read(legacyKey, null);
+    if (legacy != null && legacy !== '') {
+      const aid = accountKey();
+      if (aid && store[aid] == null) {
+        store = { ...store, [aid]: legacy };
+        write(key, store);
+      }
+      try {
+        localStorage.removeItem(legacyKey);
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+  return store;
+}
+
+function getAccountValue(key, legacyKey, fallback) {
+  const aid = accountKey();
+  if (!aid) return fallback;
+  const store = readAccountMap(key, legacyKey);
+  return store[aid] !== undefined ? store[aid] : fallback;
+}
+
+function setAccountValue(key, value) {
+  const aid = accountKey();
+  if (!aid) return;
+  const store = readAccountMap(key);
+  write(key, { ...store, [aid]: value });
+}
+
+function clearAccountValue(key) {
+  const aid = accountKey();
+  if (!aid) return;
+  const store = readAccountMap(key);
+  if (store[aid] === undefined) return;
+  const next = { ...store };
+  delete next[aid];
+  write(key, next);
+}
+
+/** Drop parental data for a removed multi-account entry. */
+export function purgeParentalForAccount(accountId) {
+  const id = String(accountId || '')
+    .trim()
+    .toLowerCase();
+  if (!id) return;
+  for (const key of [KEYS.profiles, KEYS.adultPin]) {
+    const store = readAccountMap(key);
+    if (store[id] === undefined) continue;
+    const next = { ...store };
+    delete next[id];
+    write(key, next);
+  }
+}
+
 // ---- Adult PIN (required for XXX) ------------------------------------------
 
 export function getAdultPin() {
-  const v = read(KEYS.adultPin, null);
+  const v = getAccountValue(KEYS.adultPin, KEYS.adultPinLegacy, null);
   if (v == null || v === '') return null;
   return String(v);
 }
 
 export function saveAdultPin(pin) {
-  write(KEYS.adultPin, String(pin || ''));
+  setAccountValue(KEYS.adultPin, String(pin || ''));
 }
 
 export function clearAdultPin() {
-  try {
-    localStorage.removeItem(KEYS.adultPin);
-  } catch {}
+  clearAccountValue(KEYS.adultPin);
 }
 
 export function hasAdultPin() {
@@ -104,7 +172,8 @@ const ADULT_UNLOCK_KEY = 'swiftstv.adultUnlockedCat.v1';
 
 export function unlockAdultBrowse(categoryId) {
   try {
-    sessionStorage.setItem(ADULT_UNLOCK_KEY, String(categoryId ?? ''));
+    const aid = accountKey();
+    sessionStorage.setItem(ADULT_UNLOCK_KEY, JSON.stringify({ aid, cat: String(categoryId ?? '') }));
   } catch {
     /* ignore */
   }
@@ -118,12 +187,23 @@ export function clearAdultBrowseUnlock() {
   }
 }
 
-export function getAdultBrowseUnlock() {
+function readAdultBrowseUnlock() {
   try {
-    return sessionStorage.getItem(ADULT_UNLOCK_KEY);
+    const raw = sessionStorage.getItem(ADULT_UNLOCK_KEY);
+    if (!raw) return null;
+    // Legacy: plain category id string
+    if (raw[0] !== '{') return { aid: accountKey(), cat: raw };
+    return JSON.parse(raw);
   } catch {
     return null;
   }
+}
+
+export function getAdultBrowseUnlock() {
+  const u = readAdultBrowseUnlock();
+  if (!u) return null;
+  if (u.aid && u.aid !== accountKey()) return null;
+  return u.cat ?? null;
 }
 
 /** True when this adult category was unlocked with PIN this session. */
@@ -141,11 +221,18 @@ export function hasAdultBrowseUnlock() {
 // ---- Profile / blocked categories (optional Settings UI) -------------------
 
 export function getParentalState() {
-  return read(KEYS.profiles, { profiles: [], active: '' });
+  const v = getAccountValue(KEYS.profiles, KEYS.profilesLegacy, null);
+  if (v && typeof v === 'object' && !Array.isArray(v)) {
+    return {
+      profiles: Array.isArray(v.profiles) ? v.profiles : [],
+      active: String(v.active || ''),
+    };
+  }
+  return { profiles: [], active: '' };
 }
 
 export function saveParentalState(state) {
-  write(KEYS.profiles, {
+  setAccountValue(KEYS.profiles, {
     profiles: Array.isArray(state?.profiles) ? state.profiles : [],
     active: String(state?.active || ''),
   });
