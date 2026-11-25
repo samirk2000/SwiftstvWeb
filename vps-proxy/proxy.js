@@ -153,6 +153,82 @@ function pipeContinuousUpstream(res2, upRes) {
 
 app.disable('x-powered-by');
 
+// --- Short in-memory cache for Xtream player_api LIST actions ---------------
+// Categories / streams / vod / series lists are big JSON (up to ~30 MB) and
+// change rarely. Cache them for a few minutes, stored gzip-compressed.
+// Never cached: get_user_info / auth (no action), EPG, info calls, streams.
+// Key = panel host + username + sha256(password) + action + category_id, so a
+// wrong password never gets someone else's cached list.
+const zlib = require('zlib');
+const crypto = require('crypto');
+const LIST_CACHE_TTL_MS = Number(process.env.LIST_CACHE_TTL_MS || 180000); // 3 min
+const LIST_CACHE_MAX_BYTES = Number(process.env.LIST_CACHE_MAX_BYTES || 100 * 1024 * 1024); // gz bytes
+const LIST_CACHE_MAX_RAW = 80 * 1024 * 1024; // don't keep bodies larger than this
+const LIST_ACTIONS = new Set([
+  'get_live_categories', 'get_vod_categories', 'get_series_categories',
+  'get_live_streams', 'get_vod_streams', 'get_series',
+]);
+const listCache = new Map(); // key -> { gz, size, ct, exp }
+let listCacheBytes = 0;
+
+function listCacheKey(t) {
+  if (!/\/player_api\.php$/i.test(t.pathname)) return null;
+  const q = t.searchParams;
+  const action = q.get('action') || '';
+  if (!LIST_ACTIONS.has(action)) return null;
+  const user = q.get('username') || '';
+  const pass = q.get('password') || '';
+  if (!user || !pass) return null;
+  const ph = crypto.createHash('sha256').update(pass).digest('hex').slice(0, 16);
+  return [t.host.toLowerCase(), user, ph, action, q.get('category_id') || ''].join('|');
+}
+function listCacheGet(key) {
+  const e = listCache.get(key);
+  if (!e) return null;
+  if (e.exp < Date.now()) { listCache.delete(key); listCacheBytes -= e.size; return null; }
+  listCache.delete(key); listCache.set(key, e); // LRU bump
+  return e;
+}
+function listCachePut(key, gz, ct) {
+  const old = listCache.get(key);
+  if (old) { listCache.delete(key); listCacheBytes -= old.size; }
+  if (gz.length > LIST_CACHE_MAX_BYTES / 4) return;
+  listCache.set(key, { gz, size: gz.length, ct, exp: Date.now() + LIST_CACHE_TTL_MS });
+  listCacheBytes += gz.length;
+  for (const [k, e] of listCache) {
+    if (listCacheBytes <= LIST_CACHE_MAX_BYTES) break;
+    listCache.delete(k); listCacheBytes -= e.size;
+  }
+}
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, e] of listCache) if (e.exp < now) { listCache.delete(k); listCacheBytes -= e.size; }
+}, 60000).unref();
+
+function sendCachedList(req, res, e, hit) {
+  const base = { ...ALLOW_CORS, 'Content-Type': e.ct, 'X-Cache': hit, Vary: 'Accept-Encoding' };
+  if (/\bgzip\b/i.test(req.get('accept-encoding') || '')) {
+    res.writeHead(200, { ...base, 'Content-Encoding': 'gzip', 'Content-Length': e.gz.length });
+    res.end(e.gz);
+    return;
+  }
+  zlib.gunzip(e.gz, (err, raw) => {
+    if (err) { res.writeHead(502, { 'Content-Type': 'application/json', ...ALLOW_CORS }); res.end('{"error":"cache"}'); return; }
+    res.writeHead(200, { ...base, 'Content-Length': raw.length });
+    res.end(raw);
+  });
+}
+
+// Upstream list responses that must NOT be cached (errors / auth failures).
+function cacheableListBody(status, ct, buf) {
+  if (status !== 200 || !/json/i.test(ct) || buf.length < 2) return false;
+  const head = buf.subarray(0, 300).toString('utf8').trimStart();
+  if (head[0] !== '[' && head[0] !== '{') return false;
+  if (/"auth"\s*:\s*0|"error"|<html/i.test(head)) return false;
+  return true;
+}
+
+
 // --- CORS preflight ------------------------------------------------------
 app.options('*', (req, res) => {
   res.writeHead(204, ALLOW_CORS);
@@ -162,7 +238,7 @@ app.options('*', (req, res) => {
 // --- Health / info -------------------------------------------------------
 app.get('/healthz', (req, res) => {
   res.setHeader('Content-Type', 'application/json');
-  res.end(JSON.stringify({ ok: true, service: 'swiftstv-stream-proxy', time: Date.now() }));
+  res.end(JSON.stringify({ ok: true, service: 'swiftstv-stream-proxy', time: Date.now(), listCache: { entries: listCache.size, bytes: listCacheBytes } }));
 });
 
 // --- The stream proxy ----------------------------------------------------
@@ -325,6 +401,42 @@ app.get('/stream', (req, res) => {
   if (cookie && req.get('x-forward-cookies')) upstreamHeaders.Cookie = cookie;
   const extraRef = req.get('referer');
   if (extraRef) upstreamHeaders.Referer = extraRef;
+
+  // Cached player_api list actions (no Range on these).
+  const cacheKey = range ? null : listCacheKey(t);
+  if (cacheKey) {
+    const hitEntry = listCacheGet(cacheKey);
+    if (hitEntry) return sendCachedList(req, res, hitEntry, 'HIT');
+    upstreamFetch(t.toString(), upstreamHeaders, 0, { cancelled: false, cancel: () => {} }, (err, upRes) => {
+      if (err) {
+        res.writeHead(502, { 'Content-Type': 'application/json', ...ALLOW_CORS });
+        res.end(JSON.stringify({ error: 'upstream', detail: String(err && err.message || err) }));
+        return;
+      }
+      const status = upRes.statusCode || 200;
+      const ct = String(upRes.headers['content-type'] || 'application/json');
+      // Stream straight to the client (first byte immediately, so slow panels
+      // never trip nginx's read timeout) and keep a copy for the cache.
+      const keep = status === 200 && /json/i.test(ct);
+      const chunks = [];
+      let kept = 0;
+      res.writeHead(status, { ...ALLOW_CORS, 'Content-Type': ct, 'X-Cache': 'MISS' });
+      upRes.on('data', (c) => {
+        if (keep && kept <= LIST_CACHE_MAX_RAW) { chunks.push(c); kept += c.length; }
+      });
+      upRes.pipe(res); // pipe handles backpressure and ends res
+      upRes.on('error', () => res.destroy());
+      res.on('close', () => { if (!upRes.complete) upRes.destroy(); });
+      upRes.on('end', () => {
+        if (!keep || kept > LIST_CACHE_MAX_RAW || !upRes.complete) return;
+        const buf = Buffer.concat(chunks);
+        if (cacheableListBody(status, ct, buf)) {
+          zlib.gzip(buf, { level: 6 }, (zerr, gz) => { if (!zerr) listCachePut(cacheKey, gz, ct); });
+        }
+      });
+    });
+    return;
+  }
 
   // `handle` lets the upstreamFetch redirect chain be aborted at ANY moment
   // (including mid-connect), even before it reaches a final stream. `job.cancel`

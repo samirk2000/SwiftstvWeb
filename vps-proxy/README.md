@@ -99,3 +99,22 @@ that 403 those clouds will now stream.
 - Nginx MUST have `proxy_buffering off` for large streaming (already set).
 - To run a second proxy (different port/domain), duplicate the app in
   `ecosystem.config.js` with another `PORT` and add a matching Nginx `location`.
+
+## Short cache for player_api lists (Nov 2026)
+
+`proxy.js` keeps an in-memory cache (gzip-compressed) for these actions only:
+`get_live_categories`, `get_vod_categories`, `get_series_categories`,
+`get_live_streams`, `get_vod_streams`, `get_series`.
+
+- TTL `LIST_CACHE_TTL_MS` (default 180000 = 3 min), size cap
+  `LIST_CACHE_MAX_BYTES` (default 100 MB of gzip data, LRU eviction).
+- Key = panel host + username + sha256(password) + action + category_id.
+- Never cached: `get_user_info`/auth (no action), EPG, `get_*_info`, streams,
+  any non-200 / non-JSON / `auth:0` response.
+- Response header `X-Cache: HIT|MISS`; `/healthz` shows entries and bytes.
+- Misses stream straight through (no waiting for the whole body).
+
+> **Note:** the VPS actually runs an older proxy (from commit 78bd494, Aug 2026)
+> plus the list cache. That exact file is `proxy.deployed.js`. `proxy.js`
+> (continuous live fan-out, 45 s upstream timeout, etc.) has **not** been
+> deployed to the VPS yet.
