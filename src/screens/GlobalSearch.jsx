@@ -7,6 +7,7 @@ import { normalizeSearch } from '../lib/searchText.js';
 import { liveStreamTsUrl } from '../lib/xtream.js';
 import { setLiveZapList, setLastLiveChannel } from '../lib/liveZap.js';
 import { isAdultContent } from '../lib/adult.js';
+import { isCategoryLocked } from '../lib/parental.js';
 import { useFocusable } from '../components/Focusable.jsx';
 
 const LIMIT = 24;
@@ -52,13 +53,18 @@ export default function GlobalSearch() {
       for (const k of Object.keys(next)) if (next[k] !== 'ready') next[k] = 'loading';
       return next;
     });
-    loadCatalogProgressive(srv, (part, items, err) => {
+    const stop = loadCatalogProgressive(srv, (part, items, err, meta) => {
       if (cancelled) return;
-      if (items) setCatalog((prev) => ({ ...prev, [part]: items }));
-      setParts((prev) => ({ ...prev, [part]: err ? 'error' : 'ready' }));
+      if (items) setCatalog((prev) => (prev[part] === items ? prev : { ...prev, [part]: items }));
+      setParts((prev) => {
+        // A failed refresh keeps the results we already have.
+        const next = err ? (prev[part] === 'ready' || prev[part] === 'partial' ? prev[part] : 'error') : meta?.partial ? 'partial' : 'ready';
+        return prev[part] === next ? prev : { ...prev, [part]: next };
+      });
     });
     return () => {
       cancelled = true;
+      stop();
     };
   }, [navigate, reloadTick]);
 
@@ -72,21 +78,29 @@ export default function GlobalSearch() {
   const results = useMemo(() => {
     if (q.length < 2) return { live: [], vod: [], series: [] };
     const needle = normalizeSearch(q);
+    // Titles that START with the query (or a word of it) rank first.
     const pick = (list) => {
-      const out = [];
+      const first = [];
+      const rest = [];
       for (const it of list || []) {
-        if (out.length >= LIMIT) break;
+        if (first.length >= LIMIT) break;
         const hay = it.n !== undefined ? it.n : normalizeSearch(it.name);
-        if (hay.includes(needle) && !isAdultContent(it.name, it.category_name || '')) out.push(it);
+        const at = hay.indexOf(needle);
+        if (at < 0) continue;
+        if (it.a === 1 || isAdultContent(it.name, it.category_name || '')) continue;
+        if (it.category_id !== undefined && isCategoryLocked(it.category_id)) continue;
+        if (at === 0 || hay[at - 1] === ' ') first.push(it);
+        else if (rest.length < LIMIT) rest.push(it);
       }
-      return out;
+      return first.concat(rest).slice(0, LIMIT);
     };
     return { live: pick(catalog.live), vod: pick(catalog.vod), series: pick(catalog.series) };
   }, [catalog, q]);
 
   const loadingParts = Object.keys(parts).filter((k) => parts[k] === 'loading');
+  const buildingParts = Object.keys(parts).filter((k) => parts[k] === 'partial');
   const errorParts = Object.keys(parts).filter((k) => parts[k] === 'error');
-  const anyReady = Object.values(parts).some((v) => v === 'ready');
+  const anyReady = Object.values(parts).some((v) => v === 'ready' || v === 'partial');
   const loading = !anyReady && loadingParts.length > 0;
   const total = results.live.length + results.vod.length + results.series.length;
 
@@ -122,6 +136,7 @@ export default function GlobalSearch() {
       <input
         tabIndex={0}
         className="search-box"
+        data-tv-autofocus
         placeholder={t('search.placeholder')}
         value={query}
         autoFocus
@@ -132,6 +147,11 @@ export default function GlobalSearch() {
         <p className="hint search-status">
           <span className="spinner spinner--inline" />{' '}
           {t('search.loadingPart', loadingParts.map((p) => t(PART_LABEL[p])).join(', '))}
+        </p>
+      ) : null}
+      {buildingParts.length > 0 ? (
+        <p className="hint search-status">
+          <span className="spinner spinner--inline" /> {t('search.building', buildingParts.map((p) => t(PART_LABEL[p])).join(', '))}
         </p>
       ) : null}
       {errorParts.length > 0 ? (

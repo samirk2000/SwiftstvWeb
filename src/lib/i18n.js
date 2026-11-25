@@ -161,6 +161,7 @@ export const STRINGS = {
       loadingPart: (what) => `Aún buscando en: ${what}…`,
       partError: (what) => `No se pudo cargar: ${what}.`,
       firstTime: 'La primera búsqueda descarga el catálogo y puede tardar un poco. Después es instantánea.',
+      building: (what) => `Completando el índice de ${what}… ya puedes buscar en lo cargado.`,
     },
     onboarding: {
       title: 'Cómo usar el control',
@@ -414,6 +415,7 @@ export const STRINGS = {
       loadingPart: (what) => `Still searching in: ${what}…`,
       partError: (what) => `Could not load: ${what}.`,
       firstTime: 'The first search downloads the catalog and can take a while. After that it is instant.',
+      building: (what) => `Still indexing ${what}… you can already search what is loaded.`,
     },
     onboarding: {
       title: 'How to use the remote',

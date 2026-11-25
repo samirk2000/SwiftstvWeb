@@ -1,53 +1,63 @@
-import { getLiveStreams, getVodStreams, getSeries } from './xtream.js';
+import {
+  getLiveStreams,
+  getVodStreams,
+  getSeries,
+  getLiveCategories,
+  getVodCategories,
+  getSeriesCategories,
+} from './xtream.js';
 import { normalizeSearch } from './searchText.js';
+import { isAdultCategory, isAdultTitle } from './adult.js';
 
-// Catalog cache for global search.
+// Search index (client side, per device).
 //
-// The full VOD list on these panels is ~30 MB of JSON (8-15 s even on a good
-// connection, much longer through the proxy / on a TV). We:
-//  - keep only the fields search needs (name, ids, poster, category) plus a
-//    pre-normalised `n` for fast accent-free matching,
-//  - persist that slim copy in IndexedDB for a few hours, so only the first
-//    search after a while pays the download,
-//  - load the parts independently (live + series first, VOD after) so results
-//    show up as soon as each part arrives.
+// The panels are slow: a full list (get_series / get_vod_streams) can take 1-4
+// minutes and a single category anywhere from 1 s to 60 s. Searching "live"
+// against the panel is never going to be instant, so we keep a slim index
+// (name, id, poster, category, normalised name) in IndexedDB and:
+//  - serve whatever index we have IMMEDIATELY (even if it is old), then refresh
+//    it in the background (stale-while-revalidate);
+//  - warm all three parts in the background after login (warmCatalog), pausing
+//    while a video is playing so streams keep the bandwidth;
+//  - build VOD (and series, if the full list fails) category by category,
+//    saving progress, so results appear while it builds, an interrupted build
+//    resumes, and a TV never has to parse a 30 MB JSON in one go.
+// Nothing is stored server side and no credentials are written to the index.
 
-const MEMORY_TTL_MS = 30 * 60 * 1000;
-const DISK_TTL_MS = 6 * 60 * 60 * 1000;
+const FRESH_MS = 6 * 60 * 60 * 1000; // refresh in the background after this
+const MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000; // still shown up to this age
+const PARTIAL_RESUME_MS = 24 * 60 * 60 * 1000; // resume an unfinished build
 const PARTS = ['live', 'series', 'vod'];
 const DB_NAME = 'swiftstv-catalog';
 const STORE = 'parts';
+const CAT_CONCURRENCY = 2;
+const SAVE_EVERY = 4; // persist a partial index every N categories
 
-const memory = new Map(); // `${key}|${part}` -> { at, items }
-const inflight = new Map(); // `${key}|${part}` -> Promise<items>
+// key -> { at, items, partial, done:Set }
+const memory = new Map();
+const refreshing = new Map(); // key -> Promise
+const listeners = new Map(); // key -> Set<fn(items, meta)>
 
-function cacheKey(server) {
+function cacheKey(server, part) {
   return `${String(server?.baseUrl || '').trim()}|${String(server?.username || '')
     .trim()
-    .toLowerCase()}`;
+    .toLowerCase()}|${part}`;
 }
 
-function slim(part, list) {
-  const out = [];
-  for (const r of Array.isArray(list) ? list : []) {
-    if (!r) continue;
-    const name = String(r.name || '');
-    if (part === 'series') {
-      out.push({ series_id: r.series_id, name, cover: r.cover || '', category_id: r.category_id, n: normalizeSearch(name) });
-    } else if (part === 'vod') {
-      out.push({
-        stream_id: r.stream_id,
-        name,
-        stream_icon: r.stream_icon || '',
-        category_id: r.category_id,
-        container_extension: r.container_extension || '',
-        n: normalizeSearch(name),
-      });
-    } else {
-      out.push({ stream_id: r.stream_id, name, stream_icon: r.stream_icon || '', category_id: r.category_id, n: normalizeSearch(name) });
-    }
+function slimOne(part, r, catName) {
+  if (!r) return null;
+  const name = String(r.name || '');
+  const a = isAdultCategory(catName || r.category_name || '') || isAdultTitle(name) ? 1 : 0;
+  if (part === 'series') {
+    return { series_id: r.series_id, name, cover: r.cover || '', category_id: r.category_id, n: normalizeSearch(name), a };
   }
-  return out;
+  const o = { stream_id: r.stream_id, name, stream_icon: r.stream_icon || '', category_id: r.category_id, n: normalizeSearch(name), a };
+  if (part === 'vod') o.container_extension = r.container_extension || '';
+  return o;
+}
+
+function idOf(it) {
+  return String(it.series_id ?? it.stream_id ?? '');
 }
 
 // ---- IndexedDB (best effort; silently skipped where unsupported) ----------
@@ -99,72 +109,277 @@ async function diskPut(id, value) {
   }
 }
 
-const FETCHERS = {
-  live: (srv) => getLiveStreams(srv, undefined, { noCache: true, timeoutMs: 60000, throwOnError: true }),
-  series: (srv) => getSeries(srv, undefined, { noCache: true, timeoutMs: 60000, throwOnError: true }),
-  vod: (srv) => getVodStreams(srv, undefined, { noCache: true, timeoutMs: 120000, throwOnError: true }),
-};
+function emit(key) {
+  const entry = memory.get(key);
+  const set = listeners.get(key);
+  if (!entry || !set) return;
+  const meta = { at: entry.at, partial: !!entry.partial, stale: Date.now() - entry.at > FRESH_MS };
+  for (const fn of [...set]) {
+    try {
+      fn(entry.items, meta);
+    } catch {
+      /* listener errors must not break the build */
+    }
+  }
+}
 
-/** Load one catalog part (memory → IndexedDB → network). Rejects on failure. */
-export function loadCatalogPart(server, part) {
-  const key = `${cacheKey(server)}|${part}`;
-  const mem = memory.get(key);
-  if (mem && Date.now() - mem.at < MEMORY_TTL_MS) return Promise.resolve(mem.items);
-  if (inflight.has(key)) return inflight.get(key);
+function subscribe(key, fn) {
+  if (!listeners.has(key)) listeners.set(key, new Set());
+  listeners.get(key).add(fn);
+  return () => listeners.get(key)?.delete(fn);
+}
+
+function setEntry(key, entry, persist) {
+  memory.set(key, entry);
+  if (persist) {
+    diskPut(key, { at: entry.at, items: entry.items, partial: !!entry.partial, done: [...(entry.done || [])] });
+  }
+  emit(key);
+}
+
+async function loadFromDisk(key) {
+  if (memory.has(key)) return memory.get(key);
+  const disk = await diskGet(key);
+  if (disk && Array.isArray(disk.items) && Date.now() - (disk.at || 0) < MAX_AGE_MS) {
+    const entry = { at: disk.at, items: disk.items, partial: !!disk.partial, done: new Set(disk.done || []) };
+    memory.set(key, entry);
+    return entry;
+  }
+  return null;
+}
+
+// Wait while a video is playing (the player owns the bandwidth / the panel's
+// single connection on cheap accounts) — background builds resume after.
+function waitUntilIdle() {
+  return new Promise((resolve) => {
+    const check = () => {
+      const p = typeof location !== 'undefined' ? location.pathname : '';
+      if (!p.startsWith('/player')) resolve();
+      else setTimeout(check, 5000);
+    };
+    check();
+  });
+}
+
+const CATEGORY_FETCHERS = {
+  live: (srv) => getLiveCategories(srv),
+  series: (srv) => getSeriesCategories(srv),
+  vod: (srv) => getVodCategories(srv),
+};
+const LIST_FETCHERS = {
+  live: (srv, cat, opts) => getLiveStreams(srv, cat, opts),
+  series: (srv, cat, opts) => getSeries(srv, cat, opts),
+  vod: (srv, cat, opts) => getVodStreams(srv, cat, opts),
+};
+// Full lists: live is quick, series is ~1-2 min on slow panels; VOD is built
+// per category straight away (huge list, and per-category resumes).
+const FULL_TIMEOUT = { live: 120000, series: 240000 };
+
+async function categoryNames(server, part) {
+  try {
+    const cats = await CATEGORY_FETCHERS[part](server);
+    const map = new Map();
+    for (const c of cats || []) map.set(String(c.category_id), String(c.category_name || ''));
+    return map;
+  } catch {
+    return new Map();
+  }
+}
+
+async function buildFull(server, part, key) {
+  const names = await categoryNames(server, part);
+  const raw = await LIST_FETCHERS[part](server, undefined, {
+    noCache: true,
+    timeoutMs: FULL_TIMEOUT[part],
+    throwOnError: true,
+  });
+  const items = [];
+  const seen = new Set();
+  for (const r of raw || []) {
+    const it = slimOne(part, r, names.get(String(r?.category_id)));
+    if (!it) continue;
+    const id = idOf(it);
+    if (seen.has(id)) continue;
+    seen.add(id);
+    items.push(it);
+  }
+  if (!items.length) throw new Error('empty list');
+  setEntry(key, { at: Date.now(), items, partial: false, done: new Set() }, true);
+  return items;
+}
+
+async function buildByCategory(server, part, key) {
+  const names = await categoryNames(server, part);
+  if (!names.size) throw new Error('no categories');
+  const prev = memory.get(key);
+  // Resume an unfinished build from the last day; otherwise start fresh but
+  // keep showing the previous (complete) index until the new one is done.
+  const resume = prev && prev.partial && Date.now() - prev.at < PARTIAL_RESUME_MS;
+  const done = resume ? new Set(prev.done) : new Set();
+  const items = resume ? [...prev.items] : [];
+  const seen = new Set(items.map(idOf));
+  const queue = [...names.keys()].filter((id) => !done.has(id) && !isAdultCategory(names.get(id)));
+  let sinceSave = 0;
+  let failures = 0;
+  const showPartial = () => !prev || prev.partial || resume;
+  const flush = (final) => {
+    const entry = { at: Date.now(), items: [...items], partial: !final, done: new Set(done) };
+    // A complete (older) index stays on screen until the rebuild finishes.
+    if (final || showPartial()) setEntry(key, entry, true);
+  };
+  const worker = async () => {
+    while (queue.length) {
+      await waitUntilIdle();
+      const cat = queue.shift();
+      try {
+        const list = await LIST_FETCHERS[part](server, cat, { noCache: true, timeoutMs: 90000, throwOnError: true });
+        for (const r of list || []) {
+          const it = slimOne(part, r, names.get(cat));
+          if (!it) continue;
+          const id = idOf(it);
+          if (seen.has(id)) continue;
+          seen.add(id);
+          items.push(it);
+        }
+        done.add(cat);
+      } catch {
+        failures += 1;
+      }
+      sinceSave += 1;
+      if (sinceSave >= SAVE_EVERY) {
+        sinceSave = 0;
+        flush(false);
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: CAT_CONCURRENCY }, worker));
+  // A few failed categories are retried on the next refresh (they stay out of
+  // `done`); the index is still marked complete enough to use.
+  const complete = failures === 0 || done.size >= names.size * 0.9;
+  if (!items.length) throw new Error('empty index');
+  const entry = { at: Date.now(), items, partial: !complete, done };
+  setEntry(key, entry, true);
+  return items;
+}
+
+function refreshPart(server, part) {
+  const key = cacheKey(server, part);
+  if (refreshing.has(key)) return refreshing.get(key);
   const p = (async () => {
-    const disk = await diskGet(key);
-    if (disk && Array.isArray(disk.items) && disk.items.length && Date.now() - disk.at < DISK_TTL_MS) {
-      memory.set(key, { at: Date.now(), items: disk.items });
-      return disk.items;
+    await waitUntilIdle();
+    if (part === 'vod') return buildByCategory(server, part, key);
+    try {
+      return await buildFull(server, part, key);
+    } catch (err) {
+      if (part === 'live') throw err;
+      return buildByCategory(server, part, key);
     }
-    const raw = await FETCHERS[part](server);
-    const items = slim(part, raw);
-    if (items.length) {
-      memory.set(key, { at: Date.now(), items });
-      diskPut(key, { at: Date.now(), items });
-    }
-    return items;
-  })().finally(() => inflight.delete(key));
-  inflight.set(key, p);
+  })().finally(() => refreshing.delete(key));
+  refreshing.set(key, p);
   return p;
 }
 
+function needsRefresh(entry) {
+  return !entry || entry.partial || Date.now() - entry.at > FRESH_MS;
+}
+
 /**
- * Progressive load: calls onPart(part, items|null, error?) as each part lands.
- * Live + series start together; VOD (the heavy one) starts after them so it
- * doesn't steal bandwidth from the quick results.
+ * Load one part: resolves with what we have now (memory/IndexedDB, even old),
+ * refreshing in the background; with nothing cached it waits for the network
+ * (or the first partial results of a per-category build). Rejects on failure.
  */
-export async function loadCatalogProgressive(server, onPart) {
-  if (!server?.baseUrl) return;
-  const run = (part) =>
-    loadCatalogPart(server, part)
-      .then((items) => onPart(part, items, null))
-      .catch((err) => onPart(part, null, err || new Error('load failed')));
-  await Promise.all([run('live'), run('series')]);
-  await run('vod');
+export async function loadCatalogPart(server, part) {
+  const key = cacheKey(server, part);
+  const entry = await loadFromDisk(key);
+  if (entry && entry.items.length) {
+    if (needsRefresh(entry)) refreshPart(server, part).catch(() => {});
+    return entry.items;
+  }
+  return refreshPart(server, part);
+}
+
+/**
+ * Progressive load: calls onPart(part, items|null, error?, meta?) as each part
+ * lands — first from the saved index, then again whenever a background refresh
+ * or a per-category build adds results. Returns an unsubscribe function.
+ */
+export function loadCatalogProgressive(server, onPart) {
+  if (!server?.baseUrl) return () => {};
+  const unsubs = [];
+  let stopped = false;
+  for (const part of PARTS) {
+    const key = cacheKey(server, part);
+    unsubs.push(
+      subscribe(key, (items, meta) => {
+        if (!stopped) onPart(part, items, null, meta);
+      })
+    );
+  }
+  (async () => {
+    // Saved index first for all parts (instant), then the network.
+    for (const part of PARTS) {
+      const key = cacheKey(server, part);
+      const entry = await loadFromDisk(key);
+      if (stopped) return;
+      if (entry && entry.items.length) {
+        onPart(part, entry.items, null, { at: entry.at, partial: !!entry.partial, stale: needsRefresh(entry) });
+      }
+    }
+    const run = (part) =>
+      loadCatalogPart(server, part)
+        .then((items) => {
+          if (!stopped) onPart(part, items, null, { at: memory.get(cacheKey(server, part))?.at, partial: !!memory.get(cacheKey(server, part))?.partial });
+        })
+        .catch((err) => {
+          if (stopped) return;
+          const have = memory.get(cacheKey(server, part));
+          if (have && have.items.length) onPart(part, have.items, null, { at: have.at, partial: true });
+          else onPart(part, null, err || new Error('load failed'));
+        });
+    await Promise.all([run('live'), run('series')]);
+    await run('vod');
+  })();
+  return () => {
+    stopped = true;
+    unsubs.forEach((u) => u());
+  };
 }
 
 /** Back-compat: resolve all three parts at once. */
 export async function loadCatalog(server) {
   const out = { live: [], vod: [], series: [] };
   if (!server?.baseUrl) return out;
-  await loadCatalogProgressive(server, (part, items) => {
-    if (items) out[part] = items;
-  });
+  for (const part of PARTS) {
+    try {
+      out[part] = await loadCatalogPart(server, part);
+    } catch {
+      /* keep [] */
+    }
+  }
   return out;
 }
 
-/** Warm the cheap parts (live + series) in the background while Home is idle. */
+/** Warm the whole index in the background (after login / while Home is idle). */
 export function prefetchCatalog(server) {
   if (!server?.baseUrl) return;
-  loadCatalogPart(server, 'live').catch(() => {});
-  loadCatalogPart(server, 'series').catch(() => {});
+  (async () => {
+    for (const part of PARTS) {
+      try {
+        await loadCatalogPart(server, part);
+        const key = cacheKey(server, part);
+        const r = refreshing.get(key);
+        if (r) await r.catch(() => {});
+      } catch {
+        /* next part */
+      }
+    }
+  })();
 }
 
 /** Drop the in-memory copy; `disk: true` also wipes IndexedDB (logout). */
 export function clearCatalogCache({ disk = false } = {}) {
   memory.clear();
-  inflight.clear();
+  refreshing.clear();
   if (!disk) return;
   openDb().then((db) => {
     if (!db) return;
