@@ -8,6 +8,7 @@ import { formatDuration } from '../lib/time.js';
 import { pickSynopsis } from '../lib/metaText.js';
 import { hasAdultPin, needsAdultGate, hasAdultBrowseUnlock } from '../lib/parental.js';
 import AdultPinDialog from '../components/AdultPinDialog.jsx';
+import { useFocusWhenReady } from '../components/Focusable.jsx';
 
 export default function VodDetail() {
   const { id } = useParams();
@@ -88,6 +89,8 @@ export default function VodDetail() {
       ? formatDuration(streamData.duration)
       : '';
 
+  useFocusWhenReady(Boolean(info), '[data-tv-autofocus="true"]', [id]);
+
   return (
     <div>
       <AdultPinDialog
@@ -144,7 +147,7 @@ export default function VodDetail() {
             ) : null}
 
             <div className="detail-actions">
-              <button tabIndex={0} className="btn-primary" onClick={play}>
+              <button tabIndex={0} className="btn-primary" data-tv-autofocus="true" onClick={play}>
                 ▶ {t('vod.play')}
               </button>
               <button

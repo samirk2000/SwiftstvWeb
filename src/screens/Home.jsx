@@ -7,7 +7,8 @@ import { useSession } from '../context/SessionContext.jsx';
 import { useFocusable, setFocused, FocusScope } from '../components/Focusable.jsx';
 import { Row, Tile } from '../components/ui.jsx';
 import { getPrefs, setPrefs } from '../lib/prefs.js';
-import { formatExpiry } from '../lib/time.js';
+import { formatExpiry, daysUntil } from '../lib/time.js';
+import { prefetchCatalog } from '../lib/catalogCache.js';
 
 function OnboardingTips({ onDismiss }) {
   const ok = useFocusable('onboarding-ok');
@@ -71,7 +72,7 @@ function expiryBannerText(userInfo) {
   const days = (ms - Date.now()) / (1000 * 60 * 60 * 24);
   const label = formatExpiry(raw);
   if (days < 0) return t('expiry.expired');
-  if (days <= 7) return t('expiry.soon', label || String(raw));
+  if (days <= 7) return t('expiry.soonDays', label || String(raw), t('expiry.left', daysUntil(raw) ?? 0));
   return '';
 }
 
@@ -85,6 +86,15 @@ export default function Home() {
 
   useEffect(() => {
     setTick((x) => x + 1);
+  }, []);
+
+  // Warm live + series catalogs for Buscar while the user is on Home.
+  useEffect(() => {
+    const id = window.setTimeout(() => {
+      const s = getSession();
+      if (s?.baseUrl) prefetchCatalog({ baseUrl: s.baseUrl, username: s.username, password: s.password });
+    }, 4000);
+    return () => window.clearTimeout(id);
   }, []);
 
   const continueRow = useMemo(() => {

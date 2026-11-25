@@ -46,7 +46,7 @@ export function SessionProvider({ children }) {
   );
 
   const logout = useCallback(() => {
-    clearCatalogCache();
+    clearCatalogCache({ disk: true });
     clearExclusiveCatalogCache();
     clearStored();
     setSession(null);

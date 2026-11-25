@@ -149,50 +149,135 @@ function buildQueue(servers, cvcAliases, username, password) {
   return order.map((baseUrl) => ({ baseUrl, username, password }));
 }
 
+// ---- Last good server (per username) ----------------------------------------
+const LAST_GOOD_KEY = 'swiftstv.lastServer.v1';
+const SERVERS_CACHE_KEY = 'swiftstv.serversJson.v1';
+
+function readJson(key, fallback) {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function writeJson(key, value) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    /* ignore */
+  }
+}
+
+export function getLastGoodServer(username) {
+  const map = readJson(LAST_GOOD_KEY, {});
+  const k = String(username || '').trim().toLowerCase();
+  return (map && map[k]) || '';
+}
+
+export function rememberGoodServer(username, baseUrl) {
+  const k = String(username || '').trim().toLowerCase();
+  if (!k || !baseUrl) return;
+  const map = readJson(LAST_GOOD_KEY, {}) || {};
+  map[k] = normalizeBaseUrl(baseUrl);
+  writeJson(LAST_GOOD_KEY, map);
+}
+
+// servers.json with a short timeout; falls back to the last copy we saw.
+async function loadServerConfigFast(timeoutMs = 3500) {
+  const cached = readJson(SERVERS_CACHE_KEY, null);
+  const timeout = new Promise((resolve) => setTimeout(() => resolve(null), timeoutMs));
+  const fresh = loadServerConfig()
+    .then((cfg) => {
+      if (cfg && (cfg.servers?.length || cfg.cvcAliases?.length)) writeJson(SERVERS_CACHE_KEY, cfg);
+      return cfg;
+    })
+    .catch(() => null);
+  const cfg = await Promise.race([fresh, timeout]);
+  if (cfg) return cfg;
+  if (cached && (cached.servers?.length || cached.cvcAliases?.length)) return cached;
+  return { servers: EMBEDDED_SERVERS, cvcAliases: EMBEDDED_CVC_ALIASES };
+}
+
 // Full login flow with multi-DNS failover.
 //
-// Ranking across two rounds so panels reachable only by ONE route still work:
-//  Round 1 (PROXY): every host is tried through /proxy in parallel. `ok` wins.
-//    Hosts that DON'T respond 2xx (403/ERR = Cloudflare IP blocked, or network)
-//    are marked `blocked` and retried via Direct in Round 2.
-//    Hosts that DO respond 2xx but with INVALID_CREDENTIALS are `invalid` (the
-//    server works but the account doesn't exist there) — NOT retried direct.
-//  Round 2 (DIRECT): hosts that Round 1 left `blocked` are retried direct
-//    (HTTPS-first) from the browser, because some panels block Cloudflare IPs
-//    but accept residential IPs.
+//  0) Try the server that worked last time for this user (one request, ~0.5 s).
+//  1) Otherwise race EVERY server in parallel. Each one goes through the
+//     corsFetch chain (direct HTTPS → Hetzner VPS → Cloudflare /proxy) and the
+//     first server that authenticates wins — we no longer wait for the slowest
+//     one, and we no longer start with the Cloudflare /proxy that these panels
+//     answer with 403.
+//  2) A server reached through the VPS is stream-reachable by definition; for a
+//     direct win we keep the quick "can the stream proxy reach it?" check.
 //
 // Returns { ok, status, info, serverInfo, session, attempt, total, reason? }.
 export async function loginWithFailover(username, password) {
   if (!username || !password) return { ok: false, reason: 'empty' };
 
-  const { servers, cvcAliases } = await loadServerConfig();
-  const queue = buildQueue(servers, cvcAliases, username, password);
-  if (!queue.length) return { ok: false, reason: 'empty' };
+  // Start loading servers.json right away (in parallel with step 0).
+  const configPromise = loadServerConfigFast();
 
-  // ---- Round 1: proxy ranking (parallel) -------------------------------
-  const viaProxy = queue.map((entry) => ({ ...entry, via: 'proxy' }));
-  const round1 = await Promise.all(
-    viaProxy.map(async (entry) => ({ ...entry, result: await login(entry) }))
-  );
+  // ---- Step 0: last good server -------------------------------------------
+  const last = getLastGoodServer(username);
+  if (last) {
+    const r = await login({ baseUrl: last, username, password, noSave: true, timeoutMs: 9000 });
+    if (r.ok) {
+      rememberGoodServer(username, last);
+      return finalize({ baseUrl: last, username, password, via: r.via, result: r }, 1, 1);
+    }
+  }
 
-  const playable1 = await pickPlayable(round1);
-  if (playable1) return finalize(playable1, 1, queue.length);
-  // ---- Round 2: direct retry only for hosts the proxy could not reach -----
-  const needsDirect = round1.filter((x) => isProxyBlocked(x.result));
-  const round2 = await Promise.all(
-    needsDirect.map(async (entry) => {
-      if (entry.result.ok) return entry; // can't happen, defensively
-      return { ...entry, via: 'direct', result: await login({ ...entry, via: 'direct' }) };
-    })
+  const { servers, cvcAliases } = await configPromise;
+  const queue = buildQueue(servers, cvcAliases, username, password).filter(
+    (e) => !last || normalizeBaseUrl(e.baseUrl) !== normalizeBaseUrl(last),
   );
-  const playable2 = await pickPlayable(round2);
-  if (playable2) return finalize(playable2, 2, queue.length);
+  if (!queue.length) return { ok: false, reason: 'network', status: 'network', attempt: 1, total: 1 };
+
+  // ---- Step 1: parallel race, first playable server wins ----------------
+  const all = [];
+  const winner = await new Promise((resolve) => {
+    let pending = queue.length;
+    let decided = false;
+    const settleOne = () => {
+      pending -= 1;
+      if (pending === 0 && !decided) {
+        decided = true;
+        resolve(null);
+      }
+    };
+    queue.forEach((entry) => {
+      login({ ...entry, noSave: true, timeoutMs: 20000 })
+        .then(async (result) => {
+          const item = { ...entry, via: result?.via, result };
+          all.push(item);
+          if (decided || !result?.ok) return;
+          const server = result.session || entry;
+          const reachable = result.via === 'vps' ? true : await isStreamModeReachable(server, 4000);
+          if (reachable && !decided) {
+            decided = true;
+            resolve(item);
+          } else if (!reachable) {
+            // eslint-disable-next-line no-console
+            console.warn('[dns] login ok but stream unreachable via proxy, skipping', entry.baseUrl);
+          }
+        })
+        .catch((err) => {
+          all.push({ ...entry, result: { ok: false, status: SERVER_INFO.NETWORK, error: err } });
+        })
+        .finally(settleOne);
+    });
+  });
+
+  if (winner) {
+    rememberGoodServer(username, winner.result.session?.baseUrl || winner.baseUrl);
+    return finalize(winner, all.length, queue.length);
+  }
 
   // ---- Decide the honest failure message --------------------------------
   // A real "invalid/expired/…" verdict from a server that responded (2xx with
-  // a credential problem) is authoritative. If only proxy/all-direct failed
-  // with non-2xx/network, the servers are unreachable — not bad credentials.
-  const all = [...round1, ...round2];
+  // a credential problem) is authoritative. If every server failed with
+  // non-2xx/network, the servers are unreachable — not bad credentials.
   const credentialVerdict = all.find((x) => isCredentialVerdict(x.result));
   if (credentialVerdict) {
     return {
@@ -250,37 +335,6 @@ async function isStreamModeReachable(server, timeoutMs = 6000) {
   }
 }
 
-// Among authenticated candidates, return the first whose panel is stream-able
-// through an external proxy. Preserves order (fastest/priority wins).
-async function pickPlayable(list) {
-  const authed = list.filter((x) => x && x.result && x.result.ok);
-  if (authed.length === 0) return null;
-  for (const entry of authed) {
-    const server = entry.result.session || {
-      baseUrl: entry.baseUrl,
-      username: entry.username,
-      password: entry.password,
-    };
-    if (await isStreamModeReachable(server)) return entry;
-    // eslint-disable-next-line no-console
-    console.warn('[dns] login ok but stream unreachable via proxy, skipping', entry.baseUrl);
-  }
-  return null;
-}
-
-// True when a login result means "the proxy/panel rejected this request at the
-// transport layer" (WAF 403 to Cloudflare IPs, network, parse) — i.e. the host
-// MIGHT work via a different route (direct), so keep it for Round 2.
-function isProxyBlocked(result) {
-  if (!result) return false;
-  if (result.ok) return false; // already succeeded, never blocked
-  return result.status === SERVER_INFO.HTTP ||
-    result.status === SERVER_INFO.NETWORK ||
-    result.status === SERVER_INFO.PARSE ||
-    result.httpStatus === 403 || result.httpStatus === 404 ||
-    result.httpStatus === 502 || result.httpStatus === 503;
-}
-
 // A genuine account verdict from a server that actually answered (2xx body
 // with invalid/expired/banned/disabled) — authoritative for the failure reason.
 function isCredentialVerdict(result) {
@@ -307,7 +361,7 @@ function finalize(entry, attempt, total) {
   // The parallel logins each called saveSession() internally, so whichever
   // finished last could have overwritten the session. Re-persist the chosen
   // (stream-playable) panel's session here as the source of truth.
-  if (r?.session) saveSession(r.session);
+  if (r?.session) saveSession({ ...r.session, user_info: r.info || null });
   return {
     ok: true,
     status: r.status,

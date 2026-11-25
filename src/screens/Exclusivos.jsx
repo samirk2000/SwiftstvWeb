@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { t } from '../lib/i18n.js';
-import { fetchCatalog, parseM3u, parseJsonList, extractM3u8 } from '../lib/exclusivos.js';
+import { fetchCatalog, parseM3u, parseJsonList, extractM3u8, isGarbageBody } from '../lib/exclusivos.js';
 import { corsFetch } from '../lib/cors.js';
 import { useFocusable, setFocused } from '../components/Focusable.jsx';
 
@@ -32,7 +32,7 @@ async function resolveChannels(entry) {
   }
   if (entry.type === 'extract') {
     for (const u of entry.urls || []) {
-      const body = await fetchText(u);
+      const body = await fetchText(u, { allowHtml: true });
       const m3u8 = extractM3u8(body);
       if (m3u8) {
         return [
@@ -74,9 +74,11 @@ async function fetchFirst(urls) {
   return '';
 }
 
-async function fetchText(url) {
+async function fetchText(url, { allowHtml = false } = {}) {
   const res = await corsFetch(url, { userAgent: 'SwiftstvExclusive/1.0' });
   if (!res.ok) return '';
+  // Pages we scrape for an .m3u8 are HTML on purpose; lists must not be.
+  if (!allowHtml && isGarbageBody(res.text)) return '';
   return res.text;
 }
 
@@ -91,7 +93,7 @@ function ExclTile({ entry, onActivate, showCategory = false }) {
       onClick={() => onActivate(entry)}
       onMouseEnter={() => ref.current && setFocused(ref.current, { native: false })}
     >
-      <span className="excl-tile-icon">⚡</span>
+      <img className="excl-tile-icon excl-tile-icon--img" src="/brand/icon-exclusivos.png" alt="" draggable={false} />
       <span className="excl-tile-name">{entry.name}</span>
       {showCategory && entry.category ? <span className="excl-tile-cat">{entry.category}</span> : null}
     </button>

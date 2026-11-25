@@ -9,12 +9,17 @@ import { useWindowedList } from '../hooks/useWindowedList.js';
 import { isCategoryLocked, hasAdultPin, needsAdultGate, unlockAdultBrowse, clearAdultBrowseUnlock, isAdultBrowseUnlocked } from '../lib/parental.js';
 import { isAdultCategory, isAdultContent } from '../lib/adult.js';
 import { getFavoritesByType } from '../lib/session.js';
-import { useFocusable } from '../components/Focusable.jsx';
+import { useFocusable, useFocusWhenReady } from '../components/Focusable.jsx';
 import AdultPinDialog from '../components/AdultPinDialog.jsx';
 import { matchesSearch } from '../lib/searchText.js';
+import { gridPoster } from '../lib/text.js';
 
 const PAGE = 48;
 const CAT_FAVORITES = '__favorites__';
+
+// Throw on panel/network errors so the screen can show "Reintentar" instead of
+// an endless spinner or a misleading "Sin resultados".
+const loadVodList = (srv, cat) => getVodStreams(srv, cat, { throwOnError: true, timeoutMs: 45000 });
 
 function VodTile({ vod, onOpen }) {
   const { ref, tabIndex } = useFocusable(`vod-${vod.stream_id}`);
@@ -26,12 +31,15 @@ function VodTile({ vod, onOpen }) {
       onClick={() => onOpen(vod)}
       onMouseEnter={() => ref.current && ref.current.focus()}
     >
-      <div className="tile-art">
+      <div className="tile-art tile-art--placeholder">
         <img
-          src={vod.stream_icon || vod.cover}
+          src={gridPoster(vod.stream_icon || vod.cover)}
           alt=""
           loading="lazy"
           decoding="async"
+          onError={(e) => {
+            e.currentTarget.style.visibility = 'hidden';
+          }}
         />
         <div className="tile-title">{vod.name}</div>
       </div>
@@ -75,7 +83,7 @@ export default function VodGrid() {
     searchActive
   );
 
-  const { data: streams, loading, error } = usePanelList(getVodStreams, catArgs, {
+  const { data: streams, loading, error, reload } = usePanelList(loadVodList, catArgs, {
     enabled: ready && !localFav,
   });
 
@@ -158,6 +166,9 @@ export default function VodGrid() {
     }
   };
 
+  // First poster gets the ring once the list is there (not the Favoritos chip).
+  useFocusWhenReady(Boolean(ready && (localFav || !loading) && filtered?.length), '.grid .tile', [catId]);
+
   return (
     <div>
       <AdultPinDialog
@@ -215,6 +226,11 @@ export default function VodGrid() {
       ) : error || !filtered?.length ? (
         <div className="state">
           {error ? t('common.error') : localFav ? t('vod.noFavorites') : t('vod.noResults')}
+          {error ? (
+            <button tabIndex={0} className="btn-primary" style={{ marginTop: 16 }} onClick={reload}>
+              {t('common.retry')}
+            </button>
+          ) : null}
         </div>
       ) : (
         <>

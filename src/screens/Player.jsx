@@ -41,6 +41,18 @@ import {
 } from '../lib/containerAudio.js';
 
 /** PC/Mac (mouse + keyboard) vs TV remote — seek/click UX differs. */
+// Smart TV / Media Station X: never show mouse hints there (some TV browsers
+// report a "fine pointer" because of the Magic Remote).
+function isTvLike() {
+  try {
+    if (sessionStorage.getItem('swiftstv.msx') === '1') return true;
+  } catch {
+    /* ignore */
+  }
+  const ua = (typeof navigator !== 'undefined' && navigator.userAgent) || '';
+  return /web0s|webos|netcast|tizen|smart-?tv|smarttv|vidaa|hisense|hbbtv|bravia|aft[a-z]|crkey|googletv|android tv|viera|philipstv|toshibatv/i.test(ua);
+}
+
 function useDesktopPointer() {
   const [desktop, setDesktop] = useState(() => {
     if (typeof window === 'undefined' || !window.matchMedia) return false;
@@ -1855,6 +1867,39 @@ export default function Player() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [url, restart, id, type]);
 
+  // Seconds spent on the loading overlay (drives "taking longer than usual").
+  const [loadSecs, setLoadSecs] = useState(0);
+  useEffect(() => {
+    setLoadSecs(0);
+    if (!url || started || error) return undefined;
+    const startedAt = Date.now();
+    const tick = window.setInterval(() => {
+      setLoadSecs(Math.floor((Date.now() - startedAt) / 1000));
+    }, 1000);
+    return () => window.clearInterval(tick);
+  }, [url, id, restart, started, error]);
+
+  // Belt-and-braces "is it really playing?" check: some TV webviews / MSE
+  // pipelines never fire `playing` (or fire it before we listen), which left
+  // the spinner sitting over a playing channel. Advancing currentTime with
+  // decoded data means frames are on screen.
+  useEffect(() => {
+    if (!url || started || error) return undefined;
+    let lastT = -1;
+    const iv = window.setInterval(() => {
+      const v = videoRef.current;
+      if (!v) return;
+      const tNow = Number(v.currentTime) || 0;
+      if (!v.paused && v.readyState >= 2 && lastT >= 0 && tNow - lastT > 0.15) {
+        startedRef.current = true;
+        setStarted(true);
+      }
+      lastT = tNow;
+    }, 600);
+    return () => window.clearInterval(iv);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [url, id, restart, started, error]);
+
   // If a new episode never leaves "Cargando…", surface Retry instead of spinning forever
   // (usually the panel still had the previous connection open).
   useEffect(() => {
@@ -2029,20 +2074,35 @@ export default function Player() {
         }}
       />
       {!started && !error && (
-        <div className="player-loading">
+        <div className="player-loading" aria-live="polite">
           <div className="spinner" />
-          <span>{t('player.buffering')}</span>
-          <button
-            tabIndex={0}
-            className="btn-ghost"
-            onClick={() => {
-              setStarted(false);
-              startedRef.current = false;
-              if (playerRef.current) playerRef.current.reloadUrl();
-            }}
-          >
-            {t('common.retry')}
-          </button>
+          <span className="player-loading-title">
+            {title ? t('player.loadingChannel', title) : t('player.buffering')}
+          </span>
+          {isLive && loadSecs >= 25 ? (
+            <span className="player-loading-note">{t('player.slowLive')}</span>
+          ) : loadSecs >= 8 ? (
+            <span className="player-loading-note">{t('player.slow')}</span>
+          ) : null}
+          <div className="player-loading-actions">
+            <button
+              tabIndex={0}
+              className={loadSecs >= 8 ? 'btn-primary' : 'btn-ghost'}
+              onClick={() => {
+                setStarted(false);
+                startedRef.current = false;
+                setLoadSecs(0);
+                if (playerRef.current && typeof playerRef.current.reloadUrl === 'function') {
+                  playerRef.current.reloadUrl();
+                } else {
+                  allowAttachRef.current = true;
+                  setRestart((x) => x + 1);
+                }
+              }}
+            >
+              {t('common.retry')}
+            </button>
+          </div>
         </div>
       )}
       {mutedHint && started && (
@@ -2063,7 +2123,7 @@ export default function Player() {
             }
           }}
         >
-          🔊 {t('player.unmute')}
+          {t('player.unmute')}
         </button>
       )}
 
@@ -2132,7 +2192,7 @@ export default function Player() {
                   onMouseDown={(e) => e.preventDefault()}
                   onClick={(e) => seekByClick(-seekJump, e)}
                 >
-                  ⏪ -{seekJump}s
+                  « -{seekJump}s
                 </button>
                 <button
                   ref={pauseBtnRef}
@@ -2142,7 +2202,7 @@ export default function Player() {
                   className="btn-primary player-transport-btn"
                   onClick={togglePlayClick}
                 >
-                  {paused ? `▶ ${t('player.play')}` : `⏸ ${t('player.pause')}`}
+                  {paused ? `▶ ${t('player.play')}` : `|| ${t('player.pause')}`}
                 </button>
                 <button
                   type="button"
@@ -2151,7 +2211,7 @@ export default function Player() {
                   onMouseDown={(e) => e.preventDefault()}
                   onClick={(e) => seekByClick(seekJump, e)}
                 >
-                  +{seekJump}s ⏩
+                  +{seekJump}s »
                 </button>
                 {type === 'series' && seriesId ? (
                   <button
@@ -2160,7 +2220,7 @@ export default function Player() {
                     className="btn-ghost player-transport-btn"
                     onClick={() => playNextEpisode().catch(() => {})}
                   >
-                    {t('player.nextEpisode')} ⏭
+                    {t('player.nextEpisode')} »
                   </button>
                 ) : null}
                 <button
@@ -2169,7 +2229,7 @@ export default function Player() {
                   className="btn-ghost player-transport-btn"
                   onClick={cycleAudio}
                 >
-                  🔊 {t('player.audio')}
+                  {t('player.audio')}
                   {audioTracks.length > 1
                     ? ` (${audioTracks.find((a) => a.id === audioId)?.label || ''})`
                     : ''}
@@ -2191,7 +2251,7 @@ export default function Player() {
                 </button>
               </div>
               <p className="player-hint">
-                {desktopPointer
+                {desktopPointer && !isTvLike()
                   ? t('player.vodHintDesktop', seekJump)
                   : t('player.vodHint', seekJump)}
               </p>

@@ -314,6 +314,7 @@ export function focusFirst(root) {
     }
   }
   const preferred =
+    scope.querySelector?.('[data-tv-autofocus="true"]') ||
     scope.querySelector?.('#login-user') ||
     scope.querySelector?.('.channel-list .channel') ||
     scope.querySelector?.('.excl-tile') ||
@@ -852,14 +853,35 @@ export function useGlobalTvKeys({ onEscape, onEnter } = {}) {
           target = selected || nearest(0, 1, fromRect, chips) || chips[0] || null;
         }
 
+        // Horizontal rails (Continuar viendo / Favoritos): ←→ stay inside the rail.
+        if (!target && dir.dx !== 0) {
+          const rail = active.closest?.('.row-scroll');
+          if (rail) {
+            const inRail = candidates.filter((el) => rail.contains(el));
+            target = nearest(dir.dx, 0, fromRect, inRail);
+            if (!target) return;
+          }
+        }
+
         if (active.classList?.contains('menu-item')) {
+          // Fixed Home order (does not change when Continuar/Favoritos rails appear):
+          //  ↑↓ stay in the column; ↓ past the last tool → first tile of the first rail;
+          //  ←→ move hero↔hero / tool↔tool and never fall into the top bar (ES/EN).
           const col = active.closest('.home-col');
           const menuOnly = candidates.filter((el) => el.classList?.contains('menu-item'));
+          let stay = false;
           if (dir.dy !== 0 && col) {
             const sameCol = menuOnly.filter((el) => col.contains(el));
-            target = nearest(dir.dx, dir.dy, fromRect, sameCol);
+            target = nearest(0, dir.dy, fromRect, sameCol);
+            if (!target && dir.dy > 0) {
+              const firstRailTile = Array.from(
+                document.querySelectorAll('.home-main .row-scroll .tile'),
+              ).find((el) => candidates.includes(el));
+              target = firstRailTile || null;
+              if (!target) stay = true;
+            }
           }
-          if (!target && dir.dx !== 0) {
+          if (!target && !stay && dir.dx !== 0) {
             if (active.classList.contains('menu-item--hero')) {
               const heroes = menuOnly.filter((el) => el.classList.contains('menu-item--hero'));
               target = nearest(dir.dx, 0, fromRect, heroes);
@@ -867,8 +889,9 @@ export function useGlobalTvKeys({ onEscape, onEnter } = {}) {
               const tools = menuOnly.filter((el) => el.classList.contains('menu-item--tool'));
               target = nearest(dir.dx, 0, fromRect, tools);
             }
+            if (!target) stay = true;
           }
-          if (!target) target = nearest(dir.dx, dir.dy, fromRect, menuOnly);
+          if (stay) return;
         }
         if (!target) target = nearest(dir.dx, dir.dy, fromRect, candidates);
         if (target) {
@@ -927,4 +950,41 @@ export function useGlobalTvKeys({ onEscape, onEnter } = {}) {
       window.removeEventListener('keyup', handle, true);
     };
   }, [ctx]);
+}
+
+/**
+ * Once `ready` turns true (data loaded), move the ring to `selector` — but only
+ * if the user isn't already somewhere meaningful. Used so detail pages start on
+ * "Reproducir" (not "← Atrás") and Movies/Series start on the first poster (not
+ * the "Favoritos" chip that got the ring while the list was loading).
+ */
+export function useFocusWhenReady(ready, selector = '[data-tv-autofocus="true"]', deps = []) {
+  useEffect(() => {
+    if (!ready) return undefined;
+    let done = false;
+    const run = () => {
+      if (done) return;
+      const el = document.querySelector(selector);
+      if (!el || !isVisible(el)) return;
+      const cur = getTvFocus();
+      const typing = cur && isTypingTarget(cur) && document.activeElement === cur;
+      if (typing) {
+        done = true;
+        return;
+      }
+      const idle =
+        !cur ||
+        !cur.isConnected ||
+        cur === document.body ||
+        cur.classList?.contains('back-btn') ||
+        cur.classList?.contains('cat-chip') ||
+        cur.classList?.contains('search-box') ||
+        Boolean(cur.closest?.('.topbar, header'));
+      if (idle) setFocused(el, { native: false });
+      done = true;
+    };
+    const timers = [60, 200, 500].map((ms) => window.setTimeout(run, ms));
+    return () => timers.forEach((id) => window.clearTimeout(id));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ready, selector, ...deps]);
 }

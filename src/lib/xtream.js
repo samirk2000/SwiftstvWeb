@@ -9,6 +9,7 @@
 
 import { getSession, saveSession, clearSession } from './session.js';
 import { corsFetch } from './cors.js';
+import { cleanTitle, decodeBase64Utf8 } from './text.js';
 
 // Derive a clean `http(s)://host[:port]` base from a URL that actually
 // succeeded (so we persist HTTPS when the panel only accepted it over TLS).
@@ -136,7 +137,11 @@ export async function login(server) {
   try {
     // server.via === 'proxy' forces the /proxy route (used by the failover
     // ranking); otherwise corsFetch applies direct-first HTTPS strategy.
-    const res = await corsFetch(url, { userAgent: 'IPTVSmartersPlayer', forceProxy: server.via === 'proxy' });
+    const res = await corsFetch(url, {
+      userAgent: 'IPTVSmartersPlayer',
+      forceProxy: server.via === 'proxy',
+      timeoutMs: server.timeoutMs || 20000,
+    });
     text = res.text;
     status = res.status;
     via = res.via;
@@ -195,7 +200,8 @@ export async function login(server) {
   // HTTPS vs the http alias) so subsequent stream URLs are not mixed-content.
   const effBase = effectiveBaseUrl(resUrl) || server.baseUrl;
   const session = { baseUrl: effBase, username: server.username, password: server.password };
-  saveSession({ ...session, user_info: info });
+  // During the parallel failover race the caller saves only the winner.
+  if (!server.noSave) saveSession({ ...session, user_info: info });
   return {
     ok: true,
     status: SERVER_INFO.INVALID,
@@ -269,16 +275,16 @@ export async function getSeriesCategories(server) {
 
 // --- Streams ------------------------------------------------
 
-export async function getLiveStreams(server, categoryId) {
-  return apiList(server, 'get_live_streams', categoryId ? { category_id: categoryId } : {});
+export async function getLiveStreams(server, categoryId, opts) {
+  return apiList(server, 'get_live_streams', categoryId ? { category_id: categoryId } : {}, opts);
 }
 
-export async function getVodStreams(server, categoryId) {
-  return apiList(server, 'get_vod_streams', categoryId ? { category_id: categoryId } : {});
+export async function getVodStreams(server, categoryId, opts) {
+  return apiList(server, 'get_vod_streams', categoryId ? { category_id: categoryId } : {}, opts);
 }
 
-export async function getSeries(server, categoryId) {
-  return apiList(server, 'get_series', categoryId ? { category_id: categoryId } : {});
+export async function getSeries(server, categoryId, opts) {
+  return apiList(server, 'get_series', categoryId ? { category_id: categoryId } : {}, opts);
 }
 
 // --- Details -------------------------------------------------
@@ -291,13 +297,39 @@ export async function getVodInfo(server, vodId) {
   return apiCall(server, 'get_vod_info', { vod_id: vodId });
 }
 
+// Xtream short_epg rows carry `start`/`end` as "YYYY-MM-DD HH:MM:SS" strings
+// (panel time zone) plus `start_timestamp`/`stop_timestamp` in epoch seconds,
+// and base64-encoded `title`/`description`. The UI works in epoch seconds and
+// plain text, so normalise here (this is why the guide always looked empty).
+export function normalizeEpgRow(e) {
+  if (!e || typeof e !== 'object') return null;
+  const toEpoch = (v) => {
+    const n = Number(v);
+    return Number.isFinite(n) && n > 1e9 ? n : 0;
+  };
+  const start = toEpoch(e.start_timestamp) || toEpoch(e.start);
+  const stop = toEpoch(e.stop_timestamp) || toEpoch(e.end_timestamp) || toEpoch(e.stop) || toEpoch(e.end);
+  if (!start) return null;
+  return {
+    ...e,
+    start,
+    stop: stop || start + 3600,
+    title: cleanTitle(decodeBase64Utf8(e.title)),
+    description: cleanTitle(decodeBase64Utf8(e.description)),
+  };
+}
+
 export async function getShortEpg(server, streamId, limit = 12) {
-  return apiList(server, 'get_short_epg', { stream_id: streamId, limit });
+  const rows = await apiList(server, 'get_short_epg', { stream_id: streamId, limit }, { timeoutMs: 15000 });
+  return rows
+    .map(normalizeEpgRow)
+    .filter(Boolean)
+    .sort((a, b) => a.start - b.start);
 }
 
 // --- Generic helpers ------------------------------------------
 
-async function apiCall(server, action, params = {}) {
+async function apiCall(server, action, params = {}, opts = {}) {
   const { baseUrl, username, password } = server;
   const key = cacheKey(action, { ...params, username, password });
   const hit = cacheGet(key);
@@ -305,8 +337,12 @@ async function apiCall(server, action, params = {}) {
   const url = buildPlayerApiUrl(baseUrl, username, password, action, params);
   let text;
   try {
-    const res = await corsFetch(url, { userAgent: 'IPTVSmartersPlayer' });
+    const res = await corsFetch(url, {
+      userAgent: 'IPTVSmartersPlayer',
+      timeoutMs: opts.timeoutMs || 30000,
+    });
     text = res.text;
+    if (!res.ok && !text) return { error: SERVER_INFO.NETWORK };
   } catch (err) {
     // eslint-disable-next-line no-console
     console.warn('[api] network error', action, String(err?.message || err));
@@ -319,19 +355,57 @@ async function apiCall(server, action, params = {}) {
     parsed = JSON.parse(text);
   } catch {
     // eslint-disable-next-line no-console
-    console.warn('[api] unparseable body', action, '->', text.slice(0, 140));
+    console.warn('[api] unparseable body', action, '->', String(text || '').slice(0, 140));
     return { error: SERVER_INFO.PARSE };
   }
-  cacheSet(key, parsed);
+  // Huge full-catalog lists (30 MB of VOD) must not sit in this Map on a TV.
+  if (!opts.noCache) cacheSet(key, parsed);
   return parsed;
 }
 
-async function apiList(server, action, params = {}) {
-  const result = await apiCall(server, action, params);
+// Clean names for TV fonts and drop duplicate rows (the same stream is listed
+// once per category it belongs to when the full list is requested).
+// Movies/series uploaded twice to the panel (same title + format, different
+// stream_id) are also collapsed — channels are NOT, since two feeds with the
+// same name are usually main/backup signals.
+function tidyList(list, byName = false) {
+  const out = [];
+  const seen = new Set();
+  const seenNames = new Set();
+  for (const row of list) {
+    if (!row || typeof row !== 'object') continue;
+    const id = row.stream_id ?? row.series_id ?? null;
+    if (id !== null && id !== undefined && id !== '') {
+      const k = String(id);
+      if (seen.has(k)) continue;
+      seen.add(k);
+    }
+    if (byName && typeof row.name === 'string' && row.name) {
+      const nk = `${row.name.trim().toLowerCase()}|${String(row.container_extension || '').toLowerCase()}|${row.category_id ?? ''}`;
+      if (seenNames.has(nk)) continue;
+      seenNames.add(nk);
+    }
+    if (typeof row.name === 'string' && !row._clean) {
+      row.name = cleanTitle(row.name);
+    }
+    if (typeof row.category_name === 'string' && !row._clean) {
+      row.category_name = cleanTitle(row.category_name);
+    }
+    row._clean = true;
+    out.push(row);
+  }
+  return out;
+}
+
+async function apiList(server, action, params = {}, opts = {}) {
+  const result = await apiCall(server, action, params, opts);
   if (result && typeof result === 'object' && !Array.isArray(result) && 'error' in result) {
+    if (opts.throwOnError) throw new Error(String(result.error));
     return [];
   }
-  return parseXtreamList(result);
+  const list = parseXtreamList(result);
+  if (action === 'get_short_epg') return list;
+  return tidyList(list, action === 'get_vod_streams' || action === 'get_series');
 }
 
 // --- Playback URLs (never cached) ----------------------------

@@ -28,6 +28,10 @@ const PAGE = 60;
 const CAT_FAVORITES = '__favorites__';
 const CAT_RECENT = '__recent__';
 
+// Throw on panel/network errors so we can show "Reintentar" (and give up after
+// a timeout) instead of spinning forever on "Todos".
+const loadLiveList = (srv, cat) => getLiveStreams(srv, cat, { throwOnError: true, timeoutMs: 45000 });
+
 function isLocalLiveCat(id) {
   return id === CAT_FAVORITES || id === CAT_RECENT;
 }
@@ -76,7 +80,7 @@ function ChannelRow({ channel, index, active, onPlay, onCatchup, fav, onToggleFa
       >
         {fav ? t('live.favOn') : t('live.favAdd')}
       </button>
-      {channel.tv_archive === '1' && (
+      {String(channel.tv_archive) === '1' && (
         <button
           type="button"
           tabIndex={0}
@@ -116,6 +120,7 @@ function NowNextPanel({ channel, server }) {
   }, [channel?.stream_id, server?.baseUrl]);
 
   const now = currentProgramme(epg);
+  const loadingEpg = epg === null;
   const upcoming = (epg || [])
     .filter((e) => Number(e.start || 0) > Date.now() / 1000)
     .sort((a, b) => Number(a.start) - Number(b.start))
@@ -129,7 +134,11 @@ function NowNextPanel({ channel, server }) {
       <div className="nownext-now">
         <span className="badge now-badge">{t('live.now')}</span>
         <span className="nownext-prog">
-          {now ? `${formatEpgTime(now.start)} · ${now.title}` : t('live.offAir')}
+          {now
+            ? `${formatEpgTime(now.start)} · ${now.title}`
+            : loadingEpg
+              ? t('live.loadingGuide')
+              : t('live.noGuide')}
         </span>
       </div>
       {upcoming.length > 0 && (
@@ -278,7 +287,7 @@ export default function LiveGuide() {
     () => (effectiveCatId ? [effectiveCatId] : []),
     [effectiveCatId]
   );
-  const { data: streams, loading, error } = usePanelList(getLiveStreams, catArgs, {
+  const { data: streams, loading, error, reload } = usePanelList(loadLiveList, catArgs, {
     enabled: ready && !localCat,
   });
   // Channel (if any) whose archive selector is open.
@@ -363,6 +372,19 @@ export default function LiveGuide() {
   }, [streams, localStreams, localCat, query, catNameById]);
 
   const { visible, hasMore, loadMore, remaining } = useWindowedList(filtered, PAGE);
+
+  // The now/next strip belongs to the focused channel of THIS list. It used to
+  // keep the last focused channel ("20:00 · AEW Dynamite") across categories.
+  useEffect(() => {
+    setFocusedCh(null);
+  }, [catId, searchActive]);
+  const focusedInList = useMemo(
+    () =>
+      focused && (filtered || []).some((c) => String(c.stream_id) === String(focused.stream_id))
+        ? focused
+        : null,
+    [focused, filtered],
+  );
 
   // Track category-focus settle timer so rapid cat changes don't keep stealing focus.
   const catFocusTimerRef = useRef(null);
@@ -590,8 +612,8 @@ export default function LiveGuide() {
         ))}
       </div>
 
-      {focused && !catchupFor && (
-        <NowNextPanel channel={focused} server={server} />
+      {focusedInList && !catchupFor && !showLoading && (
+        <NowNextPanel channel={focusedInList} server={server} />
       )}
 
       {showLoading ? (
@@ -600,7 +622,14 @@ export default function LiveGuide() {
           {t('common.loading')}
         </div>
       ) : error || !filtered?.length ? (
-        <div className="state">{error ? t('common.error') : emptyMsg}</div>
+        <div className="state">
+          {error ? t('common.error') : emptyMsg}
+          {error ? (
+            <button tabIndex={0} className="btn-primary" style={{ marginTop: 16 }} onClick={reload}>
+              {t('common.retry')}
+            </button>
+          ) : null}
+        </div>
       ) : (
         <div className="channel-list">
           {visible.map((ch, i) => (

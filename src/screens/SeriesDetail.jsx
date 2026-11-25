@@ -3,13 +3,14 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { t } from '../lib/i18n.js';
 import { getSeriesInfo, seriesStreamUrl } from '../lib/xtream.js';
 import { getSession, isFavorite, toggleFavorite } from '../lib/session.js';
-import { useFocusable } from '../components/Focusable.jsx';
+import { useFocusable, useFocusWhenReady } from '../components/Focusable.jsx';
 import { pickSynopsis } from '../lib/metaText.js';
 import { hasAdultPin, needsAdultGate, hasAdultBrowseUnlock } from '../lib/parental.js';
 import AdultPinDialog from '../components/AdultPinDialog.jsx';
 
 function EpisodeRow({ index, ep, onPlay }) {
   const { ref, tabIndex } = useFocusable(`episode-${ep.id}`);
+
   return (
     <div
       ref={ref}
@@ -101,6 +102,8 @@ export default function SeriesDetail() {
     doPlay(ep);
   };
 
+  useFocusWhenReady(Boolean(info), '[data-tv-autofocus="true"]', [id]);
+
   return (
     <div>
       <AdultPinDialog
@@ -162,6 +165,16 @@ export default function SeriesDetail() {
               ) : null}
 
               <div className="detail-actions">
+                {eps.length ? (
+                  <button
+                    tabIndex={0}
+                    className="btn-primary"
+                    data-tv-autofocus="true"
+                    onClick={() => play(eps[0])}
+                  >
+                    ▶ {t('vod.play')} · T{activeSeason} E{eps[0].episode_num || 1}
+                  </button>
+                ) : null}
                 <button
                   tabIndex={0}
                   className={fav ? 'btn-ghost fav-on' : 'btn-ghost'}

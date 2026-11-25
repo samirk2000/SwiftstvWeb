@@ -20,6 +20,8 @@
 // `http://IP` redirect that an HTTPS page would block — while Exclusivos media
 // uses its own dynamic proxy + Referer/Origin headers.
 
+import { STREAM_PROXY_URLS } from './proxy.js';
+
 const SDK =
   (globalThis.location && location.origin) ||
   `http://localhost:${import.meta.env.VITE_PORT || 5173}`;
@@ -91,11 +93,12 @@ function snippet(text, n = 120) {
 // fetch() is not CORS-safelisted, so the browser sends a preflight (OPTIONS)
 // that panels/GitHub reject -> "CORS header missing" even though the direct GET
 // itself returns 200. The browser sends its own UA by default.
-async function tryDirect(urls, opts, fetchImpl) {
+async function tryDirect(urls, opts, fetchImpl, signal) {
   let last = null;
   for (const u of urls) {
+    if (signal && signal.aborted) break;
     try {
-      const res = await fetchImpl(u, { headers: { Accept: '*/*' } });
+      const res = await fetchImpl(u, { headers: { Accept: '*/*' }, signal });
       dbg('direct', u, '->', res.status);
       if (res.ok) return res;
       last = res; // 3xx/4xx — remember but keep trying https->http
@@ -116,45 +119,144 @@ async function tryDirect(urls, opts, fetchImpl) {
  *    deployed TV app); the `loginWithFailover` probe uses this to rank hosts.
  * Logs each attempt so login failures are diagnosable from the console.
  */
+// Per-host memory of the route that last worked ('direct' | 'vps' | 'proxy').
+// Panels behind Cloudflare 403 datacenter IPs (our /proxy) but accept the
+// Hetzner VPS, and some only answer direct over HTTPS — remembering the winner
+// avoids paying 1-3 failed round-trips on every catalog request.
+const hostRoute = new Map();
+
+function hostKey(url) {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return '';
+  }
+}
+
+/** First configured VPS-style /stream proxy (Hetzner), if any. */
+function vpsBase() {
+  const vps = STREAM_PROXY_URLS.find((u) => /\/stream($|[?#])/i.test(String(u).replace(/\/+$/, '')));
+  if (!vps) return '';
+  let b = String(vps).replace(/\/+$/, '').trim();
+  if (!/^https?:\/\//i.test(b)) b = `https://${b}`;
+  return b;
+}
+
+/** GET through the Hetzner VPS /stream proxy (reaches panels that 403 Cloudflare). */
+export async function vpsGet(targetUrl, fetchImpl = fetch, signal) {
+  const base = vpsBase();
+  if (!base) return { status: 0, ok: false, text: '' };
+  try {
+    const res = await fetchImpl(`${base}?target=${encodeURIComponent(targetUrl)}`, { signal });
+    const text = await res.text();
+    dbg('vps', targetUrl, '->', res.status, snippet(text));
+    return { status: res.status, ok: res.ok, text };
+  } catch (err) {
+    dbg('vps', targetUrl, 'ERR', String(err?.message || err));
+    return { status: 0, ok: false, text: '', error: err };
+  }
+}
+
+// Combine an optional caller signal with a timeout.
+function withTimeout(signal, ms) {
+  if (!ms || typeof AbortController === 'undefined') return { signal, done: () => {} };
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), ms);
+  const onAbort = () => ctrl.abort();
+  if (signal) {
+    if (signal.aborted) ctrl.abort();
+    else signal.addEventListener('abort', onAbort, { once: true });
+  }
+  return {
+    signal: ctrl.signal,
+    done: () => {
+      clearTimeout(timer);
+      if (signal) signal.removeEventListener('abort', onAbort);
+    },
+  };
+}
+
+/**
+ * Fetch a URL, returning { ok, status, text, via, url }.
+ *  - `via: 'direct'` — served straight (HTTPS preferred; HTTP only on an http page).
+ *  - `via: 'vps'`    — through the Hetzner /stream proxy (works for panels that
+ *                      block Cloudflare / datacenter ranges).
+ *  - `via: 'proxy'`  — through the Cloudflare Pages /proxy function (last resort).
+ *  - `opts.forceProxy` — only the Cloudflare /proxy.
+ *  - `opts.timeoutMs`  — abort the whole chain after N ms (default 30s).
+ * The route that works is remembered per host so later calls go straight to it.
+ */
 export async function corsFetch(targetUrl, opts = {}, fetchImpl = fetch, signal) {
-  // Proxy-first path: the deployed TV app can't trust mixed-content/CORS from
-  // the browser, and panels block Cloudflare IPs with 403 — so a host is
-  // ranked by whether /proxy reaches it. Direct is only tried on demand.
   if (opts.forceProxy) {
     const p = await proxiedGet(targetUrl, opts, fetchImpl, signal);
     return { ...p, via: 'proxy', forced: true };
   }
 
-  // HTTPS-first to dodge mixed-content; HTTP fallback covers http-only panels.
-  const candidates = [];
+  const { signal: sig, done } = withTimeout(signal, opts.timeoutMs === 0 ? 0 : opts.timeoutMs || 30000);
   try {
-    const u = new URL(targetUrl);
-    if (u.protocol === 'https:') {
-      candidates.push(u.toString());
-    } else {
-      candidates.push(preferHttps(u.toString()));
-      candidates.push(u.toString());
+    const host = hostKey(targetUrl);
+    const remembered = hostRoute.get(host);
+
+    // HTTPS-first to dodge mixed-content. Plain http is only worth trying when
+    // the page itself is http (dev server); on https it is always blocked.
+    const candidates = [];
+    try {
+      const u = new URL(targetUrl);
+      if (u.protocol === 'https:') {
+        candidates.push(u.toString());
+      } else {
+        candidates.push(preferHttps(u.toString()));
+        const pageIsHttp = globalThis.location && globalThis.location.protocol === 'http:';
+        if (pageIsHttp) candidates.push(u.toString());
+      }
+    } catch {
+      candidates.push(targetUrl);
     }
-  } catch {
-    candidates.push(targetUrl);
-  }
 
-  let direct;
-  let directUrl = '';
-  try {
-    direct = await tryDirect(candidates, opts, fetchImpl);
-    if (direct && direct.url) directUrl = direct.url;
-  } catch {
-    direct = { status: 0, ok: false };
-  }
+    const routes = remembered === 'vps'
+      ? ['vps', 'direct', 'proxy']
+      : remembered === 'proxy'
+        ? ['proxy', 'direct', 'vps']
+        : ['direct', 'vps', 'proxy'];
 
-  if (direct && direct.ok) {
-    return { ok: true, status: direct.status, text: await direct.text(), via: 'direct', url: directUrl || candidates[0] };
+    let last = { status: 0, ok: false, text: '' };
+    for (const route of routes) {
+      if (sig && sig.aborted) break;
+      if (route === 'direct') {
+        try {
+          const direct = await tryDirect(candidates, opts, fetchImpl, sig);
+          if (direct && direct.ok) {
+            const text = await direct.text();
+            hostRoute.set(host, 'direct');
+            return { ok: true, status: direct.status, text, via: 'direct', url: direct.url || candidates[0] };
+          }
+          if (direct) last = { status: direct.status, ok: false, text: '', via: 'direct' };
+        } catch {
+          // CORS / mixed content / network — try the next route.
+        }
+      } else if (route === 'vps') {
+        if (!vpsBase()) continue;
+        const v = await vpsGet(targetUrl, fetchImpl, sig);
+        if (v.ok) {
+          hostRoute.set(host, 'vps');
+          return { ...v, via: 'vps', url: targetUrl };
+        }
+        if (v.status) last = { ...v, via: 'vps' };
+      } else {
+        dbg('falling back to /proxy', targetUrl);
+        const p = await proxiedGet(targetUrl, opts, fetchImpl, sig);
+        if (p.ok) {
+          hostRoute.set(host, 'proxy');
+          return { ...p, via: 'proxy', url: targetUrl };
+        }
+        if (p.status) last = { ...p, via: 'proxy' };
+      }
+    }
+    if (remembered) hostRoute.delete(host);
+    return { ...last, ok: false, url: targetUrl };
+  } finally {
+    done();
   }
-
-  dbg('direct failed, falling back to proxy', targetUrl);
-  const p = await proxiedGet(targetUrl, opts, fetchImpl, signal);
-  return { ...p, via: 'proxy' };
 }
 
 export const isDevOrUndefined = typeof SDK === 'string';

@@ -1993,3 +1993,88 @@ html[data-ui-scale='comfortable'] .search-box {
   font-size: 18px;
 }
 
+
+/* ---------- QA fixes (nov 2026) ---------- */
+/* Focus ring on the first chip / first poster was clipped by the scroller edge. */
+.cat-bar {
+  padding: 10px 14px 18px;
+  margin-left: -12px;
+  margin-right: -12px;
+  scroll-padding-left: 14px;
+}
+.grid {
+  padding: 8px 8px 12px;
+  margin-left: -8px;
+  margin-right: -8px;
+}
+
+/* Titles: two lines instead of one cut-off line. */
+.tile-title {
+  white-space: normal;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  line-height: 1.25;
+  max-height: calc(1.25em * 2 + 30px);
+}
+.tile.tv-focused .tile-title,
+.tile.focused .tile-title {
+  -webkit-line-clamp: 3;
+  max-height: calc(1.25em * 3 + 30px);
+}
+
+/* Poster placeholder while the image loads (or when it fails). */
+.tile-art--placeholder {
+  background: linear-gradient(160deg, #1b2330 0%, #121821 100%);
+}
+.tile-art--placeholder::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: url('/brand/logo-dual.jpg') center 38% / 46% auto no-repeat;
+  opacity: 0.12;
+  pointer-events: none;
+}
+.tile-art--placeholder img {
+  position: relative;
+  object-fit: cover;
+}
+
+/* Inline spinner for "still searching in…" status lines. */
+.spinner--inline {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border-width: 2px;
+  vertical-align: -2px;
+}
+.search-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* Player loading overlay: channel name + slow-signal message. */
+.player-loading-title {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--text);
+  text-align: center;
+  max-width: 80vw;
+}
+.player-loading-note {
+  font-size: 16px;
+  color: var(--text-dim);
+  text-align: center;
+  max-width: 70vw;
+}
+.player-loading-actions {
+  display: flex;
+  gap: 12px;
+}
+.excl-tile-icon--img {
+  width: 40px;
+  height: 40px;
+  object-fit: contain;
+}

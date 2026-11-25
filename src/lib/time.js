@@ -27,9 +27,21 @@ export function formatExpiry(expDate) {
   const n = Number(expDate);
   if (Number.isFinite(n) && n > 0) {
     const d = new Date(n * 1000);
-    if (!Number.isNaN(d.getTime())) return d.toLocaleDateString();
+    if (!Number.isNaN(d.getTime())) {
+      // Always dd/mm/yyyy (the TV browser locale is often en-US → 11/25/2026).
+      const dd = String(d.getDate()).padStart(2, '0');
+      const mm = String(d.getMonth() + 1).padStart(2, '0');
+      return `${dd}/${mm}/${d.getFullYear()}`;
+    }
   }
   return String(expDate);
+}
+
+/** Whole days left until an epoch-seconds exp_date (0 = expires today). */
+export function daysUntil(expDate) {
+  const n = Number(expDate);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return Math.max(0, Math.floor((n * 1000 - Date.now()) / 86400000));
 }
 
 // The currently-playing programme for a channel given its EPG list.

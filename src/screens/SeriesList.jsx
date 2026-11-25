@@ -9,12 +9,17 @@ import { useWindowedList } from '../hooks/useWindowedList.js';
 import { isCategoryLocked, hasAdultPin, needsAdultGate, unlockAdultBrowse, clearAdultBrowseUnlock, isAdultBrowseUnlocked } from '../lib/parental.js';
 import { isAdultCategory, isAdultContent } from '../lib/adult.js';
 import { getFavoritesByType } from '../lib/session.js';
-import { useFocusable } from '../components/Focusable.jsx';
+import { useFocusable, useFocusWhenReady } from '../components/Focusable.jsx';
 import AdultPinDialog from '../components/AdultPinDialog.jsx';
 import { matchesSearch } from '../lib/searchText.js';
+import { gridPoster } from '../lib/text.js';
 
 const PAGE = 48;
 const CAT_FAVORITES = '__favorites__';
+
+// Throw on panel/network errors so the screen can show "Reintentar" instead of
+// an endless spinner or a misleading "Sin resultados".
+const loadSeriesList = (srv, cat) => getSeries(srv, cat, { throwOnError: true, timeoutMs: 45000 });
 
 function SeriesTile({ series, onOpen }) {
   const { ref, tabIndex } = useFocusable(`series-${series.series_id}`);
@@ -26,12 +31,15 @@ function SeriesTile({ series, onOpen }) {
       onClick={() => onOpen(series)}
       onMouseEnter={() => ref.current && ref.current.focus()}
     >
-      <div className="tile-art">
+      <div className="tile-art tile-art--placeholder">
         <img
-          src={series.cover || series.poster}
+          src={gridPoster(series.cover || series.poster)}
           alt=""
           loading="lazy"
           decoding="async"
+          onError={(e) => {
+            e.currentTarget.style.visibility = 'hidden';
+          }}
         />
         <div className="tile-title">{series.name}</div>
       </div>
@@ -75,7 +83,7 @@ export default function SeriesList() {
     searchActive
   );
 
-  const { data: series, loading, error } = usePanelList(getSeries, catArgs, {
+  const { data: series, loading, error, reload } = usePanelList(loadSeriesList, catArgs, {
     enabled: ready && !localFav,
   });
 
@@ -161,6 +169,9 @@ export default function SeriesList() {
     }
   };
 
+  // First poster gets the ring once the list is there (not the Favoritos chip).
+  useFocusWhenReady(Boolean(ready && (localFav || !loading) && filtered?.length), '.grid .tile', [catId]);
+
   return (
     <div>
       <AdultPinDialog
@@ -222,6 +233,11 @@ export default function SeriesList() {
             : localFav
               ? t('series.noFavorites')
               : t('vod.noResults')}
+          {error ? (
+            <button tabIndex={0} className="btn-primary" style={{ marginTop: 16 }} onClick={reload}>
+              {t('common.retry')}
+            </button>
+          ) : null}
         </div>
       ) : (
         <>

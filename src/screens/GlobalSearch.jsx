@@ -2,8 +2,8 @@ import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { t } from '../lib/i18n.js';
 import { getSession } from '../lib/session.js';
-import { loadCatalog } from '../lib/catalogCache.js';
-import { matchesSearch } from '../lib/searchText.js';
+import { loadCatalogProgressive } from '../lib/catalogCache.js';
+import { normalizeSearch } from '../lib/searchText.js';
 import { liveStreamTsUrl } from '../lib/xtream.js';
 import { setLiveZapList, setLastLiveChannel } from '../lib/liveZap.js';
 import { isAdultContent } from '../lib/adult.js';
@@ -26,50 +26,68 @@ function ResultRow({ focusKey, label, meta, onActivate }) {
   );
 }
 
+const PART_LABEL = { live: 'search.live', vod: 'search.movies', series: 'search.series' };
+
 export default function GlobalSearch() {
   const navigate = useNavigate();
   const [query, setQuery] = useState('');
-  const [loading, setLoading] = useState(true);
+  const [debounced, setDebounced] = useState('');
+  // Per-part state: 'loading' | 'ready' | 'error'
+  const [parts, setParts] = useState({ live: 'loading', series: 'loading', vod: 'loading' });
   const [catalog, setCatalog] = useState({ live: [], vod: [], series: [] });
   const [server, setServer] = useState(null);
+  const [reloadTick, setReloadTick] = useState(0);
 
   useEffect(() => {
     const saved = getSession();
     if (!saved) {
       navigate('/login', { replace: true });
-      return;
+      return undefined;
     }
     const srv = { baseUrl: saved.baseUrl, username: saved.username, password: saved.password };
     setServer(srv);
     let cancelled = false;
-    (async () => {
-      setLoading(true);
-      const data = await loadCatalog(srv);
-      if (!cancelled) {
-        setCatalog(data);
-        setLoading(false);
-      }
-    })();
+    setParts((prev) => {
+      const next = { ...prev };
+      for (const k of Object.keys(next)) if (next[k] !== 'ready') next[k] = 'loading';
+      return next;
+    });
+    loadCatalogProgressive(srv, (part, items, err) => {
+      if (cancelled) return;
+      if (items) setCatalog((prev) => ({ ...prev, [part]: items }));
+      setParts((prev) => ({ ...prev, [part]: err ? 'error' : 'ready' }));
+    });
     return () => {
       cancelled = true;
     };
-  }, [navigate]);
+  }, [navigate, reloadTick]);
 
-  const q = query.trim();
+  // Debounce typing so a TV keyboard doesn't refilter 40k titles per letter.
+  useEffect(() => {
+    const id = window.setTimeout(() => setDebounced(query), 300);
+    return () => window.clearTimeout(id);
+  }, [query]);
+
+  const q = debounced.trim();
   const results = useMemo(() => {
     if (q.length < 2) return { live: [], vod: [], series: [] };
-    const live = (catalog.live || [])
-      .filter((c) => matchesSearch(c.name, q) && !isAdultContent(c.name, c.category_name || ''))
-      .slice(0, LIMIT);
-    const vod = (catalog.vod || [])
-      .filter((v) => matchesSearch(v.name, q) && !isAdultContent(v.name, v.category_name || ''))
-      .slice(0, LIMIT);
-    const series = (catalog.series || [])
-      .filter((s) => matchesSearch(s.name, q) && !isAdultContent(s.name, s.category_name || ''))
-      .slice(0, LIMIT);
-    return { live, vod, series };
+    const needle = normalizeSearch(q);
+    const pick = (list) => {
+      const out = [];
+      for (const it of list || []) {
+        if (out.length >= LIMIT) break;
+        const hay = it.n !== undefined ? it.n : normalizeSearch(it.name);
+        if (hay.includes(needle) && !isAdultContent(it.name, it.category_name || '')) out.push(it);
+      }
+      return out;
+    };
+    return { live: pick(catalog.live), vod: pick(catalog.vod), series: pick(catalog.series) };
   }, [catalog, q]);
 
+  const loadingParts = Object.keys(parts).filter((k) => parts[k] === 'loading');
+  const errorParts = Object.keys(parts).filter((k) => parts[k] === 'error');
+  const anyReady = Object.values(parts).some((v) => v === 'ready');
+  const loading = !anyReady && loadingParts.length > 0;
   const total = results.live.length + results.vod.length + results.series.length;
 
   const playLive = (ch) => {
@@ -110,16 +128,31 @@ export default function GlobalSearch() {
         onChange={(e) => setQuery(e.target.value)}
       />
       <p className="hint">{t('search.hint')}</p>
+      {loadingParts.length > 0 && !loading ? (
+        <p className="hint search-status">
+          <span className="spinner spinner--inline" />{' '}
+          {t('search.loadingPart', loadingParts.map((p) => t(PART_LABEL[p])).join(', '))}
+        </p>
+      ) : null}
+      {errorParts.length > 0 ? (
+        <p className="hint search-status">
+          {t('search.partError', errorParts.map((p) => t(PART_LABEL[p])).join(', '))}{' '}
+          <button tabIndex={0} className="btn-ghost btn-xs" onClick={() => setReloadTick((x) => x + 1)}>
+            {t('common.retry')}
+          </button>
+        </p>
+      ) : null}
 
       {loading ? (
         <div className="state">
           <div className="spinner" />
           {t('common.loading')}
+          <p className="hint">{t('search.firstTime')}</p>
         </div>
       ) : q.length < 2 ? (
         <div className="state">{t('search.typeMore')}</div>
       ) : total === 0 ? (
-        <div className="state">{t('search.noResults')}</div>
+        <div className="state">{loadingParts.length ? t('common.loading') : t('search.noResults')}</div>
       ) : (
         <div className="search-sections">
           {results.live.length > 0 && (

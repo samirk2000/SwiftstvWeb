@@ -7,6 +7,7 @@
 //    json (parse nested list), extract (regex-extract .m3u8 from HTML).
 //  - "Needs origin headers" is detected DYNAMICALLY against the published
 //    proxy_base_url / derived host / proxy_path — never hardcoded hosts.
+import { cleanTitle, looksLikeErrorPage } from './text.js';
 import { corsFetch } from './cors.js';
 
 export const REMOTE_CONFIG_URLS = [
@@ -85,7 +86,28 @@ export function publishProxyConfig(cfg) {
 async function fetchText(url) {
   const res = await corsFetch(url, { userAgent: 'SwiftstvExclusive/1.0' });
   if (!res.ok) return '';
+  // A Cloudflare/nginx error page served with 200 is not a catalog.
+  if (isGarbageBody(res.text)) return '';
   return res.text;
+}
+
+/** HTML error page instead of JSON/M3U (522 timeouts, "Attention required", …). */
+export function isGarbageBody(text) {
+  const t = String(text || '').trim();
+  if (!t) return true;
+  if (t.startsWith('#EXTM3U') || t.startsWith('{') || t.startsWith('[')) return false;
+  return /^<(!doctype|html|head|body)/i.test(t) && looksLikeErrorPage(t);
+}
+
+/**
+ * True when a catalog entry is scraper garbage rather than an event: the
+ * generator sometimes turns a Cloudflare error page into "events" such as
+ * "Connection timed out Error code 522 (cloudflare.com)".
+ */
+export function isGarbageEntry(name, id = '') {
+  const n = `${name || ''} ${id || ''}`;
+  if (looksLikeErrorPage(n)) return true;
+  return /troubleshooting|error[-_ ]code|cloudflare|timed[-_ ]out|cf[-_ ]ray|captcha/i.test(n);
 }
 
 function parseJsonBody(text) {
@@ -146,10 +168,12 @@ function buildCatalog(sourceDefs) {
   const sources = [];
   const channels = [];
   for (const def of sourceDefs) {
-    const name = String(def.name || def.id || 'Exclusivo');
+    if (!def || typeof def !== 'object') continue;
+    if (isGarbageEntry(def.name, def.id)) continue;
+    const name = cleanTitle(String(def.name || def.id || 'Exclusivo'));
     const type = (String(def.type || 'direct') || 'direct').toLowerCase();
     const logo = String(def.logo || '');
-    const category = String(def.category || '').trim();
+    const category = cleanTitle(String(def.category || '').trim());
     const urls = sourceUrls(def);
     sources.push({ name, type, logo, category, sourceId: String(def.id || ''), urls });
 
@@ -204,7 +228,9 @@ export function parseM3u(body) {
       title = extinfName(line);
       logo = extinfLogo(line);
     } else if (!line.startsWith('#') && /^http/i.test(line)) {
-      out.push({ name: title || `Exclusivo ${out.length + 1}`, url: line, logo });
+      if (!isGarbageEntry(title)) {
+        out.push({ name: cleanTitle(title) || `Exclusivo ${out.length + 1}`, url: line, logo });
+      }
       title = '';
       logo = '';
     }
@@ -238,7 +264,9 @@ export function parseJsonList(body) {
   if (!Array.isArray(rows)) return [];
   const out = [];
   for (const row of rows) {
-    const name = String(row.name || row.title || '');
+    if (!row || typeof row !== 'object') continue;
+    if (isGarbageEntry(row.name || row.title, row.id)) continue;
+    const name = cleanTitle(String(row.name || row.title || ''));
     let url = String(row.url || row.file || row.src || '').trim();
     const logo = String(row.logo || row.tvg_logo || '').trim();
     const outRow = { name, url, logo, mirrors: [url] };
