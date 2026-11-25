@@ -407,7 +407,10 @@ app.get('/stream', (req, res) => {
   if (cacheKey) {
     const hitEntry = listCacheGet(cacheKey);
     if (hitEntry) return sendCachedList(req, res, hitEntry, 'HIT');
-    upstreamFetch(t.toString(), upstreamHeaders, 0, { cancelled: false, cancel: () => {} }, (err, upRes) => {
+    // Ask the panel for gzip on list calls: the VPS<->panel link is the slow
+    // part, and JSON shrinks ~4-5x.
+    const listHeaders = { ...upstreamHeaders, 'Accept-Encoding': 'gzip' };
+    upstreamFetch(t.toString(), listHeaders, 0, { cancelled: false, cancel: () => {} }, (err, upRes) => {
       if (err) {
         res.writeHead(502, { 'Content-Type': 'application/json', ...ALLOW_CORS });
         res.end(JSON.stringify({ error: 'upstream', detail: String(err && err.message || err) }));
@@ -415,23 +418,36 @@ app.get('/stream', (req, res) => {
       }
       const status = upRes.statusCode || 200;
       const ct = String(upRes.headers['content-type'] || 'application/json');
-      // Stream straight to the client (first byte immediately, so slow panels
-      // never trip nginx's read timeout) and keep a copy for the cache.
+      const upGz = /\bgzip\b/i.test(String(upRes.headers['content-encoding'] || ''));
+      const clientGz = /\bgzip\b/i.test(req.get('accept-encoding') || '');
       const keep = status === 200 && /json/i.test(ct);
       const chunks = [];
       let kept = 0;
-      res.writeHead(status, { ...ALLOW_CORS, 'Content-Type': ct, 'X-Cache': 'MISS' });
+      const headers = { ...ALLOW_CORS, 'Content-Type': ct, 'X-Cache': 'MISS' };
+      let body = upRes;
+      if (upGz && clientGz) {
+        headers['Content-Encoding'] = 'gzip';
+        headers.Vary = 'Accept-Encoding';
+      } else if (upGz) {
+        body = upRes.pipe(zlib.createGunzip());
+        body.on('error', () => res.destroy());
+      }
+      res.writeHead(status, headers);
+      // Keep the bytes exactly as the panel sent them (gzip or raw).
       upRes.on('data', (c) => {
         if (keep && kept <= LIST_CACHE_MAX_RAW) { chunks.push(c); kept += c.length; }
       });
-      upRes.pipe(res); // pipe handles backpressure and ends res
+      body.pipe(res); // pipe handles backpressure and ends res
       upRes.on('error', () => res.destroy());
       res.on('close', () => { if (!upRes.complete) upRes.destroy(); });
       upRes.on('end', () => {
         if (!keep || kept > LIST_CACHE_MAX_RAW || !upRes.complete) return;
         const buf = Buffer.concat(chunks);
-        if (cacheableListBody(status, ct, buf)) {
-          zlib.gzip(buf, { level: 6 }, (zerr, gz) => { if (!zerr) listCachePut(cacheKey, gz, ct); });
+        const store = (raw, gz) => { if (cacheableListBody(status, ct, raw)) listCachePut(cacheKey, gz, ct); };
+        if (upGz) {
+          zlib.gunzip(buf, (zerr, raw) => { if (!zerr) store(raw, buf); });
+        } else {
+          zlib.gzip(buf, { level: 6 }, (zerr, gz) => { if (!zerr) store(buf, gz); });
         }
       });
     });

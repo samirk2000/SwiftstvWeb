@@ -113,6 +113,8 @@ that 403 those clouds will now stream.
   any non-200 / non-JSON / `auth:0` response.
 - Response header `X-Cache: HIT|MISS`; `/healthz` shows entries and bytes.
 - Misses stream straight through (no waiting for the whole body).
+- List calls ask the panel for `Accept-Encoding: gzip` (the VPS<->panel link
+  is the slow part, ~60 KB/s); gzip is passed to gzip-capable clients as is.
 
 > **Note:** the VPS actually runs an older proxy (from commit 78bd494, Aug 2026)
 > plus the list cache. That exact file is `proxy.deployed.js`. `proxy.js`
