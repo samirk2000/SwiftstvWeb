@@ -185,6 +185,8 @@ export default function Login() {
       e.key === 'BrowserBack' ||
       e.key === 'GoBack' ||
       code === 461 ||
+      e.key === 'XF86Back' ||
+      code === 10009 ||
       code === 27;
     const isBs = e.key === 'Backspace' || code === 8;
 

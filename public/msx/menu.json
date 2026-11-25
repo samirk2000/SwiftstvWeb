@@ -1,0 +1,28 @@
+{
+    "headline": "Swift STV",
+    "action": "link:https://swiftstvweb.pages.dev/?msx=1",
+    "menu": [
+        {
+            "icon": "live-tv",
+            "label": "Abrir Swift STV",
+            "data": {
+                "type": "list",
+                "headline": "Swift STV",
+                "template": {
+                    "type": "separate",
+                    "layout": "0,0,4,3",
+                    "color": "msx-glass",
+                    "imageFiller": "fit"
+                },
+                "items": [
+                    {
+                        "title": "Abrir Swift STV",
+                        "titleFooter": "Presiona OK",
+                        "image": "https://swiftstvweb.pages.dev/brand/logo-dual.jpg",
+                        "action": "link:https://swiftstvweb.pages.dev/?msx=1"
+                    }
+                ]
+            }
+        }
+    ]
+}

@@ -1107,6 +1107,8 @@ export default function Player() {
         e.key === 'BrowserBack' ||
         e.key === 'GoBack' ||
         code === 461 ||
+        e.key === 'XF86Back' ||
+        code === 10009 ||
         code === 27;
 
       // Netflix next-episode card owns the remote while visible (trap).

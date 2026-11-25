@@ -17,6 +17,8 @@ import {
 
 /** LG webOS Back button */
 export const LG_BACK_KEYCODE = 461;
+/** Samsung Tizen remote Back (also seen inside Media Station X). */
+export const SAMSUNG_BACK_KEYCODE = 10009;
 /** Android TV / some remotes DPAD_CENTER */
 const DPAD_CENTER = 23;
 
@@ -608,6 +610,8 @@ function isRemoteBackKey(e) {
     e.key === 'BrowserBack' ||
     e.key === 'GoBack' ||
     code === LG_BACK_KEYCODE ||
+    e.key === 'XF86Back' ||
+    code === SAMSUNG_BACK_KEYCODE ||
     code === 27
   );
 }

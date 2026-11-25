@@ -1,0 +1,9 @@
+{
+    "name": "Swift STV",
+    "version": "1.0.0",
+    "parameter": "menu:{PREFIX}{SERVER}/msx/menu.json",
+    "launcher": {
+        "image": "https://swiftstvweb.pages.dev/brand/logo-dual.jpg",
+        "color": "#0b0f16"
+    }
+}

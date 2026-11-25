@@ -1,0 +1,4 @@
+# Media Station X lee /msx/start.json y /msx/menu.json desde otro origen (msx.benzac.de).
+/msx/*
+  Access-Control-Allow-Origin: *
+  Cache-Control: no-cache

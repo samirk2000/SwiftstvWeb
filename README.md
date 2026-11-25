@@ -315,3 +315,11 @@ que el panel cuente cada fragmento como una conexión nueva. En su lugar:
 ## Soporte
 
 - Email `soporte@swiftdigitalaccess.online` · WhatsApp `+52 662 268 4690`.
+
+## Media Station X (Smart TV LG / Samsung / Hisense)
+
+- `public/msx/start.json` + `public/msx/menu.json`: el cliente instala **Media Station X**, va a
+  *Settings → Start Parameter → Setup*, escribe `swiftstvweb.pages.dev` con el **candado (HTTPS)
+  activado** y acepta. Desde ahí MSX abre la app solita (`link:https://swiftstvweb.pages.dev/?msx=1`).
+- `public/_headers`: CORS `*` para `/msx/*` (MSX lee esos JSON desde `msx.benzac.de`).
+- Si cambias de dominio, actualiza las URLs dentro de `public/msx/menu.json` y `start.json`.

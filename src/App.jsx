@@ -109,6 +109,16 @@ function exitApp() {
   } catch {
     /* ignore */
   }
+  // Dentro de Media Station X (Samsung / Vidaa): volver a la primera entrada
+  // del historial = MSX (recomendado por la wiki de MSX: exitToRootApp).
+  try {
+    if (sessionStorage.getItem('swiftstv.msx') === '1' && window.history.length > 1) {
+      window.history.go(1 - window.history.length);
+      return;
+    }
+  } catch {
+    /* ignore */
+  }
   try {
     window.close();
   } catch {
