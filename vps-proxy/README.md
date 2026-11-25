@@ -120,3 +120,21 @@ that 403 those clouds will now stream.
 > plus the list cache. That exact file is `proxy.deployed.js`. `proxy.js`
 > (continuous live fan-out, 45 s upstream timeout, etc.) has **not** been
 > deployed to the VPS yet.
+
+### VPS deployment state (2026-11-25)
+
+- `/opt/swiftstv` on the VPS is a clone of this repo. Its local branch
+  **`vps-deployed`** holds one commit with the running `vps-proxy/proxy.js`
+  (= `proxy.deployed.js` here), so `git status` is clean. Backup files
+  (`proxy.js.bak-*`, `proxy.js.v2-stream`) are ignored through
+  `.git/info/exclude`. To update: edit, test on a side port
+  (`PORT=3998 node proxy.js`), `pm2 reload swift-stream-proxy`, then commit
+  on `vps-deployed`. Do not `git pull` main over it blindly.
+- Live nginx site `proxy.swiftstv.com` has `proxy_read_timeout 300s`,
+  `proxy_send_timeout 300s`, `send_timeout 300s`, `proxy_connect_timeout 15s`
+  (slow panel lists used to hit nginx's default 60 s and return 504).
+  Backups are in `/root/backups/`.
+- Why `proxy.js` (live fan-out) is not deployed: it changes how live streams
+  are delivered (one shared upstream per channel, a different teardown), and
+  the VPS's only job is relaying HTTP to HTTPS for paying customers. The
+  current stream path works, so that change needs its own planned test window.
