@@ -1,11 +1,235 @@
-import { useMemo, useState, useEffect } from 'react';
+import { useMemo, useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { t } from '../lib/i18n.js';
-import { getContinueWatching, getFavorites, getSession, toggleFavorite } from '../lib/session.js';
+import { getContinueWatching, getFavorites, getSession, toggleFavorite, isFavorite } from '../lib/session.js';
 import { isAdultContent } from '../lib/adult.js';
 import { useSession } from '../context/SessionContext.jsx';
 import { useFocusable, setFocused, FocusScope } from '../components/Focusable.jsx';
-import { Row, Tile } from '../components/ui.jsx';
+
+// Max 2 row fetches at a time so a slow panel isn't flooded on Home.
+const rowQueue = { active: 0, waiting: [] };
+function queued(fn) {
+  return new Promise((resolve, reject) => {
+    const run = () => {
+      rowQueue.active += 1;
+      fn()
+        .then(resolve, reject)
+        .finally(() => {
+          rowQueue.active -= 1;
+          const next = rowQueue.waiting.shift();
+          if (next) next();
+        });
+    };
+    if (rowQueue.active < 2) run();
+    else rowQueue.waiting.push(run);
+  });
+}
+
+function currentServer() {
+  const s = getSession();
+  return s?.baseUrl ? { baseUrl: s.baseUrl, username: s.username, password: s.password } : null;
+}
+
+function HeroButton({ focusKey, className, primary, onClick, children }) {
+  const { ref, tabIndex } = useFocusable(focusKey);
+  return (
+    <button
+      ref={ref}
+      tabIndex={tabIndex}
+      type="button"
+      className={className}
+      data-hero-btn="true"
+      data-hero-primary={primary ? 'true' : undefined}
+      onClick={onClick}
+    >
+      {children}
+    </button>
+  );
+}
+
+/** Big featured banner that slowly rotates through the newest titles. */
+function HeroBanner({ items, onPlay, onInfo, onToggleList, listTick }) {
+  const [idx, setIdx] = useState(0);
+  const [backdrops, setBackdrops] = useState({});
+  const rootRef = useRef(null);
+  const item = items[idx % Math.max(1, items.length)];
+
+  // Rotate every 10 s — but never while the user is on the banner's buttons.
+  useEffect(() => {
+    if (items.length < 2) return undefined;
+    const timer = window.setInterval(() => {
+      if (document.hidden) return;
+      if (rootRef.current?.querySelector('.tv-focused')) return;
+      setIdx((i) => (i + 1) % items.length);
+    }, 10000);
+    return () => window.clearInterval(timer);
+  }, [items.length]);
+
+  // Backdrops: series lists carry one; movies need get_vod_info (cached).
+  useEffect(() => {
+    let alive = true;
+    const srv = currentServer();
+    const want = [item, items[(idx + 1) % Math.max(1, items.length)]].filter(Boolean);
+    want.forEach((it) => {
+      const k = `${it.kind}:${it.id}`;
+      if (backdrops[k] !== undefined) return;
+      if (it.backdrop) {
+        setBackdrops((b) => ({ ...b, [k]: it.backdrop }));
+        return;
+      }
+      if (it.kind !== 'vod' || !srv) {
+        setBackdrops((b) => ({ ...b, [k]: '' }));
+        return;
+      }
+      getVodInfo(srv, it.id)
+        .then((res) => {
+          if (!alive) return;
+          const info = res?.info || {};
+          const bd = firstBackdrop(info.backdrop_path);
+          setBackdrops((b) => ({
+            ...b,
+            [k]: bd || '',
+            [`${k}|genre`]: info.genre || '',
+            [`${k}|plot`]: typeof info.plot === 'string' ? info.plot : '',
+          }));
+        })
+        .catch(() => alive && setBackdrops((b) => ({ ...b, [k]: '' })));
+    });
+    return () => {
+      alive = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [idx, items]);
+
+  if (!item) return null;
+  const k = `${item.kind}:${item.id}`;
+  const backdrop = backdrops[k];
+  const plot = item.plot || backdrops[`${k}|plot`] || '';
+  const genre = item.genre || backdrops[`${k}|genre`] || '';
+  const inList = isFavorite(item.kind, item.id);
+  const meta = [
+    item.kind === 'series' ? t('home.heroSeries') : t('home.heroMovie'),
+    item.year,
+    item.rating > 0 ? `★ ${Number(item.rating).toFixed(1).replace(/\.0$/, '')}` : '',
+    genre ? String(genre).split(/[,/]/)[0].trim() : '',
+  ].filter(Boolean);
+
+  return (
+    <section ref={rootRef} className="home-hero" aria-roledescription="carrusel" data-list-tick={listTick}>
+      <div key={k} className={`home-hero-bg ${backdrop ? '' : 'home-hero-bg--poster'}`}>
+        {backdrop ? (
+          <img src={backdrop} alt="" decoding="async" />
+        ) : item.img ? (
+          <img className="home-hero-poster" src={gridPoster(item.img)} alt="" decoding="async" />
+        ) : null}
+      </div>
+      <div className="home-hero-shade" />
+      <div key={`${k}-txt`} className="home-hero-content">
+        <span className="home-hero-kicker">{t('home.featured')}</span>
+        <h2 className="home-hero-title">{item.name}</h2>
+        <div className="home-hero-meta">
+          {meta.map((m) => (
+            <span key={m}>{m}</span>
+          ))}
+        </div>
+        {plot ? <p className="home-hero-plot">{plot}</p> : null}
+        <div className="home-hero-actions">
+          <HeroButton focusKey="hero-play" className="btn-primary btn-lg" primary onClick={() => onPlay(item)}>
+            ▶ {t('vod.play')}
+          </HeroButton>
+          <HeroButton focusKey="hero-info" className="btn-secondary btn-lg" onClick={() => onInfo(item)}>
+            ⓘ {t('home.moreInfo')}
+          </HeroButton>
+          <HeroButton focusKey="hero-list" className="btn-secondary btn-lg" onClick={() => onToggleList(item)}>
+            {inList ? `✓ ${t('home.inMyList')}` : `+ ${t('home.myList')}`}
+          </HeroButton>
+        </div>
+      </div>
+      {items.length > 1 ? (
+        <div className="home-hero-dots" aria-hidden="true">
+          {items.map((it, i) => (
+            <span key={`${it.kind}-${it.id}`} className={i === idx % items.length ? 'on' : ''} />
+          ))}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+/** One lazily loaded row of posters (fetches when it scrolls near the screen). */
+function LazyRow({ row, eager, onItems, onOpen }) {
+  const ref = useRef(null);
+  const [items, setItems] = useState(null);
+  const [failed, setFailed] = useState(false);
+  const [visible, setVisible] = useState(Boolean(eager));
+
+  useEffect(() => {
+    if (visible) return undefined;
+    const el = ref.current;
+    if (!el || typeof IntersectionObserver !== 'function') {
+      const id = window.setTimeout(() => setVisible(true), 1500);
+      return () => window.clearTimeout(id);
+    }
+    const io = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) {
+          setVisible(true);
+          io.disconnect();
+        }
+      },
+      { rootMargin: '500px 0px' },
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  }, [visible]);
+
+  useEffect(() => {
+    if (!visible) return undefined;
+    let alive = true;
+    const srv = currentServer();
+    if (!srv) return undefined;
+    queued(() => loadRowItems(srv, row))
+      .then((list) => {
+        if (!alive) return;
+        setItems(list);
+        if (onItems) onItems(row, list);
+      })
+      .catch(() => alive && setFailed(true));
+    return () => {
+      alive = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visible, row.key]);
+
+  if (failed || (items && !items.length)) return null;
+  return (
+    <section ref={ref} className="row home-row">
+      <h2 className="row-title">{row.title}</h2>
+      {!items ? (
+        <SkeletonRow poster />
+      ) : (
+        <div className="row-scroll">
+          {items.map((it) => (
+            <Tile
+              key={`${it.kind}-${it.id}`}
+              focusKey={`row-${row.key}-${it.id}`}
+              title={it.name}
+              poster={gridPoster(it.img)}
+              aspect="2/3"
+              className="poster"
+              onActivate={() => onOpen(it)}
+            />
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+import { Row, Tile, SkeletonRow } from '../components/ui.jsx';
+import { loadHomePlan, loadRowItems } from '../lib/homeRows.js';
+import { getVodInfo, vodStreamUrl } from '../lib/xtream.js';
+import { isCategoryLocked } from '../lib/parental.js';
+import { gridPoster, firstBackdrop } from '../lib/text.js';
 import { getPrefs, setPrefs } from '../lib/prefs.js';
 import { formatExpiry, daysUntil } from '../lib/time.js';
 import { prefetchCatalog } from '../lib/catalogCache.js';
@@ -81,6 +305,8 @@ export default function Home() {
   const { session, langTick } = useSession();
   const [tick, setTick] = useState(0);
   const [showTips, setShowTips] = useState(() => !getPrefs().onboardingDone);
+  const [plan, setPlan] = useState([]);
+  const [heroItems, setHeroItems] = useState([]);
   const saved = getSession();
   const expiryMsg = expiryBannerText(saved?.user_info || session?.info || session?.session?.user_info);
 
@@ -93,28 +319,65 @@ export default function Home() {
     const id = window.setTimeout(() => {
       const s = getSession();
       if (s?.baseUrl) prefetchCatalog({ baseUrl: s.baseUrl, username: s.username, password: s.password });
-    }, 4000);
+    }, 15000); // after the first rows, so slow panels aren't flooded
     return () => window.clearTimeout(id);
+  }, []);
+
+  // Which rows to show (two small category calls, cached 3 h).
+  useEffect(() => {
+    let alive = true;
+    const srv = currentServer();
+    if (!srv) return undefined;
+    loadHomePlan(srv)
+      .then((rows) => alive && setPlan(rows || []))
+      .catch(() => alive && setPlan([]));
+    return () => {
+      alive = false;
+    };
+  }, [session]);
+
+  // Kids / parental: hide locked categories immediately (plan is cached).
+  const visiblePlan = useMemo(
+    () => plan.filter((r) => !isCategoryLocked(r.catId)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [plan, tick],
+  );
+
+  const onRowItems = useCallback((row, list) => {
+    setHeroItems((prev) => {
+      if (prev.length >= 6) return prev;
+      const have = new Set(prev.map((x) => `${x.kind}:${x.id}`));
+      const extra = list.filter((x) => x.img && x.plot && !have.has(`${x.kind}:${x.id}`)).slice(0, 6 - prev.length);
+      return extra.length ? [...prev, ...extra] : prev;
+    });
   }, []);
 
   const continueRow = useMemo(() => {
     const list = getContinueWatching();
     const base = getSession()?.baseUrl;
-    return list.slice(0, 12).map((c) => ({
-      ...c,
-      image: c.image || undefined,
-      baseUrl: c.baseUrl || base,
-      url: c.url || '',
-    }));
+    const seenSeries = new Set();
+    const out = [];
+    for (const c of list) {
+      // One card per series (its latest episode), like Netflix.
+      if (c.type === 'series' && c.seriesId) {
+        if (seenSeries.has(String(c.seriesId))) continue;
+        seenSeries.add(String(c.seriesId));
+      }
+      out.push({ ...c, image: c.image || undefined, baseUrl: c.baseUrl || base, url: c.url || '' });
+      if (out.length >= 12) break;
+    }
+    return out;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session, tick, langTick]);
 
   const favorites = useMemo(
-    () => getFavorites().filter((f) => !isAdultContent(f.title, f.categoryName)).slice(0, 24),
+    () => getFavorites().filter((f) => !isAdultContent(f.title, f.categoryName)).slice(0, 40),
     // session: re-read when switching accounts so rails never leak across users
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [session, tick, langTick],
   );
+  const myList = favorites.filter((f) => f.type === 'vod' || f.type === 'series');
+  const favChannels = favorites.filter((f) => f.type === 'live');
 
   const go = (path) => navigate(path);
   const toFavorite = (f) => {
@@ -125,6 +388,35 @@ export default function Home() {
   };
   const removeFavorite = (f) => {
     toggleFavorite({ type: f.type, id: f.id, title: f.title, image: f.image });
+    setTick((x) => x + 1);
+  };
+
+  const openItem = (it) => navigate(it.kind === 'series' ? `/series/${it.id}` : `/vod/${it.id}`);
+  const playItem = (it) => {
+    if (it.kind === 'series') {
+      navigate(`/series/${it.id}?autoplay=1`);
+      return;
+    }
+    const srv = currentServer();
+    if (!srv) return;
+    const qs = new URLSearchParams({
+      type: 'vod',
+      id: String(it.id),
+      url: vodStreamUrl(srv, it.id, it.ext || 'mp4'),
+      title: it.name || '',
+    });
+    if (it.img) qs.set('image', it.img);
+    navigate(`/player?${qs.toString()}`);
+  };
+  const toggleList = (it) => {
+    toggleFavorite({
+      type: it.kind,
+      id: it.id,
+      title: it.name,
+      image: it.img || '',
+      categoryId: it.cat || '',
+      categoryName: it.catName || '',
+    });
     setTick((x) => x + 1);
   };
 
@@ -234,6 +526,18 @@ export default function Home() {
           </div>
         </div>
 
+        {heroItems.length ? (
+          <HeroBanner
+            items={heroItems}
+            onPlay={playItem}
+            onInfo={openItem}
+            onToggleList={toggleList}
+            listTick={tick}
+          />
+        ) : visiblePlan.length ? (
+          <div className="home-hero home-hero--skeleton" aria-hidden="true" />
+        ) : null}
+
         {continueRow.length > 0 && (
           <Row
             title={t('home.continueWatching')}
@@ -246,34 +550,27 @@ export default function Home() {
                   title={c.title}
                   poster={c.image}
                   aspect="16/9"
+                  progress={c.duration > 0 ? (c.position || 0) / c.duration : undefined}
                   onActivate={() => openContinue(c)}
                 />
-                <button
-                  type="button"
-                  tabIndex={0}
-                  data-tv-secondary="true"
-                  className="btn-ghost btn-xs btn-resume"
-                  onClick={() => openContinue(c)}
-                >
-                  ▶ {t('home.resume')}
-                </button>
               </div>
             )}
           />
         )}
 
-        {favorites.length > 0 && (
+        {myList.length > 0 && (
           <Row
-            title={t('home.favorites')}
-            items={favorites}
+            title={t('home.myList')}
+            items={myList}
             itemKey={(f) => `${f.type}-${f.id}`}
             renderItem={(f) => (
               <div className="fav-tile" key={`${f.type}-${f.id}`}>
                 <Tile
                   focusKey={`fav-${f.type}-${f.id}`}
                   title={f.title}
-                  poster={f.image}
+                  poster={gridPoster(f.image)}
                   aspect="2/3"
+                  className="poster"
                   onActivate={() => toFavorite(f)}
                 />
                 <button
@@ -289,6 +586,30 @@ export default function Home() {
                 >
                   ★
                 </button>
+              </div>
+            )}
+          />
+        )}
+
+        {visiblePlan.map((row, i) => (
+          <LazyRow key={row.key} row={row} eager={i < 2} onItems={onRowItems} onOpen={openItem} />
+        ))}
+
+        {favChannels.length > 0 && (
+          <Row
+            title={t('home.favChannels')}
+            items={favChannels}
+            itemKey={(f) => `${f.type}-${f.id}`}
+            renderItem={(f) => (
+              <div className="fav-tile" key={`${f.type}-${f.id}`}>
+                <Tile
+                  focusKey={`fav-${f.type}-${f.id}`}
+                  title={f.title}
+                  poster={f.image}
+                  aspect="16/9"
+                  className="tile--channel"
+                  onActivate={() => toFavorite(f)}
+                />
               </div>
             )}
           />

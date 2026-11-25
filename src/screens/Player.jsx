@@ -11,7 +11,8 @@ import {
   getSession,
 } from '../lib/session.js';
 import { setFocused, getTvFocus, nearest } from '../components/Focusable.jsx';
-import { getPrefs } from '../lib/prefs.js';
+import { getPrefs, setPrefs } from '../lib/prefs.js';
+import { markWatched } from '../lib/watched.js';
 import {
   zapByNumber,
   setLastLiveChannel,
@@ -154,6 +155,13 @@ export default function Player() {
   const nextUpPlayingRef = useRef(false);
   const nextUpRef = useRef(null);
   nextUpRef.current = nextUp;
+  // "Saltar intro" (series): visible in the first 3 minutes until used.
+  const [introDone, setIntroDone] = useState(false);
+  const skipIntroVisibleRef = useRef(false);
+  const skipIntroRef = useRef(() => {});
+  const subsPreferDoneRef = useRef(false);
+  const watchedMarkedRef = useRef('');
+  const [hoverTime, setHoverTime] = useState(null);
   const zapOpenRef = useRef(false);
   const zapIndexRef = useRef(0);
   const zapLoadingRef = useRef(false);
@@ -288,12 +296,28 @@ export default function Player() {
       playerRef.current &&
       source !== 'container'
     ) {
-      const pref = pickPreferredAudioId(audio);
+      const remembered = String(getPrefs().audioLabel || '').toLowerCase();
+      const byMemory = remembered
+        ? audio.find((a) => String(a.label || '').toLowerCase().startsWith(remembered))
+        : null;
+      const pref = byMemory ? byMemory.id : pickPreferredAudioId(audio);
       if (pref !== audioId) {
         applyAudioTrack(playerRef.current, videoRef.current, pref);
         setAudioId(pref);
       }
       audioPreferDoneRef.current = true;
+    }
+    // Re-apply the subtitle the user picked last time (or keep them off).
+    if (isVodLike && !subsPreferDoneRef.current && snap.text.length && playerRef.current) {
+      const want = String(getPrefs().subsLabel || '');
+      if (want && want !== 'off') {
+        const m = snap.text.find((x) => x.label === want) || snap.text.find((x) => String(x.label).startsWith(want));
+        if (m && m.id !== snap.textId) {
+          applyTextTrack(playerRef.current, videoRef.current, m.id);
+          setTextId(m.id);
+        }
+      }
+      subsPreferDoneRef.current = true;
     }
     return { audio, text: snap.text, audioId, textId: snap.textId, source };
   }, [isVodLike]);
@@ -400,6 +424,7 @@ export default function Player() {
     }
     const next = cycleNextId(snap.audio, snap.audioId);
     const label = snap.audio.find((a) => a.id === next)?.label || String(next);
+    setPrefs({ audioLabel: String(label).split(' · ')[0] });
     if (snap.source === 'container' || containerAudioRef.current.length > 1) {
       void switchContainerAudio(next).then(() => {
         setAudioId(next);
@@ -427,6 +452,7 @@ export default function Player() {
       next < 0
         ? t('player.subsOff')
         : snap.text.find((x) => x.id === next)?.label || String(next);
+    setPrefs({ subsLabel: next < 0 ? 'off' : label });
     showTrackBanner(`${t('player.subtitles')}: ${label}`);
     revealControls();
   };
@@ -435,6 +461,7 @@ export default function Player() {
   useEffect(() => {
     if (!started || !isVodLike) return undefined;
     audioPreferDoneRef.current = false;
+    subsPreferDoneRef.current = false;
     refreshTracks();
     const timers = [800, 2000, 4500].map((ms) => window.setTimeout(() => refreshTracks(), ms));
     const onTracks = () => refreshTracks();
@@ -463,6 +490,7 @@ export default function Player() {
     setAudioId(0);
     setTextId(-1);
     setTrackBanner('');
+    setIntroDone(false);
     containerAudioRef.current = [];
     containerAudioIdRef.current = null;
     stopRemux();
@@ -732,6 +760,12 @@ export default function Player() {
     const go = async (epId, season, epUrl, epTitle) => {
       nextUpPlayingRef.current = true;
       nextUpDismissedRef.current = true;
+      try {
+        const v = videoRef.current;
+        if (v && v.duration > 0 && v.currentTime / v.duration >= 0.85) markWatched('series', id);
+      } catch {
+        /* ignore */
+      }
       // Close the current stream FIRST — switching episodes without this left
       // 2–3 panel connections alive and the next ep stuck on "Cargando…".
       // Suppress visibility/pagehide: wiping <video> on webOS/Tizen can fire
@@ -1305,6 +1339,13 @@ export default function Player() {
         return;
       }
 
+      // "Saltar intro" pill: OK skips (Netflix) while the OSD is closed.
+      if (!osdUp && isOk && skipIntroVisibleRef.current) {
+        claim();
+        skipIntroRef.current();
+        return;
+      }
+
       // OSD closed:
       //  - TV remote: first press only reveals controls (Netflix pattern).
       //  - PC/Mac: ←→ seek and Space/OK play-pause immediately, and show the bar.
@@ -1448,7 +1489,7 @@ export default function Player() {
     const v = videoRef.current;
     if (!v) return undefined;
 
-    const NEXT_UP_WINDOW = 18; // seconds before end to show the card
+    const NEXT_UP_WINDOW = 10; // seconds before end: "Siguiente episodio en 10 s"
 
     const onTime = () => {
       if (nextUpDismissedRef.current || leaveOpen) {
@@ -1795,6 +1836,15 @@ export default function Player() {
         // webviews that never fire `playing` still clear the HLS-only memory.
         rememberTsWorks();
       }
+      if (
+        video.duration > 0 &&
+        (type === 'vod' || type === 'series') &&
+        video.currentTime / video.duration >= 0.92 &&
+        watchedMarkedRef.current !== `${type}:${id}`
+      ) {
+        watchedMarkedRef.current = `${type}:${id}`;
+        markWatched(type, id);
+      }
       if (video.duration > 0 && type !== 'live' && type !== 'catchup') {
         // Best-effort continue-watching: persist position periodically.
         // Live channels go to Recientes inside Live TV (never Home).
@@ -1994,6 +2044,32 @@ export default function Player() {
     revealControls();
   };
 
+  const skipSecs = Number(getPrefs().skipIntroSecs) || 0;
+  const showSkipIntro =
+    type === 'series' &&
+    started &&
+    !error &&
+    !introDone &&
+    skipSecs > 0 &&
+    duration > skipSecs + 120 &&
+    currentTime >= 3 &&
+    currentTime < 180;
+  skipIntroVisibleRef.current = showSkipIntro && !nextUp && !leaveOpen;
+  skipIntroRef.current = () => {
+    const v = videoRef.current;
+    if (!v) return;
+    const dur = Number.isFinite(v.duration) ? v.duration : 0;
+    const target = Math.min(dur > 10 ? dur - 5 : Infinity, (v.currentTime || 0) + skipSecs);
+    try {
+      v.currentTime = target;
+    } catch {
+      /* ignore */
+    }
+    setCurrentTime(target);
+    setIntroDone(true);
+    showTrackBanner(`» ${t('player.skipIntro')} (+${skipSecs}s)`);
+  };
+
   if (error || !url) {
     const formatIssue = errorCode === 4 || unsupportedContainer;
     const signalIssue = isLive && !formatIssue;
@@ -2073,7 +2149,7 @@ export default function Player() {
           if (isVodLike) togglePlayClick(e);
         }}
       />
-      {!started && !error && (
+      {!started && !error && !leaveOpen && (
         <div className="player-loading" aria-live="polite">
           <div className="spinner" />
           <span className="player-loading-title">
@@ -2164,9 +2240,27 @@ export default function Player() {
                   const ratio = rect.width ? (e.clientX - rect.left) / rect.width : 0;
                   seekToRatio(ratio);
                 }}
+                onMouseMove={(e) => {
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  if (!rect.width || !duration) return;
+                  const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+                  setHoverTime(ratio * duration);
+                }}
+                onMouseLeave={() => setHoverTime(null)}
               >
-                <div className="player-progress-bar">
-                  <div className="player-progress-fill" style={{ width: `${progress}%` }} />
+                <div className="player-progress-track">
+                  <div className="player-progress-bar">
+                    <div className="player-progress-fill" style={{ width: `${progress}%` }} />
+                  </div>
+                  <div className="player-progress-thumb" style={{ left: `${progress}%` }} />
+                  <div
+                    className="player-scrub-preview"
+                    style={{
+                      left: `${Math.max(4, Math.min(96, hoverTime != null && duration ? (hoverTime / duration) * 100 : progress))}%`,
+                    }}
+                  >
+                    {formatClock(hoverTime != null ? hoverTime : currentTime)}
+                  </div>
                 </div>
                 <div className="player-time">
                   <span>{formatClock(currentTime)}</span>
@@ -2175,6 +2269,16 @@ export default function Player() {
               </div>
 
               <div className="player-transport">
+                {showSkipIntro ? (
+                  <button
+                    type="button"
+                    tabIndex={0}
+                    className="btn-secondary player-transport-btn"
+                    onClick={() => skipIntroRef.current()}
+                  >
+                    » {t('player.skipIntro')}
+                  </button>
+                ) : null}
                 {type === 'series' && seriesId ? (
                   <button
                     type="button"
@@ -2276,6 +2380,21 @@ export default function Player() {
         </div>
       )}
 
+      {showSkipIntro && !controlsVisible && !nextUp && !leaveOpen ? (
+        <button
+          type="button"
+          tabIndex={-1}
+          className="skip-intro"
+          onClick={(e) => {
+            e.stopPropagation();
+            skipIntroRef.current();
+          }}
+        >
+          » {t('player.skipIntro')}
+          {!desktopPointer || isTvLike() ? <small>{t('player.skipIntroHint')}</small> : null}
+        </button>
+      ) : null}
+
       {nextUp && type === 'series' && !leaveOpen && (
         <div
           className="next-up"
@@ -2284,9 +2403,11 @@ export default function Player() {
           aria-live="polite"
           onClick={(e) => e.stopPropagation()}
         >
-          <div className="next-up-label">{t('player.nextUpTitle')}</div>
+          <div className="next-up-label">{t('player.nextUpIn2', nextUp.secs)}</div>
           <div className="next-up-title">{nextUp.title}</div>
-          <div className="next-up-count">{t('player.nextUpIn', nextUp.secs)}</div>
+          <div className="next-up-bar" aria-hidden="true">
+            <div style={{ width: `${Math.max(0, Math.min(100, (nextUp.secs / 10) * 100))}%` }} />
+          </div>
           <div className="next-up-actions">
             <button
               tabIndex={0}

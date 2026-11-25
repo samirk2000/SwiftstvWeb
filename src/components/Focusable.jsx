@@ -863,6 +863,24 @@ export function useGlobalTvKeys({ onEscape, onEnter } = {}) {
           }
         }
 
+        // Home hero banner: ←→ stay on its buttons, ↑ back to the menu, ↓ to the rows.
+        if (!target && active.dataset?.heroBtn === 'true') {
+          if (dir.dx !== 0) {
+            const btns = candidates.filter((el) => el.dataset?.heroBtn === 'true');
+            target = nearest(dir.dx, 0, fromRect, btns);
+            if (!target) return;
+          } else if (dir.dy < 0) {
+            const menu = candidates.filter((el) => el.classList?.contains('menu-item'));
+            target = nearest(0, -1, fromRect, menu) || menu[menu.length - 1] || null;
+          } else if (dir.dy > 0) {
+            const tiles = Array.from(document.querySelectorAll('.home-main .row-scroll .tile')).filter((el) =>
+              candidates.includes(el),
+            );
+            target = tiles[0] || null;
+            if (!target) return;
+          }
+        }
+
         if (active.classList?.contains('menu-item')) {
           // Fixed Home order (does not change when Continuar/Favoritos rails appear):
           //  ↑↓ stay in the column; ↓ past the last tool → first tile of the first rail;
@@ -872,12 +890,20 @@ export function useGlobalTvKeys({ onEscape, onEnter } = {}) {
           let stay = false;
           if (dir.dy !== 0 && col) {
             const sameCol = menuOnly.filter((el) => col.contains(el));
-            target = nearest(0, dir.dy, fromRect, sameCol);
+            if (dir.dy > 0 && active.classList.contains('menu-item--hero')) {
+              // ↓ from a big tile → the FIRST tool under it (Buscar, not Exclusivos).
+              const tools = sameCol
+                .filter((el) => el.classList.contains('menu-item--tool'))
+                .sort((x, y) => x.getBoundingClientRect().left - y.getBoundingClientRect().left);
+              target = tools[0] || null;
+            }
+            if (!target) target = nearest(0, dir.dy, fromRect, sameCol);
             if (!target && dir.dy > 0) {
+              const heroPrimary = document.querySelector('.home-hero [data-hero-primary="true"]');
               const firstRailTile = Array.from(
                 document.querySelectorAll('.home-main .row-scroll .tile'),
               ).find((el) => candidates.includes(el));
-              target = firstRailTile || null;
+              target = (heroPrimary && candidates.includes(heroPrimary) ? heroPrimary : null) || firstRailTile || null;
               if (!target) stay = true;
             }
           }

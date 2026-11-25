@@ -269,6 +269,11 @@ export function updateContinueWatching(item) {
   let list = getContinueWatching();
   const prev = list.find((x) => x.type === item.type && String(x.id) === String(item.id));
   list = list.filter((x) => !(x.type === item.type && String(x.id) === String(item.id)));
+  // Finished (>=95%): drop it from "Continuar viendo" like Netflix does.
+  if (Number(item.duration) > 0 && Number(item.position) / Number(item.duration) >= 0.95) {
+    if (prev) writeAccountList(KEYS.continueWatching, list);
+    return;
+  }
   // Keep a prior poster if this update forgot/omitted image (Player timeupdate).
   const image = item.image || prev?.image || '';
   list.unshift({

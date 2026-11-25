@@ -67,3 +67,13 @@ export function gridPoster(url) {
   if (m) return `https://image.tmdb.org/t/p/w342/${m[1]}`;
   return s;
 }
+
+/** First image URL from a backdrop field (array, "['url']" string or plain URL). */
+export function firstBackdrop(v) {
+  if (Array.isArray(v)) return v.find((x) => typeof x === 'string' && /^https?:/i.test(x)) || '';
+  if (typeof v === 'string') {
+    const m = v.match(/https?:[^'"\],\s]+/);
+    return m ? m[0] : '';
+  }
+  return '';
+}

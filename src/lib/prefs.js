@@ -7,6 +7,9 @@ const DEFAULTS = {
   autoplayNext: true,
   onboardingDone: false,
   uiScale: 'comfortable', // comfortable | normal | compact — TV-first default
+  skipIntroSecs: 85, // "Saltar intro" jump (0 = hide the button)
+  audioLabel: '', // last audio track the user picked (e.g. "English")
+  subsLabel: '', // last subtitle pick: label, 'off' or '' (never chosen)
 };
 
 function read() {
@@ -35,6 +38,7 @@ export function setPrefs(patch) {
   const next = { ...read(), ...patch };
   if (![10, 30, 60].includes(Number(next.seekJump))) next.seekJump = 30;
   if (!['comfortable', 'normal', 'compact'].includes(next.uiScale)) next.uiScale = 'normal';
+  if (![0, 60, 85, 90, 120].includes(Number(next.skipIntroSecs))) next.skipIntroSecs = 85;
   write(next);
   applyUiScale(next.uiScale);
   return next;

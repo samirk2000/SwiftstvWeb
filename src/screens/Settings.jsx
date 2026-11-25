@@ -121,6 +121,21 @@ export default function Settings() {
             {t('settings.autoplayOff')}
           </button>
         </div>
+        <p className="hint" style={{ marginTop: 14 }}>
+          {t('settings.skipIntro')}
+        </p>
+        <div className="detail-actions">
+          {[0, 60, 85, 90, 120].map((n) => (
+            <button
+              key={n}
+              tabIndex={0}
+              className={`cat-chip ${Number(prefs.skipIntroSecs) === n ? 'selected' : ''}`}
+              onClick={() => patchPrefs({ skipIntroSecs: n })}
+            >
+              {n === 0 ? t('settings.skipIntroOff') : `+${n}s`}
+            </button>
+          ))}
+        </div>
       </section>
 
       <section className="settings-card">

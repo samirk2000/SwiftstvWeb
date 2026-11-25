@@ -10,6 +10,7 @@ export function Poster({ src, title, style }) {
       src={src || FALLBACK_ART}
       alt={title || ''}
       loading="lazy"
+      decoding="async"
       style={{ ...style, objectFit: 'cover' }}
       onError={(e) => {
         if (e.currentTarget.src !== FALLBACK_ART) e.currentTarget.src = FALLBACK_ART;
@@ -29,13 +30,17 @@ export function Tile({
   onFocus,
   style,
   aspect = '16/9',
+  className = '',
+  progress,
+  badge,
 }) {
   const { ref, tabIndex } = useFocusable(focusKey || title || 'tile');
+  const pct = Number.isFinite(progress) ? Math.max(2, Math.min(100, progress * 100)) : null;
   return (
     <article
       ref={ref}
       tabIndex={tabIndex}
-      className="tile"
+      className={`tile ${className}`.trim()}
       style={{ ...style, aspectRatio: aspect }}
       onMouseEnter={() => ref.current && ref.current.focus()}
       onFocus={onFocus}
@@ -57,6 +62,12 @@ export function Tile({
         ) : (
           <div className="tile-title">{title}</div>
         )}
+        {badge ? <span className="tile-badge">{badge}</span> : null}
+        {pct !== null ? (
+          <div className="tile-progress" aria-hidden="true">
+            <div className="tile-progress-fill" style={{ width: `${pct}%` }} />
+          </div>
+        ) : null}
       </div>
     </article>
   );
@@ -79,5 +90,16 @@ export function Row({ title, items, itemKey, renderItem, empty }) {
         <p className="row-empty">{empty || 'Nothing here yet.'}</p>
       )}
     </section>
+  );
+}
+
+// Grey placeholder tiles while a row loads (cheap opacity pulse, no layout work).
+export function SkeletonRow({ count = 7, poster = true }) {
+  return (
+    <div className="row-scroll row-scroll--skeleton" aria-hidden="true">
+      {Array.from({ length: count }, (_, i) => (
+        <div key={i} className={`skeleton-tile ${poster ? 'skeleton-tile--poster' : ''}`} />
+      ))}
+    </div>
   );
 }
