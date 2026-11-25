@@ -2517,3 +2517,79 @@ html[data-ui-scale='comfortable'] .search-box {
     animation: none;
   }
 }
+
+/* ---- Guía de TV (EPG grid) ---- */
+.btn-guide { margin-left: auto; }
+.epg-help { margin-left: auto; }
+.eg-info {
+  min-height: 104px;
+  margin: 6px 0 12px;
+  padding: 12px 16px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.04);
+}
+.eg-info-ch { font-size: 14px; color: var(--muted, #9aa4b2); text-transform: uppercase; letter-spacing: 0.04em; }
+.eg-info-title { font-size: 24px; font-weight: 700; margin: 2px 0; color: #fff; }
+.eg-info-time { font-size: 16px; color: #cfd6df; }
+.eg-info-desc {
+  font-size: 15px; color: #aab3bf; margin-top: 4px;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.eg-live-dot { color: #ff4d4f; font-size: 14px; font-weight: 700; margin-right: 10px; vertical-align: middle; }
+.epg-grid {
+  position: relative;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.03);
+  outline: none;
+  overflow: hidden;
+  cursor: pointer;
+}
+.epg-grid.tv-focused { box-shadow: 0 0 0 2px rgba(0, 209, 255, 0.35); outline: none !important; }
+.eg-timebar { position: relative; height: 34px; border-bottom: 1px solid rgba(255, 255, 255, 0.08); }
+.eg-slot {
+  position: absolute; top: 0; height: 34px; line-height: 34px;
+  padding-left: 8px; font-size: 14px; color: #aab3bf;
+  border-left: 1px solid rgba(255, 255, 255, 0.08);
+}
+.eg-rows { position: relative; }
+.eg-row { display: flex; height: 64px; border-bottom: 1px solid rgba(255, 255, 255, 0.05); }
+.eg-ch {
+  flex: none; display: flex; align-items: center; gap: 8px;
+  padding: 0 10px; overflow: hidden; background: rgba(0, 0, 0, 0.25);
+}
+.eg-row--active .eg-ch { background: rgba(0, 209, 255, 0.14); }
+.eg-ch-num { font-size: 13px; color: #8b95a3; min-width: 26px; text-align: right; }
+.eg-ch-logo { width: 40px; height: 30px; object-fit: contain; flex: none; }
+.eg-ch-name { font-size: 15px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.eg-track { position: relative; flex: none; overflow: hidden; }
+.eg-cell {
+  position: absolute; top: 5px; bottom: 5px;
+  display: flex; flex-direction: column; justify-content: center;
+  padding: 0 10px; border-radius: 8px;
+  background: #1b2330; color: #e6ebf1; overflow: hidden;
+  transition: transform 0.12s ease, background-color 0.12s ease;
+}
+.eg-cell--now { background: #213042; }
+.eg-cell--past { color: #8b95a3; background: #161c26; }
+.eg-cell--empty { color: #8b95a3; font-style: italic; font-size: 14px; }
+.eg-cell--loading { background: linear-gradient(90deg, #161c26, #1d2532, #161c26); background-size: 200% 100%; animation: skel-pulse 1.4s ease-in-out infinite; }
+.eg-cell-title { font-size: 15px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.eg-cell-time { font-size: 12px; color: #9aa4b2; }
+.eg-cell--sel { background: #2b3a4f; box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.35); }
+.epg-grid.tv-focused .eg-cell--sel {
+  background: var(--accent); color: #001018; box-shadow: 0 0 0 2px #fff;
+  transform: scale(1.02); z-index: 2;
+}
+.epg-grid.tv-focused .eg-cell--sel .eg-cell-time { color: #00303d; }
+.eg-now-line {
+  position: absolute; top: 0; bottom: 0; width: 2px;
+  background: #ff4d4f; box-shadow: 0 0 6px rgba(255, 77, 79, 0.7);
+  pointer-events: none; z-index: 3;
+}
+.eg-foot { padding: 6px 12px; font-size: 13px; }
+.eg-skeleton { display: grid; gap: 8px; }
+.eg-skel-row { height: 56px; border-radius: 8px; background: #1b2330; animation: skel-pulse 1.4s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) {
+  .eg-cell { transition: none; }
+  .epg-grid.tv-focused .eg-cell--sel { transform: none; }
+}

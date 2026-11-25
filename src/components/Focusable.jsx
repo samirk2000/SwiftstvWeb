@@ -796,6 +796,10 @@ export function useGlobalTvKeys({ onEscape, onEnter } = {}) {
           return;
         }
 
+        // Composite widgets (EPG grid) move their own internal cursor; when
+        // they return false (edge), normal spatial navigation leaves them.
+        if (typeof active.__tvGridMove === 'function' && active.__tvGridMove(dir)) return;
+
         // Secondary actions live inside a row: ← returns to the row, ↑↓ jump rows.
         if (active.dataset?.tvSecondary === 'true') {
           const row = active.closest('.channel, .fav-tile, .cw-tile');
@@ -840,6 +844,17 @@ export function useGlobalTvKeys({ onEscape, onEnter } = {}) {
           if (searches.length) {
             target = nearest(0, -1, fromRect, searches) || searches[0];
           }
+        }
+        // ↑ from a search box: the page header buttons (Atrás, Guía de TV)
+        // before the top bar brand / language toggle.
+        if (
+          !target &&
+          dir.dy < 0 &&
+          (active.classList?.contains('search-box') ||
+            (active.tagName === 'INPUT' && active.classList?.contains('search-box')))
+        ) {
+          const head = candidates.filter((el) => el.closest?.('.page-head'));
+          if (head.length) target = nearest(0, -1, fromRect, head) || head[0];
         }
         // Symmetric: ↓ from search lands on the selected (or first) category chip.
         if (

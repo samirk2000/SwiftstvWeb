@@ -16,6 +16,7 @@ import { t } from './lib/i18n.js';
 import Login from './screens/Login.jsx';
 import Home from './screens/Home.jsx';
 import LiveGuide from './screens/LiveGuide.jsx';
+import EpgGrid from './screens/EpgGrid.jsx';
 import VodGrid from './screens/VodGrid.jsx';
 import VodDetail from './screens/VodDetail.jsx';
 import SeriesList from './screens/SeriesList.jsx';
@@ -256,6 +257,14 @@ function AppShell() {
               element={
                 <RequireSession>
                   <LiveGuide />
+                </RequireSession>
+              }
+            />
+            <Route
+              path="/live/guide"
+              element={
+                <RequireSession>
+                  <EpgGrid />
                 </RequireSession>
               }
             />

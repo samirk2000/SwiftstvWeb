@@ -81,6 +81,8 @@ export default function Player() {
 
   const url = params.get('url');
   const type = params.get('type') || 'live';
+  // Opened from the grid guide: Back returns there instead of the channel list.
+  const fromGuide = params.get('from') === 'guide';
   const id = params.get('id') || '';
   const title = params.get('title') || (type === 'live' ? t('live.title') : '');
   const image = params.get('image') || '';
@@ -642,7 +644,7 @@ export default function Player() {
     navigate(
       `/player?type=live&id=${encodeURIComponent(ch.id)}&url=${encodeURIComponent(ch.url)}&title=${encodeURIComponent(
         ch.name || ''
-      )}`,
+      )}${fromGuide ? '&from=guide' : ''}`,
       { replace: true }
     );
     window.setTimeout(() => {
@@ -1039,7 +1041,7 @@ export default function Player() {
       void cancelAllContainerAudioJobs();
       if (type === 'live') {
         // Back to Live guide (same adult category stays via persisted cat + unlock).
-        navigate('/live', { replace: true });
+        navigate(fromGuide ? '/live/guide' : '/live', { replace: true });
         return;
       }
       if (type === 'series' && seriesId) {

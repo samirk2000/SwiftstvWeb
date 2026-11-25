@@ -568,6 +568,9 @@ export default function LiveGuide() {
       />
       <div className="page-head">
         <h1>{t('live.title')}</h1>
+        <button tabIndex={0} className="btn-secondary btn-guide" onClick={() => navigate('/live/guide')}>
+          ▦ {t('guide.open')}
+        </button>
       </div>
 
       <input

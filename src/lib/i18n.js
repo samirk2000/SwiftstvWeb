@@ -40,6 +40,13 @@ export const STRINGS = {
       search: 'Buscar',
       placeholder: 'Título',
     },
+    guide: {
+      title: 'Guía de TV',
+      open: 'Guía de TV',
+      help: '←→ horario · ↑↓ canales · OK ver',
+      catchupOk: 'disponible para ver atrasado',
+      position: (i, n) => `Canal ${i} de ${n}`,
+    },
     live: {
       title: 'TV en vivo',
       now: 'AHORA',
@@ -293,6 +300,13 @@ export const STRINGS = {
       accounts: 'Accounts',
       search: 'Search',
       placeholder: 'Title',
+    },
+    guide: {
+      title: 'TV guide',
+      open: 'TV guide',
+      help: '←→ time · ↑↓ channels · OK watch',
+      catchupOk: 'available as catch-up',
+      position: (i, n) => `Channel ${i} of ${n}`,
     },
     live: {
       title: 'Live TV',
