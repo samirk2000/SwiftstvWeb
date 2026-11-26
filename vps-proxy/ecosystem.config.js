@@ -24,6 +24,9 @@ module.exports = {
         PORT: 3000,
         // ms to abort a hung upstream socket. 0 = disabled (rarely needed).
         UPSTREAM_TIMEOUT_MS: 0,
+        FFMPEG_PATH: '/opt/swiftstv/bin/ffmpeg',
+        MAX_TRANSCODES: 4,
+        TRANSCODE_NICE: 10,
       },
       max_memory_restart: '512M',
       autorestart: true,

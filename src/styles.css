@@ -2637,6 +2637,12 @@ html[data-ui-scale='comfortable'] .search-box {
 .audio-notice strong { font-size: clamp(24px, 2.3vw, 42px); line-height: 1.25; }
 .audio-notice span { font-size: clamp(20px, 1.9vw, 34px); line-height: 1.3; opacity: 0.95; }
 .audio-notice .player-help-wa, .player-help-wa { color: #3ee07a; font-weight: 700; opacity: 1; }
+/* Brief status while the VPS transcodes Dolby audio to AAC. */
+.audio-notice.audio-activating {
+  border-color: rgba(62, 224, 122, 0.7);
+}
+.audio-notice.audio-activating strong { color: #3ee07a; }
+
 
 /* Unplayable video / no signal — big centered message, buttons in the flow
    (never under the text), Back stays top-left. */

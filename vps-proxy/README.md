@@ -10,6 +10,7 @@ but as a long-running Express app to run on your own VPS behind PM2 + Nginx.
 ## What it does
 
 - `GET /stream?target=<encodeURIComponent(url)>`
+- `GET /transcode-audio?target=<urlencoded VOD URL>&t=<start seconds>` — copies video and transcodes audio to AAC 128k stereo (for Dolby/AC3 titles in TV browsers). Capped by `MAX_TRANSCODES` (default 4); returns `503 {"error":"capacity"}` when full. `?probe=1` reports slots without starting ffmpeg.
 - Follows the panel's 30x redirects to the CDN (up to 8 hops).
 - **Ignores invalid SSL certificates** via
   `new https.Agent({ rejectUnauthorized: false })` (the CDNs are addressed by raw
@@ -26,6 +27,8 @@ but as a long-running Express app to run on your own VPS behind PM2 + Nginx.
 ```
 vps-proxy/
   proxy.js            # Express proxy (this)
+  transcode-audio.js  # Isolated /transcode-audio route + ffmpeg runner
+  proxy.deployed.js   # Copy of the file currently running on the VPS
   package.json        # deps (express)
   ecosystem.config.js # PM2
   nginx.conf          # example Nginx site + Certbot

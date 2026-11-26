@@ -153,3 +153,55 @@ function dedupe(list) {
   }
   return out;
 }
+
+/** Public origin of the Hetzner VPS proxy (https://proxy.swiftstv.com). */
+export function vpsProxyOrigin() {
+  const vps = STREAM_PROXY_URLS.find((u) => /\/stream($|[?#])/i.test(String(u).replace(/\/+$/, '')));
+  const raw = vps || 'https://proxy.swiftstv.com';
+  try {
+    const u = new URL(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`);
+    if (u.protocol === 'http:') u.protocol = 'https:';
+    return u.origin;
+  } catch {
+    return 'https://proxy.swiftstv.com';
+  }
+}
+
+/** If mediaUrl is already a /stream or /transcode-audio proxy URL, unwrap the inner target. */
+export function unwrapProxyTarget(mediaUrl) {
+  try {
+    const u = new URL(mediaUrl, 'https://swiftstvweb.pages.dev');
+    const t = u.searchParams.get('target');
+    if (t && /\/(stream|transcode-audio|stream-proxy)(\/|$)/i.test(u.pathname)) return t;
+  } catch {
+    /* ignore */
+  }
+  return mediaUrl;
+}
+
+/** Audio-only transcode URL (video copy, AC3/E-AC3 → AAC) on the VPS. */
+export function audioTranscodeUrl(mediaUrl, startSeconds = 0) {
+  const target = unwrapProxyTarget(mediaUrl);
+  const u = new URL('/transcode-audio', vpsProxyOrigin());
+  u.searchParams.set('target', target);
+  const t = Math.max(0, Math.floor(Number(startSeconds) || 0));
+  if (t > 0) u.searchParams.set('t', String(t));
+  return u.toString();
+}
+
+/** Cheap capacity probe. Does not start ffmpeg. */
+export async function probeAudioTranscode(fetchImpl = fetch, signal) {
+  try {
+    const res = await fetchImpl(`${vpsProxyOrigin()}/transcode-audio?probe=1`, { signal, cache: 'no-store' });
+    if (!res.ok) return { ok: false, available: 0 };
+    const j = await res.json();
+    return {
+      ok: Boolean(j && j.ok && j.ffmpeg !== false),
+      available: Number(j.available) || 0,
+      max: Number(j.max) || 0,
+    };
+  } catch {
+    return { ok: false, available: 0 };
+  }
+}
+

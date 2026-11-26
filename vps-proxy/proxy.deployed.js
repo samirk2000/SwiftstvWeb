@@ -69,6 +69,7 @@ app.disable('x-powered-by');
 // wrong password never gets someone else's cached list.
 const zlib = require('zlib');
 const crypto = require('crypto');
+const { mountAudioTranscode, transcodeHealth } = require('./transcode-audio');
 const LIST_CACHE_TTL_MS = Number(process.env.LIST_CACHE_TTL_MS || 180000); // 3 min
 const LIST_CACHE_MAX_BYTES = Number(process.env.LIST_CACHE_MAX_BYTES || 100 * 1024 * 1024); // gz bytes
 const LIST_CACHE_MAX_RAW = 80 * 1024 * 1024; // don't keep bodies larger than this
@@ -146,7 +147,7 @@ app.options('*', (req, res) => {
 // --- Health / info -------------------------------------------------------
 app.get('/healthz', (req, res) => {
   res.setHeader('Content-Type', 'application/json');
-  res.end(JSON.stringify({ ok: true, service: 'swiftstv-stream-proxy', time: Date.now(), listCache: { entries: listCache.size, bytes: listCacheBytes } }));
+  res.end(JSON.stringify({ ok: true, service: 'swiftstv-stream-proxy', time: Date.now(), listCache: { entries: listCache.size, bytes: listCacheBytes }, transcode: transcodeHealth() }));
 });
 
 // --- The stream proxy ----------------------------------------------------
@@ -327,6 +328,9 @@ function copyUpstreamHeaders(src, out) {
     }
   }
 }
+
+// Audio-only VOD transcode (AC3/E-AC3 → AAC). Isolated route; /stream is unchanged.
+mountAudioTranscode(app, { cors: ALLOW_CORS, upstreamFetch, port: PORT });
 
 // Standard 404 for anything else.
 app.use((req, res) => {

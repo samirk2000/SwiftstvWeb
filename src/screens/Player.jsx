@@ -4,6 +4,7 @@ import { t } from '../lib/i18n.js';
 import { WHATSAPP_DISPLAY } from '../lib/renew.js';
 import { attachHls, attachTs, isUnsupportedContainer, mp4Variant, togglePip, wakeLockController, invalidatePlayback, whenStartBuffered } from '../lib/player.js';
 import { snapToBuffered, recoverLivePlayback, liveHasVisibleFrames } from '../lib/liveBuffer.js';
+import { audioTranscodeUrl, probeAudioTranscode } from '../lib/proxy.js';
 import { needsOriginHeaders } from '../lib/exclusivos.js';
 import {
   updateContinueWatching,
@@ -167,6 +168,14 @@ export default function Player() {
   const audioCodecCheckedRef = useRef(false);
   const [audioNotice, setAudioNotice] = useState(false);
   const audioNoticeTimer = useRef(null);
+  const [audioActivating, setAudioActivating] = useState(false);
+  // VPS audio-only transcode fallback (Dolby → AAC). Tried at most once per title.
+  const transcodeTriedRef = useRef(false);
+  const transcodeActiveRef = useRef(false);
+  const transcodeOffsetRef = useRef(0);
+  const transcodeDurationRef = useRef(0);
+  const [audioTranscodeAt, setAudioTranscodeAt] = useState(null);
+  const audioTranscodeAtRef = useRef(null);
   const switchContainerAudioRef = useRef(null);
   // Netflix-style "next episode" card near the end of a series episode.
   const [nextUp, setNextUp] = useState(null); // { title, secs } | null
@@ -524,15 +533,52 @@ export default function Player() {
     nativeAudioBadRef.current = false;
     audioCodecCheckedRef.current = false;
     setAudioNotice(false);
+    setAudioActivating(false);
+    transcodeTriedRef.current = false;
+    transcodeActiveRef.current = false;
+    transcodeOffsetRef.current = 0;
+    transcodeDurationRef.current = 0;
+    audioTranscodeAtRef.current = null;
+    setAudioTranscodeAt(null);
     stopRemux();
   }, [url, id, type]);
 
   const showAudioNotice = () => {
+    setAudioActivating(false);
     setAudioNotice(true);
     if (audioNoticeTimer.current) clearTimeout(audioNoticeTimer.current);
     audioNoticeTimer.current = window.setTimeout(() => setAudioNotice(false), 30000);
   };
   useEffect(() => () => audioNoticeTimer.current && clearTimeout(audioNoticeTimer.current), []);
+
+  const requestAudioTranscode = (atTime) => {
+    if (!isVodLike || transcodeActiveRef.current || audioTranscodeAtRef.current != null) return;
+    if (transcodeTriedRef.current) {
+      showAudioNotice();
+      return;
+    }
+    transcodeTriedRef.current = true;
+    const v = videoRef.current;
+    const fromVideo = v && Number.isFinite(v.currentTime) ? v.currentTime : 0;
+    const abs = Math.max(0, Math.floor(Number(atTime != null ? atTime : fromVideo) || 0));
+    const dur = (v && Number.isFinite(v.duration) && v.duration > 0 ? v.duration : 0) || duration || 0;
+    if (dur > 0) transcodeDurationRef.current = dur;
+    transcodeOffsetRef.current = abs;
+    setAudioNotice(false);
+    setAudioActivating(true);
+    probeAudioTranscode()
+      .then((info) => {
+        if (!info.ok || info.available < 1) {
+          showAudioNotice();
+          return;
+        }
+        audioTranscodeAtRef.current = abs;
+        transcodeActiveRef.current = true;
+        allowAttachRef.current = true;
+        setAudioTranscodeAt(abs);
+      })
+      .catch(() => showAudioNotice());
+  };
 
   // MKV/MP4: the default track is AC3/E-AC3/DTS and this browser has no
   // decoder → switch to an AAC/MP3/Opus track if the file has one (client-side
@@ -545,7 +591,7 @@ export default function Player() {
     nativeAudioBadRef.current = true;
     const usable = tracks.filter((tr) => tr.id !== native.id && isAudioCodecPlayable(tr.codec));
     if (!usable.length) {
-      showAudioNotice();
+      requestAudioTranscode(videoRef.current?.currentTime);
       return;
     }
     const pick = usable[0]; // already sorted by language preference
@@ -576,9 +622,9 @@ export default function Player() {
         hls.audioTrack = idx;
         showTrackBanner(`${t('player.audio')}: ${list[idx].name || list[idx].lang || idx + 1}`);
       } catch {
-        showAudioNotice();
+        requestAudioTranscode(videoRef.current?.currentTime);
       }
-    } else showAudioNotice();
+    } else requestAudioTranscode(videoRef.current?.currentTime);
     return true;
   };
   const checkHlsAudioRef = useRef(checkHlsAudio);
@@ -596,7 +642,9 @@ export default function Player() {
       if (!v || remuxCtrlRef.current || audioCodecCheckedRef.current && !nativeAudioBadRef.current) return;
       if (typeof v.webkitAudioDecodedByteCount !== 'number' || typeof v.webkitVideoDecodedByteCount !== 'number') return;
       if (v.paused || v.currentTime < 2) return;
-      if (v.webkitAudioDecodedByteCount === 0 && v.webkitVideoDecodedByteCount > 0) showAudioNotice();
+      if (v.webkitAudioDecodedByteCount === 0 && v.webkitVideoDecodedByteCount > 0) {
+        requestAudioTranscode(v.currentTime);
+      }
     }, 4500);
     return () => window.clearTimeout(timer);
   }, [started, isVodLike, url, id, restart]);
@@ -1182,14 +1230,8 @@ export default function Player() {
       const cooldown = opts.fast ? 120 : SEEK_COOLDOWN_MS;
       if (now - lastSeekAtRef.current < cooldown) return;
       lastSeekAtRef.current = now;
-      const dur = Number.isFinite(v.duration) ? v.duration : 0;
-      const next = Math.max(0, Math.min(dur || Infinity, (v.currentTime || 0) + delta));
-      try {
-        v.currentTime = next;
-      } catch {
-        /* ignore */
-      }
-      setCurrentTime(next);
+      const offset = transcodeActiveRef.current ? transcodeOffsetRef.current || 0 : 0;
+      seekAbsolute((v.currentTime || 0) + offset + delta);
       bumpControls();
     };
 
@@ -1696,8 +1738,11 @@ export default function Player() {
     const v = videoRef.current;
     if (!v) return undefined;
     const sync = () => {
-      setCurrentTime(v.currentTime || 0);
-      setDuration(Number.isFinite(v.duration) ? v.duration : 0);
+      const offset = transcodeActiveRef.current ? transcodeOffsetRef.current || 0 : 0;
+      setCurrentTime((v.currentTime || 0) + offset);
+      const raw = Number.isFinite(v.duration) && v.duration > 0 ? v.duration + offset : 0;
+      const dur = transcodeDurationRef.current || raw;
+      setDuration(dur);
       setPaused(Boolean(v.paused));
     };
     v.addEventListener('timeupdate', sync);
@@ -1814,6 +1859,9 @@ export default function Player() {
     abortRef.current = controller;
 
     const isExclusive = needsOriginHeaders(url);
+    const transcodeAt = audioTranscodeAtRef.current;
+    const usingTranscode = transcodeAt != null && isVodLike;
+    const mediaUrl = usingTranscode ? audioTranscodeUrl(url, transcodeAt) : url;
     let player = null;
     const onPlaybackError = (err) => {
       // If this channel was playing via its HLS-only preference and even that
@@ -1857,9 +1905,9 @@ export default function Player() {
     // enableStashBuffer:false y chasing activo; HLS con buffer mínimo), mientras
     // VOD usa buffer estable y arranque rápido.
     const isLivePlayback = type === 'live';
-    const useTs = isLivePlayback && !isExclusive;
+    const useTs = isLivePlayback && !isExclusive && !usingTranscode;
     player = useTs
-      ? attachTs(video, url, {
+      ? attachTs(video, mediaUrl, {
           isLive: true,
           isExclusive,
           preferHls,
@@ -1873,13 +1921,22 @@ export default function Player() {
           onHlsFail: () => clearHlsOnlyChannel(channelKey),
           onError: onPlaybackError,
         })
-      : attachHls(video, url, {
+      : attachHls(video, mediaUrl, {
           isLive: isLivePlayback,
-          startPosition,
-          extraOrigin: isExclusive,
-          isExclusive,
-          alternateUrls,
-          onError: onPlaybackError,
+          startPosition: usingTranscode ? 0 : startPosition,
+          extraOrigin: isExclusive && !usingTranscode,
+          isExclusive: isExclusive && !usingTranscode,
+          alternateUrls: usingTranscode ? [] : alternateUrls,
+          onError: (err) => {
+            if (usingTranscode) {
+              transcodeActiveRef.current = false;
+              audioTranscodeAtRef.current = null;
+              setAudioTranscodeAt(null);
+              showAudioNotice();
+              return;
+            }
+            onPlaybackError(err);
+          },
           onTracksUpdate: () => refreshTracksRef.current?.(),
         });
     playerRef.current = player;
@@ -1890,7 +1947,7 @@ export default function Player() {
     }, 400);
 
     // Resume after switching back from remuxed alternate audio → preferred track.
-    if (resumeAtRef.current != null && isVodLike) {
+    if (resumeAtRef.current != null && isVodLike && !usingTranscode) {
       const resumeAt = resumeAtRef.current;
       resumeAtRef.current = null;
       const seekResume = () => {
@@ -1938,6 +1995,7 @@ export default function Player() {
       }
       startedRef.current = true;
       setStarted(true);
+      if (usingTranscode) setAudioActivating(false);
       rememberTsWorks();
     };
     video.addEventListener('playing', onPlaying);
@@ -2113,7 +2171,7 @@ export default function Player() {
       video.removeEventListener('loadedmetadata', onCanPlay);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [url, restart, id, type]);
+  }, [url, restart, id, type, audioTranscodeAt]);
 
   // Seconds spent on the loading overlay (drives "taking longer than usual").
   const [loadSecs, setLoadSecs] = useState(0);
@@ -2218,18 +2276,39 @@ export default function Player() {
     return `${m}:${String(r).padStart(2, '0')}`;
   };
 
-  const seekToRatio = (ratio) => {
+  const seekAbsolute = (next) => {
     const v = videoRef.current;
     if (!v || !isVodLike) return;
-    const dur = Number.isFinite(v.duration) ? v.duration : duration;
-    if (!dur) return;
-    const next = Math.max(0, Math.min(dur, dur * Math.max(0, Math.min(1, ratio))));
+    const offset = transcodeActiveRef.current ? transcodeOffsetRef.current || 0 : 0;
+    const rawDur = Number.isFinite(v.duration) && v.duration > 0 ? v.duration + offset : 0;
+    const dur = transcodeDurationRef.current || rawDur || duration || 0;
+    const abs = Math.max(0, Math.min(dur || Infinity, next));
+    if (transcodeActiveRef.current || audioTranscodeAtRef.current != null) {
+      const currentAbs = offset + (v.currentTime || 0);
+      if (Math.abs(abs - currentAbs) < 1) return;
+      transcodeOffsetRef.current = abs;
+      audioTranscodeAtRef.current = abs;
+      setAudioActivating(true);
+      allowAttachRef.current = true;
+      setAudioTranscodeAt(abs);
+      setCurrentTime(abs);
+      return;
+    }
     try {
-      v.currentTime = next;
+      v.currentTime = abs;
     } catch {
       /* ignore */
     }
-    setCurrentTime(next);
+    setCurrentTime(abs);
+  };
+
+  const seekToRatio = (ratio) => {
+    const v = videoRef.current;
+    if (!v || !isVodLike) return;
+    const dur = transcodeDurationRef.current || (Number.isFinite(v.duration) ? v.duration : duration);
+    if (!dur) return;
+    const next = Math.max(0, Math.min(dur, dur * Math.max(0, Math.min(1, ratio))));
+    seekAbsolute(next);
     revealControls();
   };
 
@@ -2258,14 +2337,9 @@ export default function Player() {
     const v = videoRef.current;
     if (!v || !isVodLike) return;
     // Mouse clicks skip the remote seek cooldown so ± buttons always respond.
-    const dur = Number.isFinite(v.duration) ? v.duration : 0;
-    const next = Math.max(0, Math.min(dur || Infinity, (v.currentTime || 0) + delta));
-    try {
-      v.currentTime = next;
-    } catch {
-      /* ignore */
-    }
-    setCurrentTime(next);
+    const offset = transcodeActiveRef.current ? transcodeOffsetRef.current || 0 : 0;
+    const next = (v.currentTime || 0) + offset + delta;
+    seekAbsolute(next);
     lastSeekAtRef.current = Date.now();
     revealControls();
   };
@@ -2284,14 +2358,10 @@ export default function Player() {
   skipIntroRef.current = () => {
     const v = videoRef.current;
     if (!v) return;
-    const dur = Number.isFinite(v.duration) ? v.duration : 0;
-    const target = Math.min(dur > 10 ? dur - 5 : Infinity, (v.currentTime || 0) + skipSecs);
-    try {
-      v.currentTime = target;
-    } catch {
-      /* ignore */
-    }
-    setCurrentTime(target);
+    const offset = transcodeActiveRef.current ? transcodeOffsetRef.current || 0 : 0;
+    const dur = transcodeDurationRef.current || (Number.isFinite(v.duration) ? v.duration : 0);
+    const target = Math.min(dur > 10 ? dur - 5 : Infinity, (v.currentTime || 0) + offset + skipSecs);
+    seekAbsolute(target);
     setIntroDone(true);
     showTrackBanner(`» ${t('player.skipIntro')} (+${skipSecs}s)`);
   };
@@ -2610,7 +2680,13 @@ export default function Player() {
         </div>
       )}
 
-      {audioNotice && isVodLike && !leaveOpen ? (
+      {audioActivating && isVodLike && !leaveOpen ? (
+        <div className="audio-notice audio-activating" role="status" aria-live="polite">
+          <strong>{t('player.activatingAudio')}</strong>
+        </div>
+      ) : null}
+
+      {audioNotice && isVodLike && !leaveOpen && !audioActivating ? (
         <div className="audio-notice" role="status" aria-live="polite">
           <strong>{t('player.dolbyAudio')}</strong>
           <span>{t('player.dolbyAudioHint')}</span>
