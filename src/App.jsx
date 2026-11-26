@@ -201,6 +201,12 @@ function AppShell() {
         closeExit();
         return;
       }
+      // Modals with an explicit close (renewal reminder…): Back = close.
+      const modalClose = document.querySelector('[data-tv-modal-close="true"]');
+      if (modalClose) {
+        modalClose.click();
+        return;
+      }
       // Onboarding tips: Back = dismiss (same as Entendido).
       const tipsOk = document.querySelector('.onboarding-overlay .btn-primary');
       if (tipsOk) {

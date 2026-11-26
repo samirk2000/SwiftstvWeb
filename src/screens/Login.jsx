@@ -1,3 +1,5 @@
+import RenewDialog from '../components/RenewDialog.jsx';
+import { renewState } from '../lib/renew.js';
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { loginWithFailover } from '../lib/dns.js';
@@ -56,6 +58,8 @@ export default function Login() {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [status, setStatus] = useState({ text: '', kind: '' });
+  // Expired account: show the WhatsApp renewal QR right on the login screen.
+  const [renewFor, setRenewFor] = useState(null);
   const [busy, setBusy] = useState(false);
   const [busyId, setBusyId] = useState('');
   const attemptRef = useRef(0);
@@ -291,7 +295,7 @@ export default function Login() {
     return () => window.clearTimeout(t1);
   }, [phase, accounts, addBtn.ref]);
 
-  const applyLoginResult = (result) => {
+  const applyLoginResult = (result, user = '') => {
     if (result.ok) {
       loginSuccess(result);
       setStatus({ text: t('login.success'), kind: 'ok' });
@@ -302,6 +306,9 @@ export default function Login() {
       setStatus({ text: t('login.empty'), kind: 'err' });
     } else if (result.reason === 'account') {
       setStatus({ text: serverInfoLabel(result.status), kind: 'err' });
+      if (result.status === 'expired') {
+        setRenewFor({ user, state: renewState(result.info || result.user_info || { status: 'expired' }) || { expired: true, days: 0, date: '' } });
+      }
     } else {
       // eslint-disable-next-line no-console
       console.warn('[login] all servers failed', result.results);
@@ -323,7 +330,7 @@ export default function Login() {
     const result = await loginWithFailover(account.username, account.password);
     if (my !== attemptRef.current) return;
     setBusyId('');
-    if (!applyLoginResult(result)) {
+    if (!applyLoginResult(result, account.username)) {
       setFocused(
         document.querySelector(`[data-focus-key="login-acc-${account.id}"]`) ||
           document.querySelector('.login-account-row'),
@@ -372,7 +379,7 @@ export default function Login() {
     if (my !== attemptRef.current) return;
     setBusy(false);
 
-    if (!applyLoginResult(result)) {
+    if (!applyLoginResult(result, u)) {
       setFocused(submitRef.current, { native: false });
     }
   };
@@ -402,6 +409,7 @@ export default function Login() {
   if (phase === 'picker') {
     return (
       <div className="login-wrap">
+      <RenewDialog open={Boolean(renewFor)} state={renewFor?.state} username={renewFor?.user} onClose={() => setRenewFor(null)} />
         <div className="login-card login-picker" data-focus-scope="trap">
           <div className="login-brand">
             <BrandLogo size="lg" />
@@ -442,6 +450,7 @@ export default function Login() {
 
   return (
     <div className="login-wrap">
+      <RenewDialog open={Boolean(renewFor)} state={renewFor?.state} username={renewFor?.user} onClose={() => setRenewFor(null)} />
       <form
         className="login-card"
         data-focus-scope="trap"

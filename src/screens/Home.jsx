@@ -233,6 +233,8 @@ import { gridPoster, firstBackdrop } from '../lib/text.js';
 import { getPrefs, setPrefs } from '../lib/prefs.js';
 import { formatExpiry, daysUntil } from '../lib/time.js';
 import { prefetchCatalog } from '../lib/catalogCache.js';
+import RenewDialog from '../components/RenewDialog.jsx';
+import { renewState, renewDismissedToday, dismissRenewToday } from '../lib/renew.js';
 
 function OnboardingTips({ onDismiss }) {
   const ok = useFocusable('onboarding-ok');
@@ -309,6 +311,21 @@ export default function Home() {
   const [heroItems, setHeroItems] = useState([]);
   const saved = getSession();
   const expiryMsg = expiryBannerText(saved?.user_info || session?.info || session?.session?.user_info);
+  const userInfo = saved?.user_info || session?.info || session?.session?.user_info;
+  const renewUser = saved?.username || userInfo?.username || '';
+  const renew = renewState(userInfo);
+  const [renewOpen, setRenewOpen] = useState(false);
+  // Pop the reminder once per day (after the onboarding tips, if any).
+  useEffect(() => {
+    if (!renew || showTips || renewDismissedToday(renewUser)) return undefined;
+    const id = window.setTimeout(() => setRenewOpen(true), 1200);
+    return () => window.clearTimeout(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [Boolean(renew), showTips, renewUser]);
+  const closeRenew = () => {
+    dismissRenewToday(renewUser);
+    setRenewOpen(false);
+  };
 
   useEffect(() => {
     setTick((x) => x + 1);
@@ -446,7 +463,20 @@ export default function Home() {
 
   return (
     <div>
-      {expiryMsg ? <div className="expiry-banner">{expiryMsg}</div> : null}
+      {renew ? (
+        <div className="expiry-banner expiry-banner--renew">
+          <span>
+            {renew.expired ? t('renew.expired') : renew.days <= 0 ? t('renew.today') : t('renew.inDays', renew.days)}
+            {renew.date ? ` · ${renew.date}` : ''}
+          </span>
+          <button tabIndex={0} className="btn-secondary btn-xs renew-open-btn" onClick={() => setRenewOpen(true)}>
+            {t('renew.whatsapp')}
+          </button>
+        </div>
+      ) : expiryMsg ? (
+        <div className="expiry-banner">{expiryMsg}</div>
+      ) : null}
+      <RenewDialog open={renewOpen} state={renew} username={renewUser} onClose={closeRenew} />
 
       {showTips ? <OnboardingTips onDismiss={dismissTips} /> : null}
 

@@ -192,7 +192,7 @@ export async function login(server) {
   const isAuthOk = auth === '1';
   if (!isAuthOk) {
     const problem = accountProblem(info);
-    if (problem) return { ok: false, ...problem };
+    if (problem) return { ok: false, ...problem, info };
     return { ok: false, status: SERVER_INFO.INVALID, info, via, httpStatus: status };
   }
 

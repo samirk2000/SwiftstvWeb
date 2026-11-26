@@ -283,6 +283,7 @@ export async function loginWithFailover(username, password) {
     return {
       ok: false,
       status: credentialVerdict.result.status,
+      info: credentialVerdict.result.info,
       reason: 'account',
       attempt: queue.length,
       total: queue.length,
