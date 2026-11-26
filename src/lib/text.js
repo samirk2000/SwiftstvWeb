@@ -12,9 +12,29 @@ const PICTOGRAPHS = /(?:[\u2600-\u27BF\u2B00-\u2BFF\u2190-\u21FF\u2300-\u23FF\uF
 // Leftover C0/C1 control characters.
 const CONTROL = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/g;
 
+// Some panels store UTF-8 text that was read as Latin-1 ("Ã\x81ngel",
+// "PelÃ­cula"). Re-decode it as UTF-8 — only when every char is a single byte
+// and the result is valid UTF-8, so correct text is never touched.
+const MOJIBAKE = /[\u00C2-\u00F4][\u0080-\u00BF]/;
+export function repairMojibake(value) {
+  const s = String(value ?? '');
+  if (!MOJIBAKE.test(s) || typeof TextDecoder === 'undefined') return s;
+  const bytes = new Uint8Array(s.length);
+  for (let i = 0; i < s.length; i += 1) {
+    const c = s.charCodeAt(i);
+    if (c > 0xff) return s;
+    bytes[i] = c;
+  }
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch {
+    return s;
+  }
+}
+
 export function cleanTitle(value) {
   if (value === null || value === undefined) return '';
-  const s = String(value);
+  const s = repairMojibake(String(value));
   // Fast path: plain ASCII / Latin text needs no work.
   if (!/[^\u0000-\u024F]/.test(s) && !CONTROL.test(s)) return s.trim();
   CONTROL.lastIndex = 0;

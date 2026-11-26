@@ -10,7 +10,7 @@
 import { getSession, saveSession, clearSession } from './session.js';
 import { corsFetch } from './cors.js';
 import { beginForeground, kindForAction } from './netActivity.js';
-import { cleanTitle, decodeBase64Utf8 } from './text.js';
+import { cleanTitle, decodeBase64Utf8, repairMojibake } from './text.js';
 
 // Derive a clean `http(s)://host[:port]` base from a URL that actually
 // succeeded (so we persist HTTPS when the panel only accepted it over TLS).
@@ -330,6 +330,41 @@ export async function getShortEpg(server, streamId, limit = 12) {
 
 // --- Generic helpers ------------------------------------------
 
+// Panels often list the SAME episode twice (e.g. S01E01 as .mp4 and .avi).
+// Show it once — and play the copy a TV browser can actually open — so the
+// list isn't "1, 1, 2, 2…" and "Siguiente" never lands on the same episode.
+const CONTAINER_RANK = { mp4: 0, m4v: 1, mkv: 2, webm: 3, mov: 4, ts: 5, avi: 8, flv: 9, wmv: 9 };
+function rankOf(ep) {
+  const r = CONTAINER_RANK[String(ep?.container_extension || '').toLowerCase()];
+  return r === undefined ? 6 : r;
+}
+export function uniqueEpisodes(list) {
+  const out = [];
+  const byNum = new Map();
+  for (const ep of list) {
+    const num = ep && ep.episode_num !== undefined && ep.episode_num !== null && ep.episode_num !== '' ? String(Number(ep.episode_num)) : '';
+    if (!num || num === 'NaN') {
+      out.push(ep);
+      continue;
+    }
+    const at = byNum.get(num);
+    if (at === undefined) {
+      byNum.set(num, out.length);
+      out.push(ep);
+    } else if (rankOf(ep) < rankOf(out[at])) {
+      out[at] = ep;
+    }
+  }
+  return out;
+}
+
+function repairStrings(obj) {
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return;
+  for (const k of Object.keys(obj)) {
+    if (typeof obj[k] === 'string') obj[k] = repairMojibake(obj[k]);
+  }
+}
+
 async function apiCall(server, action, params = {}, opts = {}) {
   const { baseUrl, username, password } = server;
   const key = cacheKey(action, { ...params, username, password });
@@ -364,6 +399,20 @@ async function apiCall(server, action, params = {}, opts = {}) {
     // eslint-disable-next-line no-console
     console.warn('[api] unparseable body', action, '->', String(text || '').slice(0, 140));
     return { error: SERVER_INFO.PARSE };
+  }
+  // Detail text (title, plot, cast…) and episode titles: fix panel mojibake.
+  if ((action === 'get_vod_info' || action === 'get_series_info') && parsed && typeof parsed === 'object') {
+    repairStrings(parsed.info);
+    repairStrings(parsed.movie_data);
+    const eps = parsed.episodes;
+    if (eps && typeof eps === 'object') {
+      for (const k of Object.keys(eps)) {
+        const list = eps[k];
+        if (!Array.isArray(list)) continue;
+        list.forEach((e) => { repairStrings(e); repairStrings(e && e.info); });
+        eps[k] = uniqueEpisodes(list);
+      }
+    }
   }
   // Huge full-catalog lists (30 MB of VOD) must not sit in this Map on a TV.
   if (!opts.noCache) cacheSet(key, parsed);

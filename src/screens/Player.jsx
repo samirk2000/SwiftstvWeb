@@ -543,7 +543,10 @@ export default function Player() {
     const pick = usable[0]; // already sorted by language preference
     containerAudioIdRef.current = pick.id;
     switchContainerAudioRef.current?.(pick.id).then((okSwitch) => {
-      if (okSwitch) showTrackBanner(`${t('player.audio')}: ${pick.label}`);
+      if (okSwitch) {
+        setAudioNotice(false);
+        showTrackBanner(`${t('player.audio')}: ${pick.label}`);
+      }
       refreshTracksRef.current?.();
     });
   };
@@ -572,6 +575,23 @@ export default function Player() {
   };
   const checkHlsAudioRef = useRef(checkHlsAudio);
   checkHlsAudioRef.current = checkHlsAudio;
+
+  // Fast "no sound" signal (Chrome/Edge): the container probe can take 10-20 s
+  // on big files from slow panels. If after ~4 s of playback the browser has
+  // decoded video but ZERO audio bytes, the audio track is one it can't
+  // decode (Dolby AC3/E-AC3 in practice) — tell the viewer right away. The
+  // probe still switches to an AAC track if the file has one.
+  useEffect(() => {
+    if (!started || !isVodLike) return undefined;
+    const timer = window.setTimeout(() => {
+      const v = videoRef.current;
+      if (!v || remuxCtrlRef.current || audioCodecCheckedRef.current && !nativeAudioBadRef.current) return;
+      if (typeof v.webkitAudioDecodedByteCount !== 'number' || typeof v.webkitVideoDecodedByteCount !== 'number') return;
+      if (v.paused || v.currentTime < 2) return;
+      if (v.webkitAudioDecodedByteCount === 0 && v.webkitVideoDecodedByteCount > 0) showAudioNotice();
+    }, 4500);
+    return () => window.clearTimeout(timer);
+  }, [started, isVodLike, url, id, restart]);
 
   // Probe MKV/MP4 dual-audio tracks once playback has a real src (Chromium hides audioTracks).
   useEffect(() => {

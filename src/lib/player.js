@@ -426,10 +426,53 @@ export function attachHls(videoEl, url, opts = {}) {
   // capped by MAX_NATIVE_RETRIES and sequential (wipe-first). The `destroyed`
   // guard also ensures a teardown-triggered error event can never restart the
   // stream after the player was left.
+  // The route answered with a real video file but this browser can't decode
+  // it (HEVC 4K, AVI/MPEG-4…): every other route serves the SAME file, so skip
+  // them and only try the .mp4 version (if any) — the "not compatible" message
+  // then appears in seconds instead of ~30 s.
+  async function routeServesVideo(u) {
+    try {
+      const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+      const timer = setTimeout(() => ctrl && ctrl.abort(), 6000);
+      const res = await fetch(u, { headers: { Range: 'bytes=0-1' }, signal: ctrl ? ctrl.signal : undefined });
+      clearTimeout(timer);
+      const type = String(res.headers.get('content-type') || '').toLowerCase();
+      try {
+        ctrl && ctrl.abort();
+      } catch {}
+      return (res.status === 206 || res.status === 200) && /^(video\/|application\/octet-stream)/.test(type);
+    } catch {
+      return false;
+    }
+  }
+
   function onNativeError() {
     if (controller.destroyed || !isPlaybackEpoch(epoch)) return;
     clearInterval(nativeWatchdog);
     nativeWatchdog = null;
+    const decodeError = videoEl && videoEl.error && videoEl.error.code === 4;
+    if (decodeError && !controller.codecChecked && attempt < primary.length) {
+      controller.codecChecked = true;
+      const current = candidates[Math.min(attempt, candidates.length - 1)];
+      routeServesVideo(current).then((isVideo) => {
+        if (controller.destroyed || !isPlaybackEpoch(epoch)) return;
+        if (isVideo) {
+          if (candidates.length > primary.length) {
+            attempt = primary.length; // first .mp4-variant route
+            controller.errorCount = 0;
+            doStartPlayback();
+          } else fail();
+          return;
+        }
+        onNativeErrorRetry();
+      });
+      return;
+    }
+    onNativeErrorRetry();
+  }
+
+  function onNativeErrorRetry() {
+    if (controller.destroyed || !isPlaybackEpoch(epoch)) return;
     if (nativeRetries < MAX_NATIVE_RETRIES) {
       nativeRetries += 1;
       stallFrom = Date.now();
