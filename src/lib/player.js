@@ -13,6 +13,15 @@ import Hls from 'hls.js';
 import mpegts from 'mpegts.js';
 import { needsOriginHeaders, originHeaderLines, defaultOriginHeaders } from './exclusivos.js';
 import { streamProxyCandidates } from './proxy.js';
+import {
+  whenStartBuffered,
+  snapToBuffered,
+  recoverLivePlayback,
+  bufferedAhead,
+  LIVE_START_AHEAD_S,
+} from './liveBuffer.js';
+
+export { whenStartBuffered, snapToBuffered, recoverLivePlayback, bufferedAhead, LIVE_START_AHEAD_S };
 
 const RECOVERY_ATTEMPTS = 3;
 
@@ -611,6 +620,7 @@ export function attachTs(videoEl, url, opts = {}) {
     player: null,
     hls: null, // attachHls controller used for the fallback
     fellBack: false,
+    holdingStart: false,
     destroyed: false,
     destroy() {
       controller.destroyed = true;
@@ -692,7 +702,7 @@ export function attachTs(videoEl, url, opts = {}) {
   // aplaza la detección de canales realmente rotos por TS a 30s; los canales que
   // se congelan a MITAD siguen siendo alcanzados por los watchdogs del fallback
   // HLS y la liveness continua.
-  const MPEGTS_STALL_MS = 30000; // sin avance durante 30s con mpegts → HLS
+  const MPEGTS_STALL_MS = 12000; // sin avance 12s DESPUÉS de play() → HLS
   // Pausa entre el teardown del TS continuo y el arranque del HLS .m3u8: el
   // worker de mpegts deja el elemento en estado transitorio (los errores
   // "Worker MediaSource attachment is closing" de la consola) y el panel
@@ -736,9 +746,17 @@ export function attachTs(videoEl, url, opts = {}) {
     const isLive = opts.isLive !== false;
     let lastAdvanceAt = Date.now();
     let lastT = videoEl.currentTime || 0;
+    let recovers = 0;
     return setInterval(() => {
       if (controller.destroyed || !isPlaybackEpoch(epoch)) {
         clearWatchdogs();
+        return;
+      }
+      // Pre-buffer hold: the video is paused on purpose. Do not treat that
+      // as a stall and do not fall back to HLS while we wait for runway.
+      if (controller.holdingStart) {
+        lastAdvanceAt = Date.now();
+        lastT = videoEl.currentTime || 0;
         return;
       }
       const t = videoEl.currentTime || 0;
@@ -748,7 +766,18 @@ export function attachTs(videoEl, url, opts = {}) {
         // Reproduciendo de verdad (avanza) o pausa intencional (solo VOD): reset.
         lastAdvanceAt = Date.now();
         lastT = t;
-      } else if (Date.now() - lastAdvanceAt >= stallMs) {
+        recovers = 0;
+        return;
+      }
+      const waited = Date.now() - lastAdvanceAt;
+      // Before giving up, snap into the buffer and resume play — many "black
+      // screen" cases are just a head parked at 0 or a browser pause after
+      // an underrun, and HLS fallback is the wrong move.
+      if (isLive && waited >= 2500 && recovers < 3) {
+        recovers += 1;
+        try { recoverLivePlayback(videoEl); } catch {}
+      }
+      if (waited >= stallMs) {
         clearWatchdogs();
         onGiveUp();
       }
@@ -814,6 +843,8 @@ export function attachTs(videoEl, url, opts = {}) {
     }
     // eslint-disable-next-line no-console
     console.info('[attachTs] HLS fallback url=%s', hlsUrl);
+    controller.holdingStart = false;
+    try { snapToBuffered(videoEl); } catch {}
     // Parche diferenciado por tipo de canal: si este canal ya cayó HLS-only
     // (mpegts no lo reproduce en este navegador), el HLS es la ÚNICA vía y su
     // CDN suele tardar >1x en bajar segmentos (p. ej. Canal 5). Con sync 3 (3
@@ -973,6 +1004,8 @@ export function attachTs(videoEl, url, opts = {}) {
     // Player.jsx's safePlay does for the native path.
     const playMpegts = () => {
       if (controller.destroyed) return;
+      controller.holdingStart = false;
+      try { snapToBuffered(videoEl); } catch {}
       try {
         const p = player.play();
         if (p && typeof p.catch === 'function') {
@@ -987,22 +1020,23 @@ export function attachTs(videoEl, url, opts = {}) {
             // canal — sin esto, el arranque muted por autoplay se malgastaba y el
             // canal caía en falso a HLS (restart + conexiones extra en el panel).
             try { videoEl.muted = true; } catch {}
+            try { snapToBuffered(videoEl); } catch {}
             const p2 = videoEl.play();
             armStartupWatchdog();
             if (p2 && typeof p2.catch === 'function') p2.catch(() => {});
           });
         }
       } catch {}
+      armStartupWatchdog();
     };
-    // Vigila la reproducción de forma continua: si currentTime no avanza en
-    // MPEGTS_STALL_MS (no llegan frames o se queda en "slideshow" sin
-    // reproducir), conmuta a HLS.
-    armStartupWatchdog();
-    // Live: buffer ~3 s before the first play() (see whenStartBuffered).
+    // Live: buffer ~3 s (and snap the head into the buffered range) before the
+    // first play(). Do NOT arm the stall watchdog during that hold — the video
+    // is paused on purpose, and treating pause as a stall used to fall back to
+    // HLS (or sit black) before play() ever ran.
     if (isLive) {
+      controller.holdingStart = true;
       whenStartBuffered(videoEl).then(() => {
         if (controller.destroyed || !isPlaybackEpoch(epoch) || controller.player !== player) return;
-        armStartupWatchdog();
         playMpegts();
       });
     } else playMpegts();
@@ -1062,58 +1096,10 @@ export function wakeLockController() {
   return { request, release };
 }
 
-// LIVE START BUFFER: starting a channel the instant the first bytes land
-// (≈0.5 s buffered) is what made it stutter/freeze several times before
-// settling — any dip in the first seconds empties the buffer. Hold play()
-// until ~3 s are buffered ahead (or 4 s after the first data, whichever
-// comes first; hard cap 9 s from attach so a slow channel never sits black).
-export const LIVE_START_AHEAD_S = 3;
-export function whenStartBuffered(videoEl, { minAhead = LIVE_START_AHEAD_S, maxWaitMs = 4000, hardCapMs = 9000 } = {}) {
-  return new Promise((resolve) => {
-    if (!videoEl) {
-      resolve(0);
-      return;
-    }
-    const t0 = Date.now();
-    let firstData = 0;
-    let finished = false;
-    const ahead = () => {
-      try {
-        const b = videoEl.buffered;
-        if (!b || !b.length) return 0;
-        const ct = videoEl.currentTime || 0;
-        for (let i = 0; i < b.length; i += 1) {
-          if (b.end(i) > ct) return b.end(i) - Math.max(ct, b.start(i));
-        }
-      } catch {}
-      return 0;
-    };
-    const finish = () => {
-      if (finished) return;
-      finished = true;
-      clearInterval(timer);
-      videoEl.removeEventListener('progress', tick);
-      resolve(Date.now() - t0);
-    };
-    function tick() {
-      if (finished) return;
-      const a = ahead();
-      if (a > 0 && !firstData) firstData = Date.now();
-      if (
-        a >= minAhead ||
-        (firstData && Date.now() - firstData >= maxWaitMs) ||
-        Date.now() - t0 >= hardCapMs
-      ) {
-        finish();
-      }
-    }
-    const timer = setInterval(tick, 100);
-    videoEl.addEventListener('progress', tick);
-    tick();
-  });
-}
-
-// Try to nudge a stalled live <video> back to the live edge.
+// whenStartBuffered / LIVE_START_AHEAD_S live in ./liveBuffer.js and are
+// re-exported above. Try to nudge a stalled live <video> back to the live edge
+// (only used as a last resort — prefer snapToBuffered, which never seeks into
+// a hole that would flush mpegts's SourceBuffer).
 export function nudgeToLiveEdge(videoEl) {
   if (!videoEl) return;
   try {

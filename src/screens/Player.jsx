@@ -3,6 +3,7 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import { t } from '../lib/i18n.js';
 import { WHATSAPP_DISPLAY } from '../lib/renew.js';
 import { attachHls, attachTs, isUnsupportedContainer, mp4Variant, togglePip, wakeLockController, invalidatePlayback, whenStartBuffered } from '../lib/player.js';
+import { snapToBuffered, recoverLivePlayback, liveHasVisibleFrames } from '../lib/liveBuffer.js';
 import { needsOriginHeaders } from '../lib/exclusivos.js';
 import {
   updateContinueWatching,
@@ -104,6 +105,12 @@ export default function Player() {
   // we abort the previous controller so no parallel fetch keeps the panel at
   // 4/3 connections.
   const abortRef = useRef(null);
+  // True while we are wiping / unmounting, so an unexpected `pause` event
+  // (video.load(), destroy) does not try to resume or abort the new stream.
+  const tearingDownRef = useRef(false);
+  // True while we are holding play() for the live start buffer. Recovery
+  // may snap the head into the range but must not call play() yet.
+  const liveHoldRef = useRef(false);
   const [controlsVisible, setControlsVisible] = useState(true);
   const [error, setError] = useState(false);
   // MEDIA_ERR_* code when playback failed (4 = src not supported / codec).
@@ -680,6 +687,7 @@ export default function Player() {
 
   /** Kill HLS/native + wipe BEFORE swapping episodes / leaving so the panel never sees overlapping streams. */
   const hardStopPlayback = () => {
+    tearingDownRef.current = true;
     // Invalidate first so any delayed HLS fallback / native retry from this
     // attach is dead even before destroy() finishes clearing timers.
     invalidatePlayback();
@@ -1775,6 +1783,8 @@ export default function Player() {
     if (!allowAttachRef.current) {
       return undefined;
     }
+    tearingDownRef.current = false;
+    liveHoldRef.current = Boolean(type === 'live' && !startPosition);
     setMutedHint(false);
     setError(false);
     setErrorCode(null);
@@ -1910,7 +1920,22 @@ export default function Player() {
     };
     // Show a "Cargando…" overlay until the first real frames arrive, so slow
     // VOD that the player is retrying doesn't look frozen.
+    const markReallyStarted = () => {
+      if (tearingDownRef.current || playerRef.current !== player) return;
+      if (!liveHasVisibleFrames(video) && type === 'live') return;
+      startedRef.current = true;
+      setStarted(true);
+      rememberTsWorks();
+    };
     const onPlaying = () => {
+      // VOD: the playing event is enough. Live: only hide the spinner once
+      // real frames are on screen (videoWidth > 0 and the head is in-buffer).
+      // A bare `playing` on a black first frame is what made channels look
+      // like they "loaded and then went black".
+      if (type === 'live') {
+        markReallyStarted();
+        return;
+      }
       startedRef.current = true;
       setStarted(true);
       rememberTsWorks();
@@ -1952,15 +1977,28 @@ export default function Player() {
     // Live channels: hold the first play() until ~3 s are buffered (max ~4 s
     // extra) so the start doesn't stutter; VOD/catch-up keep the fast start.
     let startGateOpen = !(isLivePlayback && !startPosition);
+    liveHoldRef.current = !startGateOpen;
+    const recoverLive = () => {
+      if (tearingDownRef.current || playerRef.current !== player) return;
+      if (liveHoldRef.current) {
+        try { snapToBuffered(video); } catch {}
+        return;
+      }
+      try { recoverLivePlayback(video); } catch {}
+    };
     const gatedPlay = () => {
       if (startGateOpen) safePlay();
     };
     if (!startGateOpen) {
       whenStartBuffered(video).then(() => {
-        if (playerRef.current !== player) return;
+        if (playerRef.current !== player || tearingDownRef.current) return;
         startGateOpen = true;
+        liveHoldRef.current = false;
+        try { snapToBuffered(video); } catch {}
         safePlay();
       });
+    } else {
+      liveHoldRef.current = false;
     }
     const onCanPlay = () => gatedPlay();
     video.addEventListener('canplay', onCanPlay);
@@ -1978,11 +2016,17 @@ export default function Player() {
       // an already-playing stream; an advancing currentTime is the reliable
       // signal. Guarded to >=1s so a still/black first frame doesn't clear it.
       if (video.currentTime >= 1) {
-        startedRef.current = true;
-        setStarted(true);
-        // Also coalesced into rememberTsWorks (idempotent via hlsClearedRef) so
-        // webviews that never fire `playing` still clear the HLS-only memory.
-        rememberTsWorks();
+        if (type === 'live' && !liveHasVisibleFrames(video)) {
+          // Head moved but nothing is painted yet (or we are in a hole) —
+          // keep the "Cargando" overlay and try to snap into the buffer.
+          recoverLive();
+        } else {
+          startedRef.current = true;
+          setStarted(true);
+          // Also coalesced into rememberTsWorks (idempotent via hlsClearedRef) so
+          // webviews that never fire `playing` still clear the HLS-only memory.
+          rememberTsWorks();
+        }
       }
       if (
         video.duration > 0 &&
@@ -2012,30 +2056,35 @@ export default function Player() {
     };
     video.addEventListener('timeupdate', onTime);
 
-    const onStall = () => {
-      if (type === 'live' && !video.paused && video.readyState < 3) {
-        // DVR stall: nudge back toward the live edge.
-        try {
-          const end =
-            video.seekable && video.seekable.length ? video.seekable.end(0) : video.currentTime;
-          video.currentTime = Math.max(0, end - 2);
-        } catch {}
-      }
+    const onStallOrWaiting = () => {
+      if (type !== 'live') return;
+      if (tearingDownRef.current || playerRef.current !== player) return;
+      // Never assign currentTime to seekable.end-2: if that point is not
+      // inside the SourceBuffer, mpegts.js flushes the live stream and the
+      // channel goes black. Snap into a real buffered range and resume.
+      recoverLive();
     };
-    video.addEventListener('stalled', onStall);
+    video.addEventListener('stalled', onStallOrWaiting);
+    video.addEventListener('waiting', onStallOrWaiting);
 
-    // For LIVE, pausing can release the panel slot. For VOD/series we must NOT
-    // abort — otherwise Pause would kill the movie download.
+    // Live has no pause button. If the browser pauses (underrun, autoplay
+    // policy, a mid-start snap), resume — do NOT abort the stream. Aborting
+    // on pause used to kill the only in-flight request and leave a black
+    // screen with no retry.
     const onPause = () => {
       if (type !== 'live') return;
-      if (abortRef.current) {
-        try { abortRef.current.abort(); } catch {}
-        abortRef.current = null;
-      }
+      if (tearingDownRef.current || playerRef.current !== player) return;
+      window.setTimeout(() => {
+        if (tearingDownRef.current || playerRef.current !== player) return;
+        if (!video.paused) return;
+        recoverLive();
+      }, 200);
     };
     video.addEventListener('pause', onPause);
 
     return () => {
+      tearingDownRef.current = true;
+      liveHoldRef.current = false;
       video.dispatchEvent(new Event('timeupdate'));
       if (player) player.destroy();
       playerRef.current = null;
@@ -2056,7 +2105,8 @@ export default function Player() {
       video.src = '';
       try { video.load(); } catch {}
       video.removeEventListener('timeupdate', onTime);
-      video.removeEventListener('stalled', onStall);
+      video.removeEventListener('stalled', onStallOrWaiting);
+      video.removeEventListener('waiting', onStallOrWaiting);
       video.removeEventListener('playing', onPlaying);
       video.removeEventListener('pause', onPause);
       video.removeEventListener('canplay', onCanPlay);
@@ -2089,8 +2139,22 @@ export default function Player() {
       if (!v) return;
       const tNow = Number(v.currentTime) || 0;
       if (!v.paused && v.readyState >= 2 && lastT >= 0 && tNow - lastT > 0.15) {
-        startedRef.current = true;
-        setStarted(true);
+        if (isLive && !liveHasVisibleFrames(v)) {
+          if (liveHoldRef.current) {
+            try { snapToBuffered(v); } catch {}
+          } else {
+            try { recoverLivePlayback(v); } catch {}
+          }
+        } else {
+          startedRef.current = true;
+          setStarted(true);
+        }
+      } else if (isLive && !startedRef.current) {
+        if (liveHoldRef.current) {
+          try { snapToBuffered(v); } catch {}
+        } else {
+          try { recoverLivePlayback(v); } catch {}
+        }
       }
       lastT = tNow;
     }, 600);
@@ -2110,6 +2174,20 @@ export default function Player() {
     }, 35000);
     return () => window.clearTimeout(t);
   }, [url, id, restart, error, started, isVodLike]);
+
+  // Live: if the channel never shows real frames, don't sit on a black screen
+  // or spin forever. Give mpegts (and one HLS fallback) time to recover, then
+  // show a clear "no hay señal" + Reintentar.
+  useEffect(() => {
+    if (!url || error || started || !isLive) return undefined;
+    const t = window.setTimeout(() => {
+      if (!startedRef.current) {
+        setError(true);
+        setErrorCode(2);
+      }
+    }, 40000);
+    return () => window.clearTimeout(t);
+  }, [url, id, restart, error, started, isLive]);
 
   // Auto-hide controls after inactivity. Keys / mouse reveal them again.
   useEffect(() => {
@@ -2291,7 +2369,7 @@ export default function Player() {
       <video
         key={`${type}-${id}-${restart}`}
         ref={videoRef}
-        autoPlay
+        autoPlay={!isLive}
         playsInline
         preload="none"
         onClick={(e) => {

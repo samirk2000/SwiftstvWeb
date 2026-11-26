@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite --host",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "node --test src/lib/liveBuffer.test.mjs"
   },
   "dependencies": {
     "hls.js": "^1.5.13",
