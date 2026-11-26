@@ -2,6 +2,8 @@
 import { formatExpiry } from './time.js';
 
 export const RENEW_WHATSAPP = '5216622684690';
+// Same WhatsApp, written the way people dial it: +52 1 662 268 4690.
+export const WHATSAPP_DISPLAY = RENEW_WHATSAPP.replace(/^(\d{2})(\d)(\d{3})(\d{3})(\d{4})$/, '+$1 $2 $3 $4 $5');
 export const RENEW_WARN_DAYS = 5;
 const DISMISS_KEY = 'swiftstv.renewDismissed.v1';
 

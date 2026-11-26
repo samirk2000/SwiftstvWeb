@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { t } from '../lib/i18n.js';
+import { WHATSAPP_DISPLAY } from '../lib/renew.js';
 import { attachHls, attachTs, isUnsupportedContainer, mp4Variant, togglePip, wakeLockController, invalidatePlayback, whenStartBuffered } from '../lib/player.js';
 import { needsOriginHeaders } from '../lib/exclusivos.js';
 import {
@@ -522,7 +523,7 @@ export default function Player() {
   const showAudioNotice = () => {
     setAudioNotice(true);
     if (audioNoticeTimer.current) clearTimeout(audioNoticeTimer.current);
-    audioNoticeTimer.current = window.setTimeout(() => setAudioNotice(false), 20000);
+    audioNoticeTimer.current = window.setTimeout(() => setAudioNotice(false), 30000);
   };
   useEffect(() => () => audioNoticeTimer.current && clearTimeout(audioNoticeTimer.current), []);
 
@@ -1326,6 +1327,34 @@ export default function Player() {
         e.preventDefault();
         e.stopImmediatePropagation();
       };
+
+      // Error screen (formato no compatible / no se pudo reproducir): the D-pad
+      // moves between Reintentar and Atrás, OK presses the focused one.
+      const errorBtns = Array.from(document.querySelectorAll('.player-error-actions button')).filter((el) => {
+        const r = el.getBoundingClientRect();
+        return r.width > 0 && r.height > 0;
+      });
+      if (errorBtns.length) {
+        const isOkKey = e.key === 'Enter' || e.key === ' ' || code === 13 || code === 23;
+        const isArrow = ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(e.key) || [37, 38, 39, 40].includes(code);
+        if (!isOkKey && !isArrow) return;
+        claim();
+        let active = getTvFocus();
+        if (!active || !errorBtns.includes(active)) active = errorBtns.includes(document.activeElement) ? document.activeElement : null;
+        if (isOkKey) {
+          (active || errorBtns[0]).click();
+          return;
+        }
+        if (!active) {
+          setFocused(errorBtns[0], { native: false });
+          return;
+        }
+        const back = e.key === 'ArrowLeft' || e.key === 'ArrowUp' || code === 37 || code === 38;
+        const idx = errorBtns.indexOf(active);
+        const next = errorBtns[Math.max(0, Math.min(errorBtns.length - 1, idx + (back ? -1 : 1)))];
+        if (next && next !== active) setFocused(next, { native: false });
+        return;
+      }
 
       // ---- LIVE: overlay zap (↑↓ canales, ←→ categoría, OK sintoniza) ----
       if (isLive) {
@@ -2194,45 +2223,49 @@ export default function Player() {
     const signalIssue = isLive && !formatIssue;
     return (
       <div className="player-screen" ref={screenRef}>
-        <div style={{ color: 'var(--text)', padding: '0 24px', textAlign: 'center', maxWidth: 640, margin: '0 auto' }}>
-          {formatIssue
-            ? t('player.formatError')
-            : signalIssue
-              ? t('player.signalError')
-              : error
-                ? t('player.error')
-                : t('common.error')}
-          <p className="hint" style={{ marginTop: 12 }}>
+        <div className="player-error-box" role="alert">
+          <strong className="player-error-title">
+            {formatIssue
+              ? t('player.formatError')
+              : signalIssue
+                ? t('player.signalError')
+                : error
+                  ? t('player.error')
+                  : t('common.error')}
+          </strong>
+          <p className="player-error-hint">
             {formatIssue ? t('player.formatHint') : signalIssue ? t('player.signalHint') : t('player.errorHint')}
           </p>
+          {!signalIssue && !formatIssue && !isLive ? <p className="player-error-hint">{t('player.errorAppsHint')}</p> : null}
+          {!signalIssue ? <p className="player-help-wa">{t('player.helpWhatsapp', WHATSAPP_DISPLAY)}</p> : null}
+          <div className="player-error-actions">
+            {error && (
+              <button
+                tabIndex={0}
+                className="btn-ghost player-error-retry"
+                onClick={() => {
+                  allowAttachRef.current = true;
+                  setError(false);
+                  setErrorCode(null);
+                  setStarted(false);
+                  startedRef.current = false;
+                  setRestart((x) => x + 1);
+                }}
+              >
+                {t('common.retry')}
+              </button>
+            )}
+            <button
+              tabIndex={0}
+              className="btn-ghost player-error-retry"
+              onClick={() => {
+                leavePlayer();
+              }}
+            >
+              ← {t('common.back')}
+            </button>
+          </div>
         </div>
-        {error && (
-          <button
-            tabIndex={0}
-            className="btn-ghost"
-            style={{ position: 'absolute', bottom: 96, left: '50%', transform: 'translateX(-50%)' }}
-            onClick={() => {
-              allowAttachRef.current = true;
-              setError(false);
-              setErrorCode(null);
-              setStarted(false);
-              startedRef.current = false;
-              setRestart((x) => x + 1);
-            }}
-          >
-            {t('common.retry')}
-          </button>
-        )}
-        <button
-          tabIndex={0}
-          className="btn-ghost"
-          style={{ position: 'absolute', top: 24, left: 24 }}
-          onClick={() => {
-            leavePlayer();
-          }}
-        >
-          ← {t('common.back')}
-        </button>
       </div>
     );
   }
@@ -2503,6 +2536,7 @@ export default function Player() {
         <div className="audio-notice" role="status" aria-live="polite">
           <strong>{t('player.dolbyAudio')}</strong>
           <span>{t('player.dolbyAudioHint')}</span>
+          <span className="player-help-wa">{t('player.helpWhatsapp', WHATSAPP_DISPLAY)}</span>
         </div>
       ) : null}
 
