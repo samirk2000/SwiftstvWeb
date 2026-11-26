@@ -275,7 +275,7 @@ function CatchupPanel({ channel, server, onPlayCatchup, onClose }) {
 
 export default function LiveGuide() {
   const navigate = useNavigate();
-  const { data: categories, server } = usePanelList(getLiveCategories);
+  const { data: categories, server, loading: catsLoading } = usePanelList(getLiveCategories);
   const [catId, setCatId] = usePersistedCategory('live');
   const [query, setQuery] = useState('');
   const [favTick, setFavTick] = useState(0);
@@ -556,7 +556,8 @@ export default function LiveGuide() {
         ? t('live.noRecent')
         : t('vod.noResults');
 
-  const showLoading = ready && !localCat && loading;
+  // Categories still downloading = loading too (never "Sin resultados").
+  const showLoading = (ready && !localCat && loading) || (!searchActive && !localCat && catsLoading);
 
   return (
     <div>
@@ -622,7 +623,7 @@ export default function LiveGuide() {
       {showLoading ? (
         <div className="state">
           <div className="spinner" />
-          {t('common.loading')}
+          {t('activity.live')}
         </div>
       ) : error || !filtered?.length ? (
         <div className="state">

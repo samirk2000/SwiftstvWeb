@@ -8,6 +8,7 @@
 //    yield audio on capable devices. Best-effort only.
 //  - DVR/archive playback needs the <video> `LiveSyncDurationCount` and a quick
 //    seek when `video.paused`/stall handling returns far from the live edge.
+import { markHttpRelay } from './relayHosts.js';
 import Hls from 'hls.js';
 import mpegts from 'mpegts.js';
 import { needsOriginHeaders, originHeaderLines, defaultOriginHeaders } from './exclusivos.js';
@@ -133,8 +134,13 @@ function hlsConfigFor(url, opts) {
     liveMaxLatencyDurationCount: Math.max(3, liveSync * 2),
     lowLatencyMode: false,
     // Búfer de datos por delante (pico), 30MB en RAM.
-    maxBufferLength: shortEdge ? 10 : (isLiveFallback ? 15 : 10),
-    maxMaxBufferLength: shortEdge ? 15 : (isLiveFallback ? 30 : 15),
+    // Live HLS: a little more runway ahead so a slow segment doesn't drain
+    // the buffer right after start (VOD keeps its 10/15 s).
+    maxBufferLength: isLiveFallback ? (shortEdge ? 16 : 20) : 10,
+    maxMaxBufferLength: isLiveFallback ? (shortEdge ? 30 : 40) : 15,
+    // Wait up to 4 s of stall before hls.js nudges, and nudge gently.
+    highBufferWatchdogPeriod: 3,
+    nudgeMaxRetry: 5,
     maxBufferSize: 30 * 1024 * 1024,
     // No cortar la carga de un fragmento prematuramente (segmentos de varios MB
     // en CDN lentas pueden tardar 20-40s; 60s de margen).
@@ -150,7 +156,10 @@ function hlsConfigFor(url, opts) {
     progressive: true,
     // Don't prefetch the next fragment while the current one is still loading —
     // that looked like 2–3 panel connections for one live channel.
-    startFragPrefetch: false,
+    // Live: fetch the first fragment while the level playlist loads so start
+    // isn't serial (manifest → playlist → fragment). Still one fragment at a
+    // time afterwards. VOD unchanged.
+    startFragPrefetch: isLiveFallback,
     // Subtitles: WebVTT / in-manifest tracks when the panel provides them.
     enableWebVTT: true,
     enableIMSC1: true,
@@ -491,6 +500,11 @@ export function attachHls(videoEl, url, opts = {}) {
     wipeElement();
     const base = candidates[Math.min(attempt, candidates.length - 1)];
     videoEl.src = bustCache ? addNoCache(base) : base;
+    // The relay's plain-HTTP variant of an https panel worked (Cloudflare
+    // challenge on the TLS host) — remember it so the next play starts there.
+    if (/^https:/i.test(url) && /[?&]target=http%3A/i.test(base)) {
+      videoEl.addEventListener('loadedmetadata', () => markHttpRelay(url), { once: true });
+    }
     // Re-arm the play() the caller/toggle relies on.
     videoEl.load();
     nativeErrorBound = onNativeError;
@@ -869,7 +883,9 @@ export function attachTs(videoEl, url, opts = {}) {
             // (SPS/PPS) y suaviza picos de red. El tamaño se adapta a la
             // velocidad medida (máx 8MB), por eso el arranque con 512KB.
             enableStashBuffer: true,
-            stashInitialSize: 512 * 1024,
+            // 1 MB initial stash (was 512 KB): fewer, larger appends during the
+            // start burst so the first seconds don't arrive in a trickle.
+            stashInitialSize: 1024 * 1024,
             // Chasing desactivado (ver comentario del bloque): sin direct-seeks
             // periódicos no hay trabo cada 10s. Los valores de margen quedan
             // como tope por si se reactiva.
@@ -939,7 +955,14 @@ export function attachTs(videoEl, url, opts = {}) {
     // MPEGTS_STALL_MS (no llegan frames o se queda en "slideshow" sin
     // reproducir), conmuta a HLS.
     armStartupWatchdog();
-    playMpegts();
+    // Live: buffer ~3 s before the first play() (see whenStartBuffered).
+    if (isLive) {
+      whenStartBuffered(videoEl).then(() => {
+        if (controller.destroyed || !isPlaybackEpoch(epoch) || controller.player !== player) return;
+        armStartupWatchdog();
+        playMpegts();
+      });
+    } else playMpegts();
   }
 
   function doStartPlayback() {
@@ -994,6 +1017,57 @@ export function wakeLockController() {
     }
   }
   return { request, release };
+}
+
+// LIVE START BUFFER: starting a channel the instant the first bytes land
+// (≈0.5 s buffered) is what made it stutter/freeze several times before
+// settling — any dip in the first seconds empties the buffer. Hold play()
+// until ~3 s are buffered ahead (or 4 s after the first data, whichever
+// comes first; hard cap 9 s from attach so a slow channel never sits black).
+export const LIVE_START_AHEAD_S = 3;
+export function whenStartBuffered(videoEl, { minAhead = LIVE_START_AHEAD_S, maxWaitMs = 4000, hardCapMs = 9000 } = {}) {
+  return new Promise((resolve) => {
+    if (!videoEl) {
+      resolve(0);
+      return;
+    }
+    const t0 = Date.now();
+    let firstData = 0;
+    let finished = false;
+    const ahead = () => {
+      try {
+        const b = videoEl.buffered;
+        if (!b || !b.length) return 0;
+        const ct = videoEl.currentTime || 0;
+        for (let i = 0; i < b.length; i += 1) {
+          if (b.end(i) > ct) return b.end(i) - Math.max(ct, b.start(i));
+        }
+      } catch {}
+      return 0;
+    };
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      clearInterval(timer);
+      videoEl.removeEventListener('progress', tick);
+      resolve(Date.now() - t0);
+    };
+    function tick() {
+      if (finished) return;
+      const a = ahead();
+      if (a > 0 && !firstData) firstData = Date.now();
+      if (
+        a >= minAhead ||
+        (firstData && Date.now() - firstData >= maxWaitMs) ||
+        Date.now() - t0 >= hardCapMs
+      ) {
+        finish();
+      }
+    }
+    const timer = setInterval(tick, 100);
+    videoEl.addEventListener('progress', tick);
+    tick();
+  });
 }
 
 // Try to nudge a stalled live <video> back to the live edge.

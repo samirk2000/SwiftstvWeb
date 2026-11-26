@@ -318,8 +318,23 @@ export default function Home() {
   // Pop the reminder once per day (after the onboarding tips, if any).
   useEffect(() => {
     if (!renew || showTips || renewDismissedToday(renewUser)) return undefined;
-    const id = window.setTimeout(() => setRenewOpen(true), 1200);
-    return () => window.clearTimeout(id);
+    // Never steal the remote: if the viewer already started moving/choosing,
+    // skip today's pop-up (the banner + its button stay on Home). It is
+    // purely local — no network, nothing else waits on it.
+    let touched = false;
+    const onInput = () => {
+      touched = true;
+    };
+    window.addEventListener('keydown', onInput, true);
+    window.addEventListener('pointerdown', onInput, true);
+    const id = window.setTimeout(() => {
+      if (!touched && window.location.pathname === '/') setRenewOpen(true);
+    }, 1200);
+    return () => {
+      window.clearTimeout(id);
+      window.removeEventListener('keydown', onInput, true);
+      window.removeEventListener('pointerdown', onInput, true);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [Boolean(renew), showTips, renewUser]);
   const closeRenew = () => {

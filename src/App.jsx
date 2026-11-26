@@ -1,4 +1,5 @@
 import { BrowserRouter, Navigate, Route, Routes, useNavigate, useLocation } from 'react-router-dom';
+import ActivityIndicator from './components/ActivityIndicator.jsx';
 import { useEffect, useState, useCallback } from 'react';
 import { SessionProvider, useSession } from './context/SessionContext.jsx';
 import {
@@ -359,6 +360,7 @@ function AppShell() {
         </FocusScope>
       </main>
 
+      <ActivityIndicator />
       <ExitConfirm open={exitOpen} onCancel={closeExit} onConfirm={exitApp} />
     </div>
   );

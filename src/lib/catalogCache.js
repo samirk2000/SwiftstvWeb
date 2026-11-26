@@ -1,3 +1,4 @@
+import { setBackgroundProgress, waitForegroundQuiet } from './netActivity.js';
 import {
   getLiveStreams,
   getVodStreams,
@@ -161,10 +162,15 @@ function waitUntilIdle() {
   });
 }
 
+// While the search screen is open the user IS waiting for the index, so any
+// background build runs at full speed (no yielding, 2 categories at a time).
+let boosted = 0;
+const isBoosted = () => boosted > 0;
+
 const CATEGORY_FETCHERS = {
-  live: (srv) => getLiveCategories(srv),
-  series: (srv) => getSeriesCategories(srv),
-  vod: (srv) => getVodCategories(srv),
+  live: (srv, opts) => getLiveCategories(srv, opts),
+  series: (srv, opts) => getSeriesCategories(srv, opts),
+  vod: (srv, opts) => getVodCategories(srv, opts),
 };
 const LIST_FETCHERS = {
   live: (srv, cat, opts) => getLiveStreams(srv, cat, opts),
@@ -175,9 +181,9 @@ const LIST_FETCHERS = {
 // per category straight away (huge list, and per-category resumes).
 const FULL_TIMEOUT = { live: 120000, series: 240000 };
 
-async function categoryNames(server, part) {
+async function categoryNames(server, part, background = false) {
   try {
-    const cats = await CATEGORY_FETCHERS[part](server);
+    const cats = await CATEGORY_FETCHERS[part](server, background ? { background: true } : undefined);
     const map = new Map();
     for (const c of cats || []) map.set(String(c.category_id), String(c.category_name || ''));
     return map;
@@ -208,8 +214,8 @@ async function buildFull(server, part, key) {
   return items;
 }
 
-async function buildByCategory(server, part, key) {
-  const names = await categoryNames(server, part);
+async function buildByCategory(server, part, key, background = false) {
+  const names = await categoryNames(server, part, background);
   if (!names.size) throw new Error('no categories');
   const prev = memory.get(key);
   // Resume an unfinished build from the last day; otherwise start fresh but
@@ -227,12 +233,31 @@ async function buildByCategory(server, part, key) {
     // A complete (older) index stays on screen until the rebuild finishes.
     if (final || showPartial()) setEntry(key, entry, true);
   };
-  const worker = async () => {
+  const total = queue.length + done.size;
+  const report = () => setBackgroundProgress(queue.length ? { part, done: done.size, total } : null);
+  report();
+  const worker = async (slot) => {
     while (queue.length) {
       await waitUntilIdle();
+      // Background (search index) work is LOWEST priority: one category at a
+      // time and only while nothing the user is waiting for is downloading —
+      // unless the search screen is open (then it's what the user waits for).
+      if (background && !isBoosted()) {
+        await waitForegroundQuiet();
+        if (slot > 0) {
+          await new Promise((r) => setTimeout(r, 1000));
+          continue;
+        }
+      }
       const cat = queue.shift();
+      if (cat === undefined) break;
       try {
-        const list = await LIST_FETCHERS[part](server, cat, { noCache: true, timeoutMs: 90000, throwOnError: true });
+        const list = await LIST_FETCHERS[part](server, cat, {
+          noCache: true,
+          timeoutMs: 90000,
+          throwOnError: true,
+          background: background && !isBoosted(),
+        });
         for (const r of list || []) {
           const it = slimOne(part, r, names.get(cat));
           if (!it) continue;
@@ -245,6 +270,7 @@ async function buildByCategory(server, part, key) {
       } catch {
         failures += 1;
       }
+      report();
       sinceSave += 1;
       if (sinceSave >= SAVE_EVERY) {
         sinceSave = 0;
@@ -252,7 +278,11 @@ async function buildByCategory(server, part, key) {
       }
     }
   };
-  await Promise.all(Array.from({ length: CAT_CONCURRENCY }, worker));
+  try {
+    await Promise.all(Array.from({ length: CAT_CONCURRENCY }, (_, i) => worker(i)));
+  } finally {
+    setBackgroundProgress(null);
+  }
   // A few failed categories are retried on the next refresh (they stay out of
   // `done`); the index is still marked complete enough to use.
   const complete = failures === 0 || done.size >= names.size * 0.9;
@@ -262,11 +292,18 @@ async function buildByCategory(server, part, key) {
   return items;
 }
 
-function refreshPart(server, part) {
+function refreshPart(server, part, { background = false } = {}) {
   const key = cacheKey(server, part);
   if (refreshing.has(key)) return refreshing.get(key);
   const p = (async () => {
     await waitUntilIdle();
+    // Background warm-up never grabs a whole multi-MB list in one request
+    // (it can't be paused and would compete with the channel list the user
+    // just opened) — it goes category by category, yielding to the UI.
+    if (background) {
+      await waitForegroundQuiet();
+      return buildByCategory(server, part, key, true);
+    }
     if (part === 'vod') return buildByCategory(server, part, key);
     try {
       return await buildFull(server, part, key);
@@ -288,14 +325,15 @@ function needsRefresh(entry) {
  * refreshing in the background; with nothing cached it waits for the network
  * (or the first partial results of a per-category build). Rejects on failure.
  */
-export async function loadCatalogPart(server, part) {
+export async function loadCatalogPart(server, part, opts = {}) {
   const key = cacheKey(server, part);
   const entry = await loadFromDisk(key);
   if (entry && entry.items.length) {
-    if (needsRefresh(entry)) refreshPart(server, part).catch(() => {});
+    // A stale index is always rebuilt quietly in the background.
+    if (needsRefresh(entry)) refreshPart(server, part, { background: true }).catch(() => {});
     return entry.items;
   }
-  return refreshPart(server, part);
+  return refreshPart(server, part, opts);
 }
 
 /**
@@ -336,10 +374,13 @@ export function loadCatalogProgressive(server, onPart) {
           if (have && have.items.length) onPart(part, have.items, null, { at: have.at, partial: true });
           else onPart(part, null, err || new Error('load failed'));
         });
-    await Promise.all([run('live'), run('series')]);
-    await run('vod');
+    // All three in parallel: a movie search no longer waits for the (slow)
+    // full series list first.
+    await Promise.all([run('live'), run('series'), run('vod')]);
   })();
+  boosted += 1;
   return () => {
+    if (!stopped) boosted = Math.max(0, boosted - 1);
     stopped = true;
     unsubs.forEach((u) => u());
   };
@@ -365,7 +406,7 @@ export function prefetchCatalog(server) {
   (async () => {
     for (const part of PARTS) {
       try {
-        await loadCatalogPart(server, part);
+        await loadCatalogPart(server, part, { background: true });
         const key = cacheKey(server, part);
         const r = refreshing.get(key);
         if (r) await r.catch(() => {});

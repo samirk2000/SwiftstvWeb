@@ -9,6 +9,7 @@
 
 import { getSession, saveSession, clearSession } from './session.js';
 import { corsFetch } from './cors.js';
+import { beginForeground, kindForAction } from './netActivity.js';
 import { cleanTitle, decodeBase64Utf8 } from './text.js';
 
 // Derive a clean `http(s)://host[:port]` base from a URL that actually
@@ -261,16 +262,16 @@ export function logout() {
 
 // --- Categories ---------------------------------------------
 
-export async function getLiveCategories(server) {
-  return apiList(server, 'get_live_categories');
+export async function getLiveCategories(server, opts) {
+  return apiList(server, 'get_live_categories', {}, opts);
 }
 
-export async function getVodCategories(server) {
-  return apiList(server, 'get_vod_categories');
+export async function getVodCategories(server, opts) {
+  return apiList(server, 'get_vod_categories', {}, opts);
 }
 
-export async function getSeriesCategories(server) {
-  return apiList(server, 'get_series_categories');
+export async function getSeriesCategories(server, opts) {
+  return apiList(server, 'get_series_categories', {}, opts);
 }
 
 // --- Streams ------------------------------------------------
@@ -336,10 +337,14 @@ async function apiCall(server, action, params = {}, opts = {}) {
   if (hit !== undefined) return hit;
   const url = buildPlayerApiUrl(baseUrl, username, password, action, params);
   let text;
+  // Foreground requests (the user is waiting) are tracked so the UI can show
+  // download progress and the background search index yields to them.
+  const activity = opts.background ? null : beginForeground(kindForAction(action));
   try {
     const res = await corsFetch(url, {
       userAgent: 'IPTVSmartersPlayer',
       timeoutMs: opts.timeoutMs || 30000,
+      onProgress: activity ? activity.progress : undefined,
     });
     text = res.text;
     if (!res.ok && !text) return { error: SERVER_INFO.NETWORK };
@@ -347,6 +352,8 @@ async function apiCall(server, action, params = {}, opts = {}) {
     // eslint-disable-next-line no-console
     console.warn('[api] network error', action, String(err?.message || err));
     return { error: SERVER_INFO.NETWORK };
+  } finally {
+    if (activity) activity.end();
   }
   const htmlHint = detectHtmlLoginHint(text);
   if (htmlHint) return { error: htmlHint };

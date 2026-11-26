@@ -107,6 +107,7 @@ export async function probeContainerAudioTracks(url, { signal } = {}) {
         lang,
         name,
         codec,
+        isDefault: Boolean(t.disposition && t.disposition.default),
         label: friendlyAudioLabel({ lang, name }, i),
         score: scoreLang(lang, name),
       });
@@ -349,4 +350,51 @@ export function attachRemuxedAudio(videoEl, sourceUrl, audioTrackId, opts = {}) 
 export function pickPreferredContainerAudioId(tracks) {
   if (!tracks?.length) return null;
   return tracks[0].id;
+}
+
+// Dolby / DTS audio: Chrome, Edge and most TV browsers ship no decoder, so the
+// picture plays with NO sound. Ask the browser (MSE first, then the media
+// element) instead of guessing — Safari/Tizen/webOS boxes with Dolby keep it.
+const DOLBY_MIME = {
+  ac3: ['audio/mp4; codecs="ac-3"', 'audio/ac3'],
+  'ac-3': ['audio/mp4; codecs="ac-3"', 'audio/ac3'],
+  eac3: ['audio/mp4; codecs="ec-3"', 'audio/eac3'],
+  'ec-3': ['audio/mp4; codecs="ec-3"', 'audio/eac3'],
+  dts: ['audio/mp4; codecs="dtsc"'],
+};
+const playableCache = new Map();
+
+export function isDolbyAudioCodec(codec) {
+  return Boolean(DOLBY_MIME[String(codec || '').toLowerCase().split('.')[0]]);
+}
+
+/** False only for codecs this browser can't decode (AC3/E-AC3/DTS here). */
+export function isAudioCodecPlayable(codec) {
+  const c = String(codec || '').toLowerCase().split('.')[0];
+  const mimes = DOLBY_MIME[c];
+  if (!mimes) return true; // AAC / MP3 / Opus / unknown: assume playable
+  if (playableCache.has(c)) return playableCache.get(c);
+  let ok = false;
+  for (const m of mimes) {
+    try {
+      if (globalThis.MediaSource && MediaSource.isTypeSupported && MediaSource.isTypeSupported(m)) ok = true;
+    } catch {
+      /* ignore */
+    }
+    try {
+      if (!ok && typeof document !== 'undefined' && document.createElement('video').canPlayType(m)) ok = true;
+    } catch {
+      /* ignore */
+    }
+    if (ok) break;
+  }
+  playableCache.set(c, ok);
+  return ok;
+}
+
+/** The track the browser's own demuxer plays: the flagged default, else the first. */
+export function nativeAudioTrack(tracks) {
+  if (!tracks || !tracks.length) return null;
+  const byIndex = [...tracks].sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
+  return byIndex.find((t) => t.isDefault) || byIndex[0];
 }

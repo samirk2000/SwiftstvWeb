@@ -49,7 +49,7 @@ function VodTile({ vod, onOpen }) {
 
 export default function VodGrid() {
   const navigate = useNavigate();
-  const { data: categories } = usePanelList(getVodCategories);
+  const { data: categories, loading: catsLoading } = usePanelList(getVodCategories);
   const [catId, setCatId] = usePersistedCategory('vod');
   const [query, setQuery] = useState('');
   const [pinPending, setPinPending] = useState(null);
@@ -218,10 +218,10 @@ export default function VodGrid() {
         ))}
       </div>
 
-      {ready && !localFav && loading ? (
+      {(ready && !localFav && loading) || (!localFav && catsLoading) ? (
         <div className="state">
           <div className="spinner" />
-          {t('common.loading')}
+          {t('activity.vod')}
         </div>
       ) : error || !filtered?.length ? (
         <div className="state">

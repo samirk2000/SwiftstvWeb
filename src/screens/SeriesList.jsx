@@ -49,7 +49,7 @@ function SeriesTile({ series, onOpen }) {
 
 export default function SeriesList() {
   const navigate = useNavigate();
-  const { data: categories } = usePanelList(getSeriesCategories);
+  const { data: categories, loading: catsLoading } = usePanelList(getSeriesCategories);
   const [catId, setCatId] = usePersistedCategory('series');
   const [query, setQuery] = useState('');
   const [pinPending, setPinPending] = useState(null);
@@ -221,10 +221,10 @@ export default function SeriesList() {
         ))}
       </div>
 
-      {ready && !localFav && loading ? (
+      {(ready && !localFav && loading) || (!localFav && catsLoading) ? (
         <div className="state">
           <div className="spinner" />
-          {t('common.loading')}
+          {t('activity.series')}
         </div>
       ) : error || !filtered?.length ? (
         <div className="state">

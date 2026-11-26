@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { t } from '../lib/i18n.js';
-import { attachHls, attachTs, isUnsupportedContainer, mp4Variant, togglePip, wakeLockController, invalidatePlayback } from '../lib/player.js';
+import { attachHls, attachTs, isUnsupportedContainer, mp4Variant, togglePip, wakeLockController, invalidatePlayback, whenStartBuffered } from '../lib/player.js';
 import { needsOriginHeaders } from '../lib/exclusivos.js';
 import {
   updateContinueWatching,
@@ -39,6 +39,9 @@ import {
   cancelAllContainerAudioJobs,
   pickPreferredContainerAudioId,
   probeContainerAudioTracks,
+  isAudioCodecPlayable,
+  isDolbyAudioCodec,
+  nativeAudioTrack,
 } from '../lib/containerAudio.js';
 
 /** PC/Mac (mouse + keyboard) vs TV remote — seek/click UX differs. */
@@ -149,6 +152,14 @@ export default function Player() {
   const playUrlRef = useRef('');
   const resumeAtRef = useRef(null);
   const trackBannerTimer = useRef(null);
+  // Dolby (AC3/E-AC3/DTS) audio this browser can't decode → silent picture.
+  // `nativeAudioBadRef`: the file's own default track is undecodable, so any
+  // other track must go through the client-side remux (never the VPS).
+  const nativeAudioBadRef = useRef(false);
+  const audioCodecCheckedRef = useRef(false);
+  const [audioNotice, setAudioNotice] = useState(false);
+  const audioNoticeTimer = useRef(null);
+  const switchContainerAudioRef = useRef(null);
   // Netflix-style "next episode" card near the end of a series episode.
   const [nextUp, setNextUp] = useState(null); // { title, secs } | null
   const nextEpRef = useRef(null); // cached next episode payload
@@ -372,8 +383,13 @@ export default function Player() {
     }
 
     const preferred = pickPreferredContainerAudioId(containerAudioRef.current);
-    // Default / preferred track → native demux (no remux tax).
-    if (trackId === preferred) {
+    // Default / preferred track → native demux (no remux tax). When the file's
+    // own default track is Dolby the browser can't decode, only THAT track is
+    // "native"; every other track is remuxed so it actually has sound.
+    const nativeId = nativeAudioTrack(containerAudioRef.current)?.id;
+    const goNative = nativeAudioBadRef.current ? trackId === nativeId : trackId === preferred;
+    if (goNative) {
+      if (nativeAudioBadRef.current) showAudioNotice();
       resumeAtRef.current = abs;
       allowAttachRef.current = true;
       containerAudioIdRef.current = trackId;
@@ -413,6 +429,8 @@ export default function Player() {
     }, 1500);
     return true;
   };
+
+  switchContainerAudioRef.current = switchContainerAudio;
 
   const cycleAudio = () => {
     const snap = refreshTracks();
@@ -495,8 +513,65 @@ export default function Player() {
     setIntroDone(false);
     containerAudioRef.current = [];
     containerAudioIdRef.current = null;
+    nativeAudioBadRef.current = false;
+    audioCodecCheckedRef.current = false;
+    setAudioNotice(false);
     stopRemux();
   }, [url, id, type]);
+
+  const showAudioNotice = () => {
+    setAudioNotice(true);
+    if (audioNoticeTimer.current) clearTimeout(audioNoticeTimer.current);
+    audioNoticeTimer.current = window.setTimeout(() => setAudioNotice(false), 20000);
+  };
+  useEffect(() => () => audioNoticeTimer.current && clearTimeout(audioNoticeTimer.current), []);
+
+  // MKV/MP4: the default track is AC3/E-AC3/DTS and this browser has no
+  // decoder → switch to an AAC/MP3/Opus track if the file has one (client-side
+  // remux, like a manual audio change), otherwise tell the viewer why it's mute.
+  const checkContainerAudio = (tracks) => {
+    if (audioCodecCheckedRef.current || !tracks?.length) return;
+    audioCodecCheckedRef.current = true;
+    const native = nativeAudioTrack(tracks);
+    if (!native || !isDolbyAudioCodec(native.codec) || isAudioCodecPlayable(native.codec)) return;
+    nativeAudioBadRef.current = true;
+    const usable = tracks.filter((tr) => tr.id !== native.id && isAudioCodecPlayable(tr.codec));
+    if (!usable.length) {
+      showAudioNotice();
+      return;
+    }
+    const pick = usable[0]; // already sorted by language preference
+    containerAudioIdRef.current = pick.id;
+    switchContainerAudioRef.current?.(pick.id).then((okSwitch) => {
+      if (okSwitch) showTrackBanner(`${t('player.audio')}: ${pick.label}`);
+      refreshTracksRef.current?.();
+    });
+  };
+  const checkContainerAudioRef = useRef(checkContainerAudio);
+  checkContainerAudioRef.current = checkContainerAudio;
+
+  // HLS VOD: hls.js knows each audio rendition's codec.
+  const checkHlsAudio = () => {
+    const hls = playerRef.current && playerRef.current.hls;
+    const list = hls && Array.isArray(hls.audioTracks) ? hls.audioTracks : [];
+    if (!list.length) return false;
+    if (audioCodecCheckedRef.current) return true;
+    audioCodecCheckedRef.current = true;
+    const cur = list[hls.audioTrack] || list[0];
+    if (!cur || isAudioCodecPlayable(cur.audioCodec)) return true;
+    const idx = list.findIndex((tr) => isAudioCodecPlayable(tr.audioCodec));
+    if (idx >= 0) {
+      try {
+        hls.audioTrack = idx;
+        showTrackBanner(`${t('player.audio')}: ${list[idx].name || list[idx].lang || idx + 1}`);
+      } catch {
+        showAudioNotice();
+      }
+    } else showAudioNotice();
+    return true;
+  };
+  const checkHlsAudioRef = useRef(checkHlsAudio);
+  checkHlsAudioRef.current = checkHlsAudio;
 
   // Probe MKV/MP4 dual-audio tracks once playback has a real src (Chromium hides audioTracks).
   useEffect(() => {
@@ -505,6 +580,8 @@ export default function Player() {
     const run = async () => {
       const src = videoRef.current?.currentSrc || playUrlRef.current || '';
       if (!src) return;
+      if (checkHlsAudioRef.current?.()) return;
+      if (containerAudioRef.current.length && audioCodecCheckedRef.current) return;
       const tracks = await probeContainerAudioTracks(src);
       if (cancelled || !tracks.length) return;
       containerAudioRef.current = tracks;
@@ -512,6 +589,7 @@ export default function Player() {
         containerAudioIdRef.current = pickPreferredContainerAudioId(tracks);
       }
       refreshTracksRef.current?.();
+      checkContainerAudioRef.current?.(tracks);
     };
     const t1 = window.setTimeout(run, 600);
     const t2 = window.setTimeout(run, 2500);
@@ -1801,6 +1879,12 @@ export default function Player() {
       if (p && typeof p.catch === 'function') {
         p.catch((err) => {
           if (err && err.name === 'AbortError') return;
+          // "No supported sources" = THIS route answered something unplayable
+          // (e.g. a Cloudflare 403 page from an https panel host). The player
+          // controller moves on to the next route (relay over http, direct…)
+          // and reports the real failure itself once every route failed —
+          // tearing everything down here skipped those fallbacks.
+          if (err && err.name === 'NotSupportedError') return;
           if (err && err.name === 'NotAllowedError') {
             // Autoplay with sound blocked (direct link to /player, strict
             // browser policy, or transient activation expired by the async
@@ -1816,10 +1900,23 @@ export default function Player() {
         });
       }
     };
-    const onCanPlay = () => safePlay();
+    // Live channels: hold the first play() until ~3 s are buffered (max ~4 s
+    // extra) so the start doesn't stutter; VOD/catch-up keep the fast start.
+    let startGateOpen = !(isLivePlayback && !startPosition);
+    const gatedPlay = () => {
+      if (startGateOpen) safePlay();
+    };
+    if (!startGateOpen) {
+      whenStartBuffered(video).then(() => {
+        if (playerRef.current !== player) return;
+        startGateOpen = true;
+        safePlay();
+      });
+    }
+    const onCanPlay = () => gatedPlay();
     video.addEventListener('canplay', onCanPlay);
     video.addEventListener('loadedmetadata', onCanPlay);
-    safePlay();
+    gatedPlay();
 
     const wake = wakeLockController();
     wake.request();
@@ -2381,6 +2478,13 @@ export default function Player() {
           )}
         </div>
       )}
+
+      {audioNotice && isVodLike && !leaveOpen ? (
+        <div className="audio-notice" role="status" aria-live="polite">
+          <strong>{t('player.dolbyAudio')}</strong>
+          <span>{t('player.dolbyAudioHint')}</span>
+        </div>
+      ) : null}
 
       {showSkipIntro && !controlsVisible && !nextUp && !leaveOpen ? (
         <button

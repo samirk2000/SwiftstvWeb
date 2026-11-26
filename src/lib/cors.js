@@ -21,6 +21,7 @@
 // uses its own dynamic proxy + Referer/Origin headers.
 
 import { STREAM_PROXY_URLS } from './proxy.js';
+import { httpVariant, isChallengePage, markHttpRelay, prefersHttpRelay } from './relayHosts.js';
 
 const SDK =
   (globalThis.location && location.origin) ||
@@ -67,11 +68,46 @@ export function proxyUrl(targetUrl, opts = {}) {
   return u.toString();
 }
 
+/**
+ * Read a response body as text, reporting download progress when asked.
+ * `total` is Content-Length when the server exposes it (0 = unknown; if the
+ * body turns out larger — gzip — the total is dropped and only bytes count).
+ */
+export async function readText(res, onProgress) {
+  if (typeof onProgress !== 'function' || !res.body || typeof res.body.getReader !== 'function') {
+    return res.text();
+  }
+  let total = Number(res.headers && res.headers.get && res.headers.get('content-length')) || 0;
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let loaded = 0;
+  let out = '';
+  let lastTick = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    loaded += value.byteLength;
+    out += decoder.decode(value, { stream: true });
+    if (total && loaded > total) total = 0;
+    const now = Date.now();
+    if (now - lastTick > 250) {
+      lastTick = now;
+      try {
+        onProgress(loaded, total);
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+  out += decoder.decode();
+  return out;
+}
+
 /** GET through the CORS proxy (text). Returns {ok,status,text}. */
 export async function proxiedGet(targetUrl, opts = {}, fetchImpl = fetch, signal) {
   try {
     const res = await fetchImpl(proxyUrl(targetUrl, opts), { signal });
-    const text = await res.text();
+    const text = await readText(res, opts.onProgress);
     dbg('proxy', targetUrl, '->', res.status, snippet(text));
     return { status: res.status, ok: res.ok, text };
   } catch (err) {
@@ -143,12 +179,12 @@ function vpsBase() {
 }
 
 /** GET through the Hetzner VPS /stream proxy (reaches panels that 403 Cloudflare). */
-export async function vpsGet(targetUrl, fetchImpl = fetch, signal) {
+export async function vpsGet(targetUrl, fetchImpl = fetch, signal, onProgress) {
   const base = vpsBase();
   if (!base) return { status: 0, ok: false, text: '' };
   try {
     const res = await fetchImpl(`${base}?target=${encodeURIComponent(targetUrl)}`, { signal });
-    const text = await res.text();
+    const text = await readText(res, res.ok ? onProgress : undefined);
     dbg('vps', targetUrl, '->', res.status, snippet(text));
     return { status: res.status, ok: res.ok, text };
   } catch (err) {
@@ -226,7 +262,7 @@ export async function corsFetch(targetUrl, opts = {}, fetchImpl = fetch, signal)
         try {
           const direct = await tryDirect(candidates, opts, fetchImpl, sig);
           if (direct && direct.ok) {
-            const text = await direct.text();
+            const text = await readText(direct, opts.onProgress);
             hostRoute.set(host, 'direct');
             return { ok: true, status: direct.status, text, via: 'direct', url: direct.url || candidates[0] };
           }
@@ -236,12 +272,30 @@ export async function corsFetch(targetUrl, opts = {}, fetchImpl = fetch, signal)
         }
       } else if (route === 'vps') {
         if (!vpsBase()) continue;
-        const v = await vpsGet(targetUrl, fetchImpl, sig);
-        if (v.ok) {
-          hostRoute.set(host, 'vps');
-          return { ...v, via: 'vps', url: targetUrl };
+        // HTTPS behind a Cloudflare challenge (cavctv.xyz…): the relay gets a
+        // 403 "Just a moment…" page, but the panel's plain-HTTP origin answers.
+        // Known hosts go straight to http://; others fall back to it once.
+        const alt = httpVariant(targetUrl);
+        const order = alt && prefersHttpRelay(targetUrl) ? [alt, targetUrl] : [targetUrl];
+        let done = false;
+        for (let i = 0; i < order.length && !done; i += 1) {
+          if (sig && sig.aborted) break;
+          const v = await vpsGet(order[i], fetchImpl, sig, opts.onProgress);
+          if (v.ok && !isChallengePage(v.status, v.text)) {
+            hostRoute.set(host, 'vps');
+            return { ...v, via: 'vps', url: targetUrl };
+          }
+          if (alt && order[i] === targetUrl && order.length === 1 && isChallengePage(v.status, v.text)) {
+            const h = await vpsGet(alt, fetchImpl, sig, opts.onProgress);
+            if (h.ok && !isChallengePage(h.status, h.text)) {
+              markHttpRelay(targetUrl);
+              hostRoute.set(host, 'vps');
+              return { ...h, via: 'vps', url: targetUrl };
+            }
+            if (h.status) last = { ...h, via: 'vps' };
+            done = true;
+          } else if (v.status) last = { ...v, via: 'vps' };
         }
-        if (v.status) last = { ...v, via: 'vps' };
       } else {
         dbg('falling back to /proxy', targetUrl);
         const p = await proxiedGet(targetUrl, opts, fetchImpl, sig);

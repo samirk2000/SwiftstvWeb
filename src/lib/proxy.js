@@ -1,3 +1,4 @@
+import { httpVariant, prefersHttpRelay } from './relayHosts.js';
 // External stream proxy configuration (optional but recommended).
 //
 // The Xtream panels 302 their live/VOD/series manifests to an `http://` CDN IP
@@ -103,6 +104,21 @@ export function streamProxyCandidates(mediaUrl, opts = {}) {
       candidates.push(`${b}?target=${enc}`);
     }
     return dedupe(candidates);
+  }
+  // VOD / series only (never live): an HTTPS panel host behind a Cloudflare
+  // challenge 403s the relay, so also offer the relay with the plain-HTTP
+  // origin — first when we already know the host needs it, otherwise right
+  // after the HTTPS attempt. The relay still passes Range/206 straight through.
+  const isVodRoute = /\/\/[^/]+\/(?:movie|series)\//i.test(target);
+  const httpAlt = !continuous && isVodRoute ? httpVariant(target) : '';
+  if (vps && httpAlt) {
+    let b = vps.replace(/\/+$/, '').trim();
+    if (!/^https?:\/\//i.test(b)) b = `https://${b}`;
+    else if (b.startsWith('http://')) b = `https://${b.slice('http://'.length)}`;
+    const viaHttp = `${b}?target=${encodeURIComponent(httpAlt)}`;
+    const viaHttps = `${b}?target=${enc}`;
+    if (prefersHttpRelay(target)) candidates.push(viaHttp, viaHttps);
+    else candidates.push(viaHttps, viaHttp);
   }
   for (const base of [vps, ...rest]) {
     if (!base) continue;
